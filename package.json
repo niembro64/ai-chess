@@ -10,6 +10,8 @@
     "preview": "vite preview --host"
   },
   "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-backend-webgpu": "^4.22.0",
     "peerjs": "^1.5.5",
     "vue": "^3.4.21"
   },

@@ -9,4 +9,10 @@ export default defineConfig({
       '@': resolve(__dirname, 'src'),
     },
   },
+  // TensorFlow.js requires eval() for WebGL shader compilation
+  server: {
+    headers: {
+      'Content-Security-Policy': "script-src 'self' 'unsafe-eval'; worker-src 'self' blob:",
+    },
+  },
 });

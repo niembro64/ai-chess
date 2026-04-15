@@ -18,6 +18,7 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
+  (e: 'playAi'): void;
 }>();
 
 const joinCode = ref('');
@@ -104,6 +105,8 @@ const canJoin = computed(() => {
               @click="handleJoinSubmit"
             >Join</button>
           </div>
+
+          <button class="lobby-btn ai-btn" @click="emit('playAi')">Play vs AI</button>
         </div>
 
         <div v-if="error" class="error-message">{{ error }}</div>
@@ -257,6 +260,16 @@ const canJoin = computed(() => {
 
 .host-btn:hover:not(:disabled) {
   background: #55cc55;
+}
+
+.ai-btn {
+  background: #9944cc;
+  color: white;
+  width: 100%;
+}
+
+.ai-btn:hover:not(:disabled) {
+  background: #aa55dd;
 }
 
 .join-btn {

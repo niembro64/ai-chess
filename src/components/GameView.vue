@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onUnmounted } from 'vue';
 import type { PlayerId, Move, ChessGameState, PieceColor } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
 import type { NetworkGameSnapshot, LobbyPlayer, NetworkRole } from '@/types/network';
@@ -9,6 +9,7 @@ import { networkManager } from '@/game/network/NetworkManager';
 import { ChessServer } from '@/game/server/ChessServer';
 import { LocalGameConnection } from '@/game/server/LocalGameConnection';
 import { RemoteGameConnection } from '@/game/server/RemoteGameConnection';
+import { AIPlayer } from '@/game/ai/AIPlayer';
 import LobbyModal from './LobbyModal.vue';
 import ChessBoard from './ChessBoard.vue';
 
@@ -31,6 +32,12 @@ const drawOffer = ref<PlayerId | null>(null);
 let currentServer: ChessServer | null = null;
 let activeConnection: GameConnection | null = null;
 
+// AI opponent
+let aiPlayer: AIPlayer | null = null;
+const playingVsAi = ref(false);
+const aiThinking = ref(false);
+const aiModelStatus = ref<'none' | 'trained' | 'untrained'>('none');
+
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
 const isMyTurn = computed(() => gameState.value.currentTurn === localColor.value);
@@ -46,12 +53,15 @@ const statusText = computed(() => {
     case 'waiting':
       return 'Waiting to start...';
     case 'active':
+      if (playingVsAi.value && !isMyTurn.value) {
+        return aiThinking.value ? 'AI is thinking...' : "AI's turn";
+      }
       return isMyTurn.value ? 'Your turn' : "Opponent's turn";
     case 'check':
       return isMyTurn.value ? 'You are in check!' : 'Opponent is in check';
     case 'checkmate':
       if (gs.winner === localColor.value) return 'Checkmate - You win!';
-      return 'Checkmate - You lose';
+      return playingVsAi.value ? 'Checkmate - AI wins' : 'Checkmate - You lose';
     case 'stalemate':
       return 'Stalemate - Draw';
     case 'draw':
@@ -63,7 +73,8 @@ const statusText = computed(() => {
 
 const turnIndicator = computed(() => {
   if (isGameOver.value) return '';
-  return gameState.value.currentTurn === 'white' ? 'White to move' : 'Black to move';
+  const extra = playingVsAi.value ? ` (${aiModelStatus.value === 'trained' ? 'trained model' : 'random model'})` : '';
+  return (gameState.value.currentTurn === 'white' ? 'White to move' : 'Black to move') + extra;
 });
 
 const moveHistoryDisplay = computed(() => {
@@ -85,7 +96,29 @@ function formatMove(move: Move): string {
   return `${from}${to}${promo}`;
 }
 
-// Lobby handlers
+// --- AI move scheduling ---
+
+function scheduleAiMove(): void {
+  if (!playingVsAi.value || !currentServer || !aiPlayer) return;
+  if (isGameOver.value) return;
+  if (gameState.value.currentTurn === localColor.value) return; // Human's turn
+
+  aiThinking.value = true;
+  // Use setTimeout so the UI updates before AI starts computing
+  setTimeout(() => {
+    if (!aiPlayer || !currentServer || isGameOver.value) {
+      aiThinking.value = false;
+      return;
+    }
+    const move = aiPlayer.getMove(gameState.value);
+    aiThinking.value = false;
+    // Send AI's move as player 2
+    currentServer.receiveCommand({ type: 'move', move }, 2);
+  }, 50);
+}
+
+// --- Lobby handlers ---
+
 async function handleHost(): Promise<void> {
   try {
     isConnecting.value = true;
@@ -127,6 +160,28 @@ async function handleJoin(code: string): Promise<void> {
     lobbyError.value = (err as Error).message || 'Failed to join game';
     isConnecting.value = false;
   }
+}
+
+async function handlePlayAi(): Promise<void> {
+  isConnecting.value = true;
+  lobbyError.value = null;
+
+  // Try to load a trained model; fall back to untrained (random)
+  const trained = await AIPlayer.create(50);
+  if (trained) {
+    aiPlayer = trained;
+    aiModelStatus.value = 'trained';
+  } else {
+    aiPlayer = AIPlayer.createUntrained(25);
+    aiModelStatus.value = 'untrained';
+  }
+
+  playingVsAi.value = true;
+  networkRole.value = null;
+  localPlayerId.value = 1;
+  isConnecting.value = false;
+
+  startGameWithPlayers([1, 2]);
 }
 
 function handleLobbyStart(): void {
@@ -173,26 +228,24 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
   gameStarted.value = true;
 
   if (networkRole.value !== 'client') {
-    // Create ChessServer for host
     currentServer = new ChessServer();
-
-    // Create LocalGameConnection for the host client
     const localConnection = new LocalGameConnection(currentServer);
     activeConnection = localConnection;
 
-    // Wire up snapshot listener for the host's own UI
     localConnection.onSnapshot((snapshot: NetworkGameSnapshot) => {
       gameState.value = snapshot.gameState;
       drawOffer.value = snapshot.drawOffer;
+
+      // If playing vs AI and it's AI's turn, schedule its move
+      if (playingVsAi.value) {
+        scheduleAiMove();
+      }
     });
 
-    // If hosting, also broadcast snapshots to remote clients
     if (networkRole.value === 'host') {
       currentServer.addSnapshotListener((state: NetworkGameSnapshot) => {
         networkManager.broadcastState(state);
       });
-
-      // Receive commands from remote clients
       networkManager.onCommandReceived = (command, fromPlayerId) => {
         currentServer?.receiveCommand(command, fromPlayerId as PlayerId);
       };
@@ -200,17 +253,14 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
 
     currentServer.start();
   } else {
-    // Client: create RemoteGameConnection wrapping networkManager
     const remoteConnection = new RemoteGameConnection();
     activeConnection = remoteConnection;
-
     remoteConnection.onSnapshot((snapshot: NetworkGameSnapshot) => {
       gameState.value = snapshot.gameState;
       drawOffer.value = snapshot.drawOffer;
     });
   }
 
-  // Ensure we use all player IDs (TypeScript wants us to reference the param)
   console.log('Game started with players:', playerIds);
 }
 
@@ -242,25 +292,37 @@ function handleDeclineDraw(): void {
 }
 
 function returnToLobby(): void {
-  // Cleanup
   if (currentServer) {
     currentServer.stop();
     currentServer = null;
+  }
+  if (aiPlayer) {
+    aiPlayer.dispose();
+    aiPlayer = null;
   }
   activeConnection?.disconnect();
   activeConnection = null;
   networkManager.disconnect();
 
-  // Reset state
   gameStarted.value = false;
   showLobby.value = true;
   networkRole.value = null;
+  playingVsAi.value = false;
+  aiThinking.value = false;
+  aiModelStatus.value = 'none';
   lobbyPlayers.value = [];
   roomCode.value = '';
   isHost.value = false;
   gameState.value = createInitialGameState();
   drawOffer.value = null;
 }
+
+onUnmounted(() => {
+  if (aiPlayer) {
+    aiPlayer.dispose();
+    aiPlayer = null;
+  }
+});
 </script>
 
 <template>
@@ -278,6 +340,7 @@ function returnToLobby(): void {
       @join="handleJoin"
       @start="handleLobbyStart"
       @cancel="handleLobbyCancel"
+      @play-ai="handlePlayAi"
     />
 
     <!-- Game UI (visible when game started) -->
@@ -362,12 +425,18 @@ function returnToLobby(): void {
           </div>
           <div class="game-info-content">
             <div class="info-row">
+              <span class="info-label">Mode:</span>
+              <span class="info-value">{{ playingVsAi ? 'vs AI' : networkRole === 'host' ? 'Host' : networkRole === 'client' ? 'Client' : 'Local' }}</span>
+            </div>
+            <div v-if="playingVsAi" class="info-row">
+              <span class="info-label">AI Model:</span>
+              <span class="info-value" :class="{ 'ai-trained': aiModelStatus === 'trained', 'ai-untrained': aiModelStatus === 'untrained' }">
+                {{ aiModelStatus === 'trained' ? 'Trained' : 'Random' }}
+              </span>
+            </div>
+            <div v-if="!playingVsAi && roomCode" class="info-row">
               <span class="info-label">Room:</span>
               <span class="info-value">{{ roomCode }}</span>
-            </div>
-            <div class="info-row">
-              <span class="info-label">Role:</span>
-              <span class="info-value">{{ networkRole === 'host' ? 'Host' : 'Client' }}</span>
             </div>
             <div class="info-row">
               <span class="info-label">Move #:</span>
@@ -620,6 +689,15 @@ function returnToLobby(): void {
   font-family: monospace;
   font-size: 12px;
   color: #aaa;
+}
+
+.info-value.ai-trained {
+  color: #44aa44;
+  font-weight: bold;
+}
+
+.info-value.ai-untrained {
+  color: #cc8844;
 }
 
 .empty-bg {
