@@ -136,7 +136,7 @@ export const DEFAULT_CONFIG: TrainerConfig = {
   gradientStepsPerTrain: 8,
   numResBlocks: 1,
   numFilters: 16,
-  maxGameMoves: 100,
+  maxGameMoves: 150,
   rewardShaping: 0.3,
 };
 
@@ -155,7 +155,12 @@ type GameSlot = {
   moveCount: number;
 };
 
-// --- Random starting position generators ---
+// --- Starting position generators ---
+
+function normalStartingPosition(): ChessGameState {
+  const state = createInitialGameState();
+  return { ...state, status: 'active' };
+}
 
 function randomStartingPosition(): ChessGameState {
   // Mix of opening (40%), midgame (30%), late game (30%)
@@ -169,17 +174,14 @@ function randomStartingPosition(): ChessGameState {
     numRandom = 30 + Math.floor(Math.random() * 21); // 30-50 moves (late game)
   }
 
-  let state = createInitialGameState();
-  state = { ...state, status: 'active' };
+  let state = normalStartingPosition();
 
   for (let i = 0; i < numRandom; i++) {
     const moves = getLegalMoves(state);
     if (moves.length === 0) break;
     state = applyMove(state, moves[Math.floor(Math.random() * moves.length)]);
     if (state.status === 'checkmate' || state.status === 'stalemate' || state.status === 'draw') {
-      // Hit a terminal state during random play. Restart.
-      state = createInitialGameState();
-      state = { ...state, status: 'active' };
+      state = normalStartingPosition();
       break;
     }
   }
@@ -211,6 +213,7 @@ export class Trainer {
   private startTime = 0;
   private log: LogEntry[] = [];
   private completedGames: CompletedGameSnapshot[] = [];
+  private nextGameRandom = false; // Alternates: false=normal, true=random
 
   public onStatsUpdate?: (stats: TrainingStats) => void;
 
@@ -283,8 +286,10 @@ export class Trainer {
     }
 
     this.games = [];
+    this.nextGameRandom = false;
     for (let i = 0; i < this.config.numConcurrentGames; i++) {
-      this.games.push(this.createGameSlot());
+      // Alternate: even index = normal, odd index = random
+      this.games.push(this.createGameSlot(i % 2 === 1));
     }
     this.addLog(`${this.config.numConcurrentGames} games, ${this.config.mctsSimulations} MCTS sims, batched predict`);
     this.emitStats();
@@ -335,8 +340,14 @@ export class Trainer {
     }
   }
 
-  private createGameSlot(): GameSlot {
-    return { state: randomStartingPosition(), examples: [], moveCount: 0 };
+  private createGameSlot(useRandom?: boolean): GameSlot {
+    // If caller specifies, use that. Otherwise alternate.
+    const random = useRandom ?? this.nextGameRandom;
+    if (useRandom === undefined) {
+      this.nextGameRandom = !this.nextGameRandom;
+    }
+    const state = random ? randomStartingPosition() : normalStartingPosition();
+    return { state, examples: [], moveCount: 0 };
   }
 
   // Main loop: advance ALL games by one move using batched MCTS, then check for completions
@@ -390,7 +401,7 @@ export class Trainer {
         slot.state = applyMove(slot.state, move);
         slot.moveCount++;
 
-        // Check game end
+        // Check game end (cap prevents shuffling games from hogging slots)
         const isOver =
           slot.state.status === 'checkmate' ||
           slot.state.status === 'stalemate' ||
@@ -415,7 +426,7 @@ export class Trainer {
   }
 
   private finishGame(slot: GameSlot): void {
-    const hitMoveCap = slot.moveCount >= this.config.maxGameMoves &&
+    const hitCap = slot.moveCount >= this.config.maxGameMoves &&
       slot.state.status !== 'checkmate' &&
       slot.state.status !== 'stalemate' &&
       slot.state.status !== 'draw';
@@ -424,19 +435,16 @@ export class Trainer {
     let outcomeLabel: string;
 
     if (slot.state.status === 'checkmate' && slot.state.winner) {
-      // Decisive result
       whiteOutcome = slot.state.winner === 'white' ? 1 : -1;
       if (slot.state.winner === 'white') this.whiteWins++; else this.blackWins++;
       outcomeLabel = `${slot.state.winner} wins`;
-    } else if (hitMoveCap) {
-      // Move cap reached: use final material advantage as the outcome
-      // so the network doesn't learn "being up a queen = draw"
+    } else if (hitCap) {
+      // Capped: use material advantage so we don't mislabel a winning position as a draw
       const matAdv = materialAdvantage(slot.state, 'white');
-      whiteOutcome = Math.max(-1, Math.min(1, matAdv * 3)); // Scale up so material lead reads as a win
+      whiteOutcome = Math.max(-1, Math.min(1, matAdv * 3));
       this.draws++;
-      outcomeLabel = `cap (mat=${matAdv > 0 ? '+' : ''}${(matAdv * 39).toFixed(0)})`;
+      outcomeLabel = `cap (${(matAdv * 39) >= 0 ? '+' : ''}${(matAdv * 39).toFixed(0)})`;
     } else {
-      // Real draw (stalemate, 50-move rule, etc.)
       whiteOutcome = 0;
       this.draws++;
       outcomeLabel = slot.state.status === 'stalemate' ? 'stalemate' : 'draw';

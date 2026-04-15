@@ -51,26 +51,74 @@ onUnmounted(() => {
 });
 
 // Chart
-const chartWidth = 500;
-const chartHeight = 140;
+// Chart dimensions (content area, excluding margins)
+const chartMargin = { top: 8, right: 12, bottom: 20, left: 45 };
+const chartTotalWidth = 480;
+const chartTotalHeight = 130;
+const chartW = chartTotalWidth - chartMargin.left - chartMargin.right;
+const chartH = chartTotalHeight - chartMargin.top - chartMargin.bottom;
 
-function buildChartPoints(key: 'policy' | 'value' | 'total'): string {
+type ChartData = {
+  points: string;
+  yMin: number;
+  yMax: number;
+  yTicks: number[];
+  xTicks: { x: number; label: string }[];
+};
+
+function buildChart(key: 'policy' | 'value' | 'total'): ChartData | null {
   const history = stats.value?.lossHistory ?? [];
-  if (history.length < 2) return '';
+  if (history.length < 2) return null;
+
   const vals = history.map(h => h[key]);
-  const maxVal = Math.max(...vals, 0.01);
-  const minVal = Math.min(...vals, 0);
-  const range = maxVal - minVal || 1;
-  return history.map((h, i) => {
-    const x = (i / (history.length - 1)) * chartWidth;
-    const y = chartHeight - ((h[key] - minVal) / range) * (chartHeight - 10) - 5;
+  let rawMin = Math.min(...vals);
+  let rawMax = Math.max(...vals);
+  // Add 5% padding
+  const pad = (rawMax - rawMin) * 0.05 || 0.001;
+  const yMin = Math.max(0, rawMin - pad);
+  const yMax = rawMax + pad;
+  const yRange = yMax - yMin || 1;
+
+  const points = history.map((h, i) => {
+    const x = chartMargin.left + (i / (history.length - 1)) * chartW;
+    const y = chartMargin.top + chartH - ((h[key] - yMin) / yRange) * chartH;
     return `${x},${y}`;
   }).join(' ');
+
+  // Generate ~4 Y-axis ticks
+  const yTicks: number[] = [];
+  const step = yRange / 4;
+  for (let i = 0; i <= 4; i++) {
+    yTicks.push(yMin + step * i);
+  }
+
+  // X-axis ticks (generation numbers)
+  const xTicks: { x: number; label: string }[] = [];
+  const totalGens = history.length;
+  const firstGen = history[0].gen;
+  const lastGen = history[totalGens - 1].gen;
+  const genStep = Math.max(1, Math.floor((lastGen - firstGen) / 5));
+  for (let g = firstGen; g <= lastGen; g += genStep) {
+    const idx = history.findIndex(h => h.gen >= g);
+    if (idx >= 0) {
+      const x = chartMargin.left + (idx / (totalGens - 1)) * chartW;
+      xTicks.push({ x, label: String(g) });
+    }
+  }
+
+  return { points, yMin, yMax, yTicks, xTicks };
 }
 
-const policyChartPoints = computed(() => buildChartPoints('policy'));
-const valueChartPoints = computed(() => buildChartPoints('value'));
-const totalChartPoints = computed(() => buildChartPoints('total'));
+const policyChart = computed(() => buildChart('policy'));
+const valueChart = computed(() => buildChart('value'));
+const totalChart = computed(() => buildChart('total'));
+
+function fmtTick(n: number): string {
+  if (n >= 10) return n.toFixed(0);
+  if (n >= 1) return n.toFixed(1);
+  if (n >= 0.01) return n.toFixed(2);
+  return n.toFixed(3);
+}
 
 function fmt(n: number, decimals = 2): string { return n.toFixed(decimals); }
 function fmtTime(ms: number): string {
@@ -163,8 +211,6 @@ const reversedCompletedGames = computed(() => {
             <input id="cfg-blocks" type="number" v-model.number="config.numResBlocks" :disabled="configLocked" min="1" max="10" />
             <label for="cfg-filters">Filters</label>
             <input id="cfg-filters" type="number" v-model.number="config.numFilters" :disabled="configLocked" min="8" max="128" />
-            <label for="cfg-maxmoves">Max Moves</label>
-            <input id="cfg-maxmoves" type="number" v-model.number="config.maxGameMoves" :disabled="configLocked" min="30" max="300" />
             <label for="cfg-shaping">Reward Shape</label>
             <input id="cfg-shaping" type="range" v-model.number="config.rewardShaping" :disabled="configLocked" min="0" max="1" step="0.05" />
           </div>
@@ -207,17 +253,82 @@ const reversedCompletedGames = computed(() => {
               </div>
             </div>
 
-            <!-- Chart -->
-            <div v-if="stats.lossHistory.length >= 2" class="chart-section">
-              <svg class="loss-chart" :viewBox="`0 0 ${chartWidth} ${chartHeight}`" preserveAspectRatio="none">
-                <polyline :points="policyChartPoints" fill="none" stroke="#4a9eff" stroke-width="1.5" />
-                <polyline :points="valueChartPoints" fill="none" stroke="#44aa44" stroke-width="1.5" />
-                <polyline :points="totalChartPoints" fill="none" stroke="#ffaa00" stroke-width="1.5" />
-              </svg>
-              <div class="chart-legend">
-                <span style="color:#4a9eff">Move Prediction</span>
-                <span style="color:#44aa44">Board Evaluation</span>
-                <span style="color:#ffaa00">Combined</span>
+            <!-- Charts: separate Y-axes so both lines are visible -->
+            <div v-if="stats.lossHistory.length >= 2" class="charts-row">
+              <!-- Move Prediction chart -->
+              <div v-if="policyChart" class="chart-box">
+                <div class="chart-title" style="color:#4a9eff">Move Prediction</div>
+                <svg class="loss-chart" :viewBox="`0 0 ${chartTotalWidth} ${chartTotalHeight}`">
+                  <!-- Grid lines -->
+                  <line v-for="(tick, i) in policyChart.yTicks" :key="'pg'+i"
+                    :x1="chartMargin.left" :x2="chartMargin.left + chartW"
+                    :y1="chartMargin.top + chartH - ((tick - policyChart.yMin) / (policyChart.yMax - policyChart.yMin)) * chartH"
+                    :y2="chartMargin.top + chartH - ((tick - policyChart.yMin) / (policyChart.yMax - policyChart.yMin)) * chartH"
+                    stroke="#2a2a3e" stroke-width="0.5" />
+                  <!-- Y-axis labels -->
+                  <text v-for="(tick, i) in policyChart.yTicks" :key="'py'+i"
+                    :x="chartMargin.left - 4"
+                    :y="chartMargin.top + chartH - ((tick - policyChart.yMin) / (policyChart.yMax - policyChart.yMin)) * chartH + 3"
+                    fill="#666" font-size="9" font-family="monospace" text-anchor="end">{{ fmtTick(tick) }}</text>
+                  <!-- X-axis labels -->
+                  <text v-for="(tick, i) in policyChart.xTicks" :key="'px'+i"
+                    :x="tick.x" :y="chartTotalHeight - 3"
+                    fill="#555" font-size="8" font-family="monospace" text-anchor="middle">{{ tick.label }}</text>
+                  <!-- Axes -->
+                  <line :x1="chartMargin.left" :x2="chartMargin.left" :y1="chartMargin.top" :y2="chartMargin.top + chartH" stroke="#444" stroke-width="1" />
+                  <line :x1="chartMargin.left" :x2="chartMargin.left + chartW" :y1="chartMargin.top + chartH" :y2="chartMargin.top + chartH" stroke="#444" stroke-width="1" />
+                  <!-- Data line -->
+                  <polyline :points="policyChart.points" fill="none" stroke="#4a9eff" stroke-width="1.5" />
+                </svg>
+              </div>
+
+              <!-- Board Evaluation chart -->
+              <div v-if="valueChart" class="chart-box">
+                <div class="chart-title" style="color:#44aa44">Board Evaluation</div>
+                <svg class="loss-chart" :viewBox="`0 0 ${chartTotalWidth} ${chartTotalHeight}`">
+                  <!-- Grid lines -->
+                  <line v-for="(tick, i) in valueChart.yTicks" :key="'vg'+i"
+                    :x1="chartMargin.left" :x2="chartMargin.left + chartW"
+                    :y1="chartMargin.top + chartH - ((tick - valueChart.yMin) / (valueChart.yMax - valueChart.yMin)) * chartH"
+                    :y2="chartMargin.top + chartH - ((tick - valueChart.yMin) / (valueChart.yMax - valueChart.yMin)) * chartH"
+                    stroke="#2a2a3e" stroke-width="0.5" />
+                  <!-- Y-axis labels -->
+                  <text v-for="(tick, i) in valueChart.yTicks" :key="'vy'+i"
+                    :x="chartMargin.left - 4"
+                    :y="chartMargin.top + chartH - ((tick - valueChart.yMin) / (valueChart.yMax - valueChart.yMin)) * chartH + 3"
+                    fill="#666" font-size="9" font-family="monospace" text-anchor="end">{{ fmtTick(tick) }}</text>
+                  <!-- X-axis labels -->
+                  <text v-for="(tick, i) in valueChart.xTicks" :key="'vx'+i"
+                    :x="tick.x" :y="chartTotalHeight - 3"
+                    fill="#555" font-size="8" font-family="monospace" text-anchor="middle">{{ tick.label }}</text>
+                  <!-- Axes -->
+                  <line :x1="chartMargin.left" :x2="chartMargin.left" :y1="chartMargin.top" :y2="chartMargin.top + chartH" stroke="#444" stroke-width="1" />
+                  <line :x1="chartMargin.left" :x2="chartMargin.left + chartW" :y1="chartMargin.top + chartH" :y2="chartMargin.top + chartH" stroke="#444" stroke-width="1" />
+                  <!-- Data line -->
+                  <polyline :points="valueChart.points" fill="none" stroke="#44aa44" stroke-width="1.5" />
+                </svg>
+              </div>
+
+              <!-- Combined chart -->
+              <div v-if="totalChart" class="chart-box">
+                <div class="chart-title" style="color:#ffaa00">Combined</div>
+                <svg class="loss-chart" :viewBox="`0 0 ${chartTotalWidth} ${chartTotalHeight}`">
+                  <line v-for="(tick, i) in totalChart.yTicks" :key="'tg'+i"
+                    :x1="chartMargin.left" :x2="chartMargin.left + chartW"
+                    :y1="chartMargin.top + chartH - ((tick - totalChart.yMin) / (totalChart.yMax - totalChart.yMin)) * chartH"
+                    :y2="chartMargin.top + chartH - ((tick - totalChart.yMin) / (totalChart.yMax - totalChart.yMin)) * chartH"
+                    stroke="#2a2a3e" stroke-width="0.5" />
+                  <text v-for="(tick, i) in totalChart.yTicks" :key="'ty'+i"
+                    :x="chartMargin.left - 4"
+                    :y="chartMargin.top + chartH - ((tick - totalChart.yMin) / (totalChart.yMax - totalChart.yMin)) * chartH + 3"
+                    fill="#666" font-size="9" font-family="monospace" text-anchor="end">{{ fmtTick(tick) }}</text>
+                  <text v-for="(tick, i) in totalChart.xTicks" :key="'tx'+i"
+                    :x="tick.x" :y="chartTotalHeight - 3"
+                    fill="#555" font-size="8" font-family="monospace" text-anchor="middle">{{ tick.label }}</text>
+                  <line :x1="chartMargin.left" :x2="chartMargin.left" :y1="chartMargin.top" :y2="chartMargin.top + chartH" stroke="#444" stroke-width="1" />
+                  <line :x1="chartMargin.left" :x2="chartMargin.left + chartW" :y1="chartMargin.top + chartH" :y2="chartMargin.top + chartH" stroke="#444" stroke-width="1" />
+                  <polyline :points="totalChart.points" fill="none" stroke="#ffaa00" stroke-width="1.5" />
+                </svg>
               </div>
             </div>
 
@@ -363,9 +474,10 @@ const reversedCompletedGames = computed(() => {
 .loss-sublabel { font-family: monospace; font-size: 8px; color: #444; }
 .loss-value { font-family: 'Courier New', monospace; font-size: 16px; font-weight: bold; font-variant-numeric: tabular-nums; }
 
-.chart-section { margin-bottom: 12px; }
-.loss-chart { width: 100%; height: 120px; background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.05); border-radius: 4px; }
-.chart-legend { display: flex; gap: 12px; margin-top: 3px; font-family: monospace; font-size: 10px; }
+.charts-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.chart-box { flex: 1; min-width: 200px; }
+.chart-title { font-family: monospace; font-size: 10px; font-weight: bold; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.loss-chart { width: 100%; height: 130px; background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.05); border-radius: 4px; }
 
 .outcome-bar-container { max-width: 350px; margin-bottom: 8px; }
 .outcome-bar { display: flex; height: 18px; border-radius: 3px; overflow: hidden; background: #333; }
