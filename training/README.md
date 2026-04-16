@@ -55,7 +55,9 @@ npm run dump-parity 5000
 # 2. Verify Python ports match TS engine byte-for-byte
 cd training && pytest
 
-# 3. Train (on your CUDA box)
+# 3. Train (on your CUDA box). Run inside tmux so the session survives
+#    disconnections; the dashboard repaints the moment you re-attach.
+tmux new -s train
 python scripts/train.py \
     --num-res-blocks 10 --num-filters 128 \
     --concurrent-games 64 --mcts-sims 50 \
@@ -63,6 +65,8 @@ python scripts/train.py \
     --lr 1e-3 \
     --device cuda \
     --checkpoint-dir runs/v1
+# Detach with Ctrl-b d; re-attach with `tmux a -t train`.
+# Add --no-dashboard if you're redirecting stdout to a log file.
 
 # 4. Ship the weights to the browser preset slot
 python scripts/deploy_to_browser.py runs/v1/latest.json
@@ -70,6 +74,29 @@ python scripts/deploy_to_browser.py runs/v1/latest.json
 # 5. Rebuild the browser app (project root)
 cd .. && npm run build
 ```
+
+## Live training dashboard
+
+When running in a terminal (TTY), `scripts/train.py` paints a Rich-based TUI
+in the current tmux pane:
+
+- `progress` — step, gen, games, games/min, replay size
+- `model` — architecture summary + device + path to the CSV log
+- `outcomes` — cumulative W/B/D counts with percent bars
+- `loss (rolling)` — ASCII line plot of policy/value/total loss over the
+  most recent 500 gradient steps (via `plotext`)
+- `events` — last handful of log messages (checkpoints, etc.)
+
+The same data streams into `<checkpoint_dir>/stats.csv` for offline analysis:
+
+```python
+import pandas as pd
+df = pd.read_csv("runs/v1/stats.csv")
+df.plot(x="step", y=["policy_loss", "value_loss"])
+```
+
+Pass `--no-dashboard` (or redirect stdout to a file) to fall back to plain
+text logging, which is friendlier for `nohup`/systemd-style runs.
 
 ## Parity gates
 

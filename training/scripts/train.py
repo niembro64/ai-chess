@@ -30,6 +30,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from chess_ai.dashboard import DashboardLogger  # noqa: E402
 from chess_ai.model import ChessNet  # noqa: E402
 from chess_ai.train import TrainConfig, Trainer, pick_device  # noqa: E402
 
@@ -63,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", type=str, default=None, help="Path to a .pt checkpoint to resume from.")
+    p.add_argument(
+        "--no-dashboard",
+        dest="dashboard",
+        action="store_false",
+        help="Disable the Rich TUI dashboard; use plain text logging instead.",
+    )
+    p.set_defaults(dashboard=True)
     return p
 
 
@@ -111,7 +119,7 @@ def main() -> None:
         log.info("Resuming from %s", args.resume)
         trainer.load_checkpoint(args.resume)
 
-    def on_step(stats) -> None:
+    def plain_on_step(stats) -> None:
         if stats.step % args.log_every != 0:
             return
         log.info(
@@ -123,16 +131,55 @@ def main() -> None:
             stats.policy_loss, stats.value_loss,
         )
 
-    try:
-        trainer.run(
-            num_steps=args.num_steps,
-            checkpoint_dir=args.checkpoint_dir,
-            on_step=on_step,
-        )
-    except KeyboardInterrupt:
-        log.info("Interrupted — writing final checkpoint")
-        trainer.save_checkpoint(args.checkpoint_dir)
-        log.info("Saved to %s", args.checkpoint_dir)
+    model_summary = (
+        f"blocks={args.num_res_blocks}\n"
+        f"filters={args.num_filters}\n"
+        f"value-head={args.value_head_size}\n"
+        f"se-reduction={args.se_reduction}\n"
+        f"params={param_count / 1e6:.2f}M\n"
+        f"lr={args.lr:.1e}\n"
+        f"games={args.concurrent_games}\n"
+        f"sims={args.mcts_sims}\n"
+        f"batch={args.batch_size}"
+    )
+
+    if args.dashboard:
+        with DashboardLogger(
+            args.checkpoint_dir,
+            model_summary=model_summary,
+            device_summary=str(device),
+            on_log=None,   # Dashboard panel shows events; don't double-log to stdout
+        ) as dash:
+            def dashboard_on_step(stats) -> None:
+                dash.on_step(stats)
+            # Hook checkpoint saves so they show up in the events pane.
+            _orig_save = trainer.save_checkpoint
+            def save_and_log(directory):
+                paths = _orig_save(directory)
+                dash.log(f"checkpoint → {paths['json'].name} + {paths['pt'].name}")
+                return paths
+            trainer.save_checkpoint = save_and_log  # type: ignore[assignment]
+            try:
+                trainer.run(
+                    num_steps=args.num_steps,
+                    checkpoint_dir=args.checkpoint_dir,
+                    on_step=dashboard_on_step,
+                )
+            except KeyboardInterrupt:
+                dash.log("interrupted — writing final checkpoint")
+                trainer.save_checkpoint(args.checkpoint_dir)
+                dash.log(f"saved to {args.checkpoint_dir}")
+    else:
+        try:
+            trainer.run(
+                num_steps=args.num_steps,
+                checkpoint_dir=args.checkpoint_dir,
+                on_step=plain_on_step,
+            )
+        except KeyboardInterrupt:
+            log.info("Interrupted — writing final checkpoint")
+            trainer.save_checkpoint(args.checkpoint_dir)
+            log.info("Saved to %s", args.checkpoint_dir)
 
 
 if __name__ == "__main__":
