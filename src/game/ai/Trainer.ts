@@ -62,6 +62,17 @@ function oppositeColor(c: PieceColor): PieceColor {
   return c === 'white' ? 'black' : 'white';
 }
 
+function pieceValue(type: string, w: RewardWeights): number {
+  switch (type) {
+    case 'pawn': return w.pawnVal;
+    case 'knight': return w.knightVal;
+    case 'bishop': return w.bishopVal;
+    case 'rook': return w.rookVal;
+    case 'queen': return w.queenVal;
+    default: return 0;
+  }
+}
+
 function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWeights, precomputedMoveCount?: number): number {
   const board = state.board;
   const opp = oppositeColor(color);
@@ -71,6 +82,7 @@ function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWei
   let score = 0;
 
   let ownMaterial = 0, oppMaterial = 0;
+  let maxMaterial = 0; // For normalization
   let ownBishops = 0, oppBishops = 0;
   let ownDeveloped = 0;
   let ownCenterPieces = 0, oppCenterPieces = 0;
@@ -83,7 +95,7 @@ function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWei
       const piece = board[r][f];
       if (!piece) continue;
       const isOwn = piece.color === color;
-      const val = PIECE_VALUES[piece.type] ?? 0;
+      const val = pieceValue(piece.type, w);
       if (isOwn) {
         ownMaterial += val;
         if (piece.type === 'bishop') ownBishops++;
@@ -100,8 +112,12 @@ function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWei
     }
   }
 
+  // Max possible material for normalization (Q + 2R + 2B + 2N + 8P with current weights)
+  maxMaterial = w.queenVal + 2 * w.rookVal + 2 * w.bishopVal + 2 * w.knightVal + 8 * w.pawnVal;
+  if (maxMaterial <= 0) maxMaterial = 1;
+
   // Material
-  if (w.material) score += ((ownMaterial - oppMaterial) / 39) * w.material;
+  if (w.material) score += ((ownMaterial - oppMaterial) / maxMaterial) * w.material;
 
   // Check
   if (w.check && isInCheck(board, opp)) score += w.check;
@@ -173,7 +189,7 @@ function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWei
         if (!piece || piece.color !== color || piece.type === 'king') continue;
         const pos = { rank: r, file: f };
         if (isSquareAttackedBy(board, pos, opp) && !isSquareAttackedBy(board, pos, color)) {
-          score -= (PIECE_VALUES[piece.type] ?? 0) * w.hangingPieces;
+          score -= pieceValue(piece.type, w) * w.hangingPieces;
         }
       }
     }
@@ -223,6 +239,7 @@ export type LogEntry = { time: number; message: string };
 // Snapshot of a game slot for UI display
 export type GameSlotSnapshot = {
   moveCount: number;
+  moveCap: number;
   materialWhite: number;
   materialBlack: number;
   board: Board;
@@ -234,9 +251,9 @@ export type GameSlotSnapshot = {
 export type CompletedGameSnapshot = {
   gameNumber: number;
   moveCount: number;
-  board: Board;           // Final board position
-  outcome: string;        // "white wins", "black wins", "stalemate", etc.
-  outcomeClass: 'white' | 'black' | 'draw'; // For styling
+  board: Board;
+  outcome: string;
+  outcomeClass: 'white' | 'black' | 'draw' | 'cap';
 };
 
 export type TrainingStats = {
@@ -260,11 +277,18 @@ export type TrainingStats = {
   completedGames: CompletedGameSnapshot[];
   gpuBackend: string;
   sampleWeights: number[];
+  tensorCount: number;  // TF.js live tensor count -- should be stable, not growing
+  memoryMB: number;     // TF.js GPU memory usage
 };
 
 export type RewardWeights = {
   winning: number;        // Game outcome: checkmate = +winning, loss = -winning
-  material: number;       // Piece value advantage
+  material: number;       // Overall material scaling
+  pawnVal: number;        // Pawn piece value
+  knightVal: number;      // Knight piece value
+  bishopVal: number;      // Bishop piece value
+  rookVal: number;        // Rook piece value
+  queenVal: number;       // Queen piece value
   check: number;          // Delivering check
   development: number;    // Pieces off back rank (early game)
   centerOccupation: number; // Pieces on center squares
@@ -282,6 +306,11 @@ export type RewardWeights = {
 export const DEFAULT_REWARD_WEIGHTS: RewardWeights = {
   winning: 1.0,
   material: 0.3,
+  pawnVal: 1,
+  knightVal: 3,
+  bishopVal: 3,
+  rookVal: 5,
+  queenVal: 9,
   check: 0.02,
   development: 0.01,
   centerOccupation: 0.01,
@@ -311,16 +340,16 @@ export type TrainerConfig = {
 };
 
 export const DEFAULT_CONFIG: TrainerConfig = {
-  numConcurrentGames: 24,
-  mctsSimulations: 40,
-  learningRate: 0.002,
+  numConcurrentGames: 8,
+  mctsSimulations: 25,
+  learningRate: 0.0001,
   trainingBatchSize: 128,
   replayBufferMax: 8000,
   gradientStepsPerTrain: 4,
-  numResBlocks: 1,
-  numFilters: 16,
+  numResBlocks: 6,
+  numFilters: 64,
   kernelSize: 3,
-  valueHeadSize: 32,
+  valueHeadSize: 64,
   rewards: { ...DEFAULT_REWARD_WEIGHTS },
 };
 
@@ -399,10 +428,11 @@ export class Trainer {
   private startTime = 0;
   private log: LogEntry[] = [];
   private completedGames: CompletedGameSnapshot[] = [];
-  private nextGameRandom = false;
   private lastSaveNotifyTime = 0;
   private statsCallCount = 0;
   private cachedSampleWeights: number[] = [];
+  private cachedTensorCount = 0;
+  private cachedMemoryMB = 0;
 
   public onStatsUpdate?: (stats: TrainingStats) => void;
   public onSaved?: () => void;
@@ -419,8 +449,11 @@ export class Trainer {
 
   private getCachedSampleWeights(): number[] {
     this.statsCallCount++;
-    if (this.statsCallCount % 10 === 0 && this.net) {
-      this.cachedSampleWeights = this.net.getSampleWeights();
+    if (this.statsCallCount % 30 === 0) {
+      if (this.net) this.cachedSampleWeights = this.net.getSampleWeights();
+      const mem = tf.memory();
+      this.cachedTensorCount = mem.numTensors;
+      this.cachedMemoryMB = (mem.numBytes ?? 0) / (1024 * 1024);
     }
     return this.cachedSampleWeights;
   }
@@ -428,6 +461,7 @@ export class Trainer {
   private getGameSlotSnapshots(): GameSlotSnapshot[] {
     return this.games.map(g => ({
       moveCount: g.moveCount,
+      moveCap: g.moveCap,
       materialWhite: materialAdvantage(g.state, 'white'),
       materialBlack: materialAdvantage(g.state, 'black'),
       board: g.state.board,
@@ -462,6 +496,8 @@ export class Trainer {
       completedGames: this.completedGames,
       gpuBackend: this.gpuBackend,
       sampleWeights: this.getCachedSampleWeights(),
+      tensorCount: this.cachedTensorCount,
+      memoryMB: this.cachedMemoryMB,
     };
   }
 
@@ -492,10 +528,9 @@ export class Trainer {
     }
 
     this.games = [];
-    this.nextGameRandom = false;
     for (let i = 0; i < this.config.numConcurrentGames; i++) {
-      // Alternate: even index = normal, odd index = random
-      this.games.push(this.createGameSlot(i % 2 === 1));
+      // 90% random starts, 10% standard opening
+      this.games.push(this.createGameSlot(Math.random() > 0.1));
     }
     this.addLog(`${this.config.numConcurrentGames} games, ${this.config.mctsSimulations} MCTS sims, batched predict`);
     this.emitStats();
@@ -564,14 +599,10 @@ export class Trainer {
   }
 
   private createGameSlot(useRandom?: boolean): GameSlot {
-    // If caller specifies, use that. Otherwise alternate.
-    const random = useRandom ?? this.nextGameRandom;
-    if (useRandom === undefined) {
-      this.nextGameRandom = !this.nextGameRandom;
-    }
+    // 90% random starts, 10% standard opening
+    const random = useRandom ?? (Math.random() > 0.1);
     const state = random ? randomStartingPosition() : normalStartingPosition();
-    // Random move cap per game: short games recycle slots faster, long games see endgames
-    const moveCap = 20 + Math.floor(Math.random() * 181); // 20-200
+    const moveCap = 5 + Math.floor(Math.random() * 26); // 5-30
     return { state, examples: [], moveCount: 0, moveCap };
   }
 
@@ -632,6 +663,10 @@ export class Trainer {
       // Train every round as long as buffer has enough data
       if (this.replayBuffer.length >= this.config.trainingBatchSize) {
         await this.runTrainStep();
+        // Sync weights to CPU cache only for small models that use CPU inference
+        if (this.config.numFilters <= 32) {
+          this.net!.syncCPU();
+        }
       }
 
       // Autosave every 30 seconds
@@ -691,9 +726,10 @@ export class Trainer {
     if (this.gameLengths.length > 100) this.gameLengths.shift();
 
     // Track completed game for UI display
-    const outcomeClass: 'white' | 'black' | 'draw' =
+    const outcomeClass: 'white' | 'black' | 'draw' | 'cap' =
       (slot.state.status === 'checkmate' && slot.state.winner === 'white') ? 'white' :
-      (slot.state.status === 'checkmate' && slot.state.winner === 'black') ? 'black' : 'draw';
+      (slot.state.status === 'checkmate' && slot.state.winner === 'black') ? 'black' :
+      hitCap ? 'cap' : 'draw';
     this.completedGames.push({
       gameNumber: this.gamesCompleted,
       moveCount: slot.moveCount,

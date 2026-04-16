@@ -63,7 +63,18 @@ async function handleCopyWeights() {
     setTimeout(() => { saveMessage.value = ''; }, 2000);
     return;
   }
-  const json = JSON.stringify(weights);
+  // Build JSON manually with sci notation for compact, readable numbers
+  // Format: +1.234e+00 style (explicit signs on mantissa and exponent)
+  const dataStr = weights.data.map(arr => {
+    const nums = arr.map(raw => {
+      const v = Number(raw);
+      if (v === 0) return '0';
+      return v.toExponential(2).replace('e+', 'e'); // "1.23e0", "-5.68e-2"
+    });
+    return `[${nums.join(',')}]`;
+  }).join(',');
+
+  const json = `{"shapes":${JSON.stringify(weights.shapes)},"data":[${dataStr}]}`;
   await navigator.clipboard.writeText(json);
   saveMessage.value = `Copied (${(json.length / 1024).toFixed(0)} KB)`;
   setTimeout(() => { saveMessage.value = ''; }, 3000);
@@ -182,6 +193,11 @@ type RwKey = keyof typeof DEFAULT_CONFIG.rewards;
 const REWARD_SLIDERS: Array<[RwKey, string, number, number]> = [
   ['winning', 'Winning', 0.01, 5.0],
   ['material', 'Material', 0.01, 5.0],
+  ['pawnVal', 'Pawn Value', 0.1, 10],
+  ['knightVal', 'Knight Value', 0.1, 15],
+  ['bishopVal', 'Bishop Value', 0.1, 15],
+  ['rookVal', 'Rook Value', 0.1, 20],
+  ['queenVal', 'Queen Value', 0.1, 30],
   ['check', 'Check', 0.001, 0.5],
   ['development', 'Development', 0.001, 0.2],
   ['centerOccupation', 'Center Occ.', 0.001, 0.2],
@@ -347,6 +363,8 @@ const reversedCompletedGames = computed(() => {
               <div class="stat-card"><span class="stat-label">Avg Len</span><span class="stat-value">{{ fmt(stats.avgGameLength, 0) }}</span></div>
               <div class="stat-card"><span class="stat-label">Params</span><span class="stat-value">{{ stats.paramCount.toLocaleString() }}</span></div>
             <div class="stat-card" v-if="stats.gpuBackend"><span class="stat-label">GPU</span><span class="stat-value gpu-val">{{ stats.gpuBackend }}</span></div>
+            <div class="stat-card"><span class="stat-label">Tensors</span><span class="stat-value" :class="{ 'tensor-warn': stats.tensorCount > 200 }">{{ stats.tensorCount }}</span></div>
+            <div class="stat-card"><span class="stat-label">GPU MB</span><span class="stat-value">{{ fmt(stats.memoryMB, 1) }}</span></div>
             </div>
 
             <!-- Sample weights -->
@@ -480,7 +498,7 @@ const reversedCompletedGames = computed(() => {
             <div v-for="(slot, i) in stats.gameSlots" :key="i" class="mini-board-card">
               <div class="mini-board-header">
                 <span class="mini-id">#{{ i + 1 }}</span>
-                <span class="mini-moves">{{ slot.moveCount }}m</span>
+                <span class="mini-moves">{{ slot.moveCount }}/{{ slot.moveCap }}</span>
                 <span class="mini-turn" :class="slot.currentTurn">{{ slot.currentTurn === 'white' ? 'W' : 'B' }}</span>
               </div>
               <div class="mini-board">
@@ -664,6 +682,7 @@ const reversedCompletedGames = computed(() => {
 .stat-value { font-family: monospace; font-size: 13px; color: #ccc; font-weight: bold; }
 .stat-value.big { font-size: 18px; color: #fff; }
 .gpu-val { color: #44aa44; font-size: 11px; }
+.tensor-warn { color: #ff4444 !important; }
 
 .weights-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
 .weights-label { font-family: monospace; font-size: 9px; color: #555; text-transform: uppercase; }
@@ -709,14 +728,16 @@ const reversedCompletedGames = computed(() => {
 /* Completed games */
 .completed-panel { opacity: 0.85; }
 .completed-card { position: relative; }
-.completed-card.outcome-white { border-color: rgba(255, 255, 255, 0.3); }
-.completed-card.outcome-black { border-color: rgba(100, 100, 100, 0.4); }
+.completed-card.outcome-white { border-color: rgba(255, 255, 255, 0.4); }
+.completed-card.outcome-black { border-color: rgba(100, 100, 255, 0.3); }
 .completed-card.outcome-draw { border-color: rgba(255, 170, 0, 0.3); }
+.completed-card.outcome-cap { border-color: rgba(255, 80, 80, 0.3); }
 .completed-card .mini-board { opacity: 0.6; }
 .mini-outcome { font-size: 8px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50px; }
-.mini-outcome.white { color: #ddd; }
-.mini-outcome.black { color: #888; }
+.mini-outcome.white { color: #eee; }
+.mini-outcome.black { color: #88f; }
 .mini-outcome.draw { color: #aa8800; }
+.mini-outcome.cap { color: #ff6666; }
 
 /* Log */
 .log-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }

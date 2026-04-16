@@ -5,6 +5,7 @@
 
 import * as tf from '@tensorflow/tfjs';
 import type { ChessGameState, PieceType, Position, Move } from '@/types/chess';
+import { extractWeights, cpuPredict, cpuPredictBatch, type CPUWeights } from './CPUForward';
 
 // --- Board encoding ---
 
@@ -101,8 +102,35 @@ export type NetConfig = {
 };
 
 // Policy channels is fixed at 64 (one per destination square).
-// This is structural, not tunable: the move encoding is from_square * 64 + to_square.
 const POLICY_CHANNELS = 64;
+
+// Detect architecture config from a loaded TF.js model.
+// Uses model.weights (layer variable metadata) to read shapes WITHOUT
+// creating or disposing any tensors.
+function detectConfigFromModel(model: tf.LayersModel): Omit<NetConfig, 'learningRate'> {
+  const shapes = model.weights.map(w => w.shape as number[]);
+
+  const kernelSize = shapes[0][0];
+  const numFilters = shapes[0][3];
+
+  let resConvs = 0;
+  for (const s of shapes) {
+    if (s.length === 4 && s[0] === kernelSize && s[2] === numFilters && s[3] === numFilters) {
+      resConvs++;
+    }
+  }
+  const numResBlocks = Math.floor(resConvs / 2);
+
+  let valueHeadSize = 64;
+  for (const s of shapes) {
+    if (s.length === 2 && s[0] === 64) {
+      valueHeadSize = s[1];
+      break;
+    }
+  }
+
+  return { numResBlocks, numFilters, kernelSize, valueHeadSize };
+}
 
 export type SerializedWeights = {
   shapes: number[][];
@@ -113,16 +141,31 @@ export class ChessNet {
   model: tf.LayersModel;
   private optimizer: tf.Optimizer;
   private lr: number;
+  private config: NetConfig;
+  private cpu: CPUWeights | null = null; // CPU-side weight cache for fast inference
 
-  private constructor(model: tf.LayersModel, lr: number) {
+  private constructor(model: tf.LayersModel, lr: number, config: NetConfig) {
     this.model = model;
     this.lr = lr;
+    this.config = config;
     this.optimizer = tf.train.adam(lr);
+    this.syncCPU();
   }
 
   static create(config: NetConfig): ChessNet {
     const model = buildModel(config);
-    return new ChessNet(model, config.learningRate);
+    return new ChessNet(model, config.learningRate, config);
+  }
+
+  // Copy weights from TF.js model to CPU arrays for fast inference
+  syncCPU(): void {
+    this.cpu = extractWeights(
+      this.model,
+      this.config.kernelSize,
+      this.config.numFilters,
+      this.config.numResBlocks,
+      this.config.valueHeadSize,
+    );
   }
 
   getParamCount(): number {
@@ -144,71 +187,70 @@ export class ChessNet {
     return samples;
   }
 
-  // Export all weights as a serializable object
+  // Export all weights as a serializable object.
+  // Uses model.weights (LayerVariable refs) to avoid the getWeights copy/dispose ambiguity.
   exportWeights(): SerializedWeights {
-    const tensors = this.model.getWeights();
     const result: SerializedWeights = { shapes: [], data: [] };
-    for (const t of tensors) {
-      result.shapes.push(t.shape as number[]);
-      result.data.push(Array.from(t.dataSync() as Float32Array));
+    for (const w of this.model.weights) {
+      result.shapes.push(w.shape as number[]);
+      result.data.push(Array.from(w.read().dataSync() as Float32Array));
     }
     return result;
   }
 
-  // Import weights from a serialized object
   importWeights(weights: SerializedWeights): void {
     const tensors: tf.Tensor[] = [];
     for (let i = 0; i < weights.shapes.length; i++) {
       tensors.push(tf.tensor(weights.data[i], weights.shapes[i]));
     }
     this.model.setWeights(tensors);
-    // Dispose the temporary tensors (setWeights copies the data)
     for (const t of tensors) t.dispose();
+    this.syncCPU();
   }
 
-  // Single-position predict (for gameplay / single MCTS). Uses dataSync for speed.
+  // Use CPU for small models (<=32 filters), GPU for larger ones
+  private get useCPU(): boolean {
+    return this.cpu !== null && this.config.numFilters <= 32;
+  }
+
   predict(state: ChessGameState): { policy: Float32Array; value: number } {
-    const boardData = encodeBoard(state);
-    const input = tf.tensor4d(boardData, [1, 8, 8, NUM_PLANES]);
-    const outputs = this.model.predict(input) as tf.Tensor[];
-    const policyData = outputs[0].dataSync() as Float32Array;
-    const valueData = outputs[1].dataSync() as Float32Array;
-    input.dispose();
-    outputs[0].dispose();
-    outputs[1].dispose();
-    return {
-      policy: new Float32Array(policyData),
-      value: valueData[0],
-    };
+    if (this.useCPU) {
+      return cpuPredict(encodeBoard(state), this.cpu!);
+    }
+    return tf.tidy(() => {
+      const input = tf.tensor4d(encodeBoard(state), [1, 8, 8, NUM_PLANES]);
+      const outputs = this.model.predict(input) as tf.Tensor[];
+      return {
+        policy: new Float32Array(outputs[0].dataSync() as Float32Array),
+        value: (outputs[1].dataSync() as Float32Array)[0],
+      };
+    });
   }
 
-  // Batched predict: evaluate multiple positions in one GPU call.
   predictBatch(boards: Float32Array[]): Array<{ policy: Float32Array; value: number }> {
+    if (boards.length === 0) return [];
+    if (this.useCPU) {
+      return cpuPredictBatch(boards, this.cpu!);
+    }
     const batchSize = boards.length;
-    if (batchSize === 0) return [];
-
-    // Pack into a single buffer
     const buf = new Float32Array(batchSize * BOARD_FLOATS);
     for (let i = 0; i < batchSize; i++) {
       buf.set(boards[i], i * BOARD_FLOATS);
     }
-
-    const input = tf.tensor4d(buf, [batchSize, 8, 8, NUM_PLANES]);
-    const outputs = this.model.predict(input) as tf.Tensor[];
-    const allPolicy = outputs[0].dataSync() as Float32Array;
-    const allValue = outputs[1].dataSync() as Float32Array;
-    input.dispose();
-    outputs[0].dispose();
-    outputs[1].dispose();
-
-    const results: Array<{ policy: Float32Array; value: number }> = [];
-    for (let i = 0; i < batchSize; i++) {
-      results.push({
-        policy: allPolicy.slice(i * POLICY_SIZE, (i + 1) * POLICY_SIZE),
-        value: allValue[i],
-      });
-    }
-    return results;
+    return tf.tidy(() => {
+      const input = tf.tensor4d(buf, [batchSize, 8, 8, NUM_PLANES]);
+      const outputs = this.model.predict(input) as tf.Tensor[];
+      const allPolicy = outputs[0].dataSync() as Float32Array;
+      const allValue = outputs[1].dataSync() as Float32Array;
+      const results: Array<{ policy: Float32Array; value: number }> = [];
+      for (let i = 0; i < batchSize; i++) {
+        results.push({
+          policy: allPolicy.slice(i * POLICY_SIZE, (i + 1) * POLICY_SIZE),
+          value: allValue[i],
+        });
+      }
+      return results;
+    });
   }
 
   async train(
@@ -234,11 +276,19 @@ export class ChessNet {
     let policyLoss = 0;
     let valueLoss = 0;
 
+    const WEIGHT_DECAY = 1e-4;
+
     const totalLossTensor = this.optimizer.minimize(() => {
       const outputs = this.model.apply(inputTensor, { training: true }) as tf.Tensor[];
       const pLoss = tf.neg(tf.sum(tf.mul(policyTarget, tf.log(tf.add(outputs[0], 1e-8))))).div(tf.scalar(batchSize));
       const vLoss = tf.losses.meanSquaredError(valueTarget, outputs[1]) as tf.Scalar;
-      const total = tf.add(pLoss, vLoss) as tf.Scalar;
+
+      // L2 weight decay (simulates AdamW) — computed as a single sum to minimize intermediate tensors
+      const allSquaredWeights = this.model.trainableWeights.map(w => tf.sum(tf.square(w.read())));
+      const l2 = tf.addN(allSquaredWeights) as tf.Scalar;
+      const decay = tf.mul(l2, tf.scalar(WEIGHT_DECAY)) as tf.Scalar;
+
+      const total = tf.add(tf.add(pLoss, vLoss), decay) as tf.Scalar;
       policyLoss = pLoss.dataSync()[0];
       valueLoss = vLoss.dataSync()[0];
       return total;
@@ -283,6 +333,8 @@ export class ChessNet {
       this.optimizer.dispose();
       this.model = loaded;
       this.optimizer = tf.train.adam(this.lr);
+      this.config = { ...detectConfigFromModel(loaded), learningRate: this.lr };
+      this.syncCPU();
       return true;
     } catch {
       return false;
@@ -290,11 +342,11 @@ export class ChessNet {
   }
 
   // Load directly from IndexedDB without creating a throwaway model first.
-  // Avoids TF.js layer name collisions from create-then-dispose.
   static async loadFromSaved(lr: number): Promise<ChessNet | null> {
     try {
       const model = await tf.loadLayersModel('indexeddb://chess-net');
-      return new ChessNet(model, lr);
+      const config = detectConfigFromModel(model);
+      return new ChessNet(model, lr, { ...config, learningRate: lr });
     } catch {
       return null;
     }
