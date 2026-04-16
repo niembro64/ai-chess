@@ -3,9 +3,16 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { Trainer, DEFAULT_CONFIG, type TrainingStats, type TrainerConfig, type GameSlotSnapshot, type CompletedGameSnapshot } from '@/game/ai/Trainer';
 import { getPieceSymbol } from '@/game/chess/ChessEngine';
 
+const isMobile = window.innerWidth <= 600;
+
 const trainer = new Trainer();
 const stats = ref<TrainingStats | null>(null);
-const config = ref<TrainerConfig>({ ...DEFAULT_CONFIG });
+const config = ref<TrainerConfig>({
+  ...DEFAULT_CONFIG,
+  rewards: { ...DEFAULT_CONFIG.rewards },
+  numConcurrentGames: isMobile ? 4 : DEFAULT_CONFIG.numConcurrentGames,
+  mctsSimulations: isMobile ? 20 : DEFAULT_CONFIG.mctsSimulations,
+});
 const configLocked = ref(false);
 const hasSavedModel = ref(false);
 
@@ -149,6 +156,53 @@ function fmtTick(n: number): string {
 }
 
 function fmt(n: number, decimals = 2): string { return n.toFixed(decimals); }
+
+// Log slider: maps slider position 0-100 to a logarithmic value range.
+// Position 0 = off (value 0). Positions 1-100 map log-spaced from min to max.
+function logSliderToValue(pos: number, min: number, max: number): number {
+  if (pos <= 0) return 0;
+  return min * Math.pow(max / min, (pos - 1) / 99);
+}
+
+function valueToLogSlider(value: number, min: number, max: number): number {
+  if (value <= 0) return 0;
+  const clamped = Math.max(min, Math.min(max, value));
+  return 1 + 99 * Math.log(clamped / min) / Math.log(max / min);
+}
+
+function fmtReward(n: number): string {
+  if (n === 0) return 'off';
+  if (n >= 1) return n.toFixed(1);
+  if (n >= 0.01) return n.toFixed(3);
+  return n.toFixed(4);
+}
+
+// Reward weight slider definitions: [key, label, min, max]
+type RwKey = keyof typeof DEFAULT_CONFIG.rewards;
+const REWARD_SLIDERS: Array<[RwKey, string, number, number]> = [
+  ['winning', 'Winning', 0.01, 5.0],
+  ['material', 'Material', 0.01, 5.0],
+  ['check', 'Check', 0.001, 0.5],
+  ['development', 'Development', 0.001, 0.2],
+  ['centerOccupation', 'Center Occ.', 0.001, 0.2],
+  ['centerAttack', 'Center Atk.', 0.001, 0.1],
+  ['castled', 'Castled', 0.001, 0.5],
+  ['uncastled', 'Uncastled', 0.001, 0.5],
+  ['mobility', 'Mobility', 0.0001, 0.02],
+  ['bishopPair', 'Bishop Pair', 0.001, 0.3],
+  ['doubledPawns', 'Doubled Pawn', 0.001, 0.2],
+  ['passedPawns', 'Passed Pawn', 0.001, 0.3],
+  ['hangingPieces', 'Hanging', 0.001, 0.1],
+  ['rookOpenFile', 'Rook Open', 0.001, 0.1],
+];
+
+function getRewardSliderPos(key: RwKey, min: number, max: number): number {
+  return valueToLogSlider(config.value.rewards[key], min, max);
+}
+
+function setRewardSliderPos(key: RwKey, pos: number, min: number, max: number): void {
+  config.value.rewards[key] = logSliderToValue(pos, min, max);
+}
 function fmtTime(ms: number): string {
   const sec = Math.floor(ms / 1000);
   return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`;
@@ -170,12 +224,6 @@ const winPct = computed(() => {
   };
 });
 
-const rewardLabel = computed(() => {
-  const r = config.value.rewardShaping;
-  if (r === 0) return 'Pure game outcome';
-  if (r === 1) return 'Pure material';
-  return `${((1 - r) * 100).toFixed(0)}% outcome + ${(r * 100).toFixed(0)}% material`;
-});
 
 const visibleLog = computed(() => (stats.value?.log ?? []).slice(-40).reverse());
 
@@ -221,28 +269,67 @@ const reversedCompletedGames = computed(() => {
       <!-- Left: Config -->
       <div class="left-column">
         <div class="panel config-panel">
-          <h2 class="panel-title">Config</h2>
+          <h2 class="panel-title">Training</h2>
           <div class="config-grid">
-            <label for="cfg-games">Games</label>
-            <input id="cfg-games" type="number" v-model.number="config.numConcurrentGames" :disabled="configLocked" min="1" max="64" />
+            <label for="cfg-games">Parallel Games</label>
+            <input id="cfg-games" type="number" v-model.number="config.numConcurrentGames" min="1" max="64" />
             <label for="cfg-mcts">MCTS Sims</label>
-            <input id="cfg-mcts" type="number" v-model.number="config.mctsSimulations" :disabled="configLocked" min="5" max="800" />
+            <input id="cfg-mcts" type="number" v-model.number="config.mctsSimulations" min="5" max="800" />
             <label for="cfg-lr">Learn Rate</label>
-            <input id="cfg-lr" type="number" v-model.number="config.learningRate" :disabled="configLocked" min="0.0001" max="0.1" step="0.001" />
+            <input id="cfg-lr" type="number" v-model.number="config.learningRate" min="0.0001" max="0.1" step="0.001" />
             <label for="cfg-batch">Batch Size</label>
-            <input id="cfg-batch" type="number" v-model.number="config.trainingBatchSize" :disabled="configLocked" min="16" max="256" />
+            <input id="cfg-batch" type="number" v-model.number="config.trainingBatchSize" min="16" max="256" />
             <label for="cfg-buffer">Buffer Max</label>
-            <input id="cfg-buffer" type="number" v-model.number="config.replayBufferMax" :disabled="configLocked" min="500" max="20000" step="500" />
-            <label for="cfg-gradsteps">Grad Steps/Round</label>
-            <input id="cfg-gradsteps" type="number" v-model.number="config.gradientStepsPerTrain" :disabled="configLocked" min="1" max="32" />
-            <label for="cfg-blocks">Res Blocks</label>
-            <input id="cfg-blocks" type="number" v-model.number="config.numResBlocks" :disabled="configLocked" min="1" max="10" />
-            <label for="cfg-filters">Filters</label>
-            <input id="cfg-filters" type="number" v-model.number="config.numFilters" :disabled="configLocked" min="8" max="128" />
-            <label for="cfg-shaping">Reward Shape</label>
-            <input id="cfg-shaping" type="range" v-model.number="config.rewardShaping" :disabled="configLocked" min="0" max="1" step="0.05" />
+            <input id="cfg-buffer" type="number" v-model.number="config.replayBufferMax" min="500" max="20000" step="500" />
+            <label for="cfg-gradsteps">Grad Steps</label>
+            <input id="cfg-gradsteps" type="number" v-model.number="config.gradientStepsPerTrain" min="1" max="32" />
           </div>
-          <div class="shaping-label">{{ rewardLabel }}</div>
+        </div>
+
+        <div class="panel config-panel">
+          <h2 class="panel-title">Network</h2>
+          <template v-if="hasSavedModel && !configLocked">
+            <p class="config-note">Saved model will be loaded. Reset to change architecture.</p>
+          </template>
+          <template v-else-if="stats">
+            <div class="config-grid">
+              <label>Params</label>
+              <span class="config-readonly">{{ stats.paramCount.toLocaleString() }}</span>
+            </div>
+          </template>
+          <template v-else>
+            <div class="config-grid">
+              <label for="cfg-blocks">Layers (Depth)</label>
+              <input id="cfg-blocks" type="number" v-model.number="config.numResBlocks" min="1" max="10" />
+              <label for="cfg-filters">Features (Width)</label>
+              <input id="cfg-filters" type="number" v-model.number="config.numFilters" min="8" max="128" />
+              <label for="cfg-kernel">Kernel Size</label>
+              <input id="cfg-kernel" type="number" v-model.number="config.kernelSize" min="3" max="5" step="2" />
+              <label for="cfg-vhead">Value Head</label>
+              <input id="cfg-vhead" type="number" v-model.number="config.valueHeadSize" min="8" max="128" />
+            </div>
+          </template>
+        </div>
+
+        <!-- Reward weights with log sliders -->
+        <div class="panel config-panel">
+          <h2 class="panel-title">Rewards</h2>
+
+          <div
+            v-for="[key, label, min, max] in REWARD_SLIDERS"
+            :key="key"
+            class="reward-slider-row"
+          >
+            <span class="rw-label">{{ label }}</span>
+            <input
+              type="range"
+              class="rw-slider"
+              :value="getRewardSliderPos(key, min, max)"
+              @input="setRewardSliderPos(key, Number(($event.target as HTMLInputElement).value), min, max)"
+              min="0" max="100" step="1"
+            />
+            <span class="rw-value" :class="{ off: config.rewards[key] === 0 }">{{ fmtReward(config.rewards[key]) }}</span>
+          </div>
         </div>
       </div>
 
@@ -464,8 +551,8 @@ const reversedCompletedGames = computed(() => {
 </template>
 
 <style scoped>
-.training-wrapper { width: 100%; height: 100%; background: #1a1a2e; display: flex; flex-direction: column; overflow: hidden; }
-.header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: rgba(20,20,35,.95); border-bottom: 1px solid #333; flex-shrink: 0; }
+.training-wrapper { width: 100%; height: 100%; background: #1a1a2e; display: flex; flex-direction: column; overflow-y: auto; }
+.header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: rgba(20,20,35,.95); border-bottom: 1px solid #333; flex-shrink: 0; flex-wrap: wrap; }
 .back-btn { font-family: monospace; font-size: 13px; padding: 6px 14px; background: rgba(60,60,60,.8); border: 1px solid #555; border-radius: 6px; color: #ccc; cursor: pointer; }
 .back-btn:hover { background: rgba(80,80,80,.9); color: white; }
 .title { font-family: monospace; font-size: 22px; color: #fff; margin: 0; flex: 1; }
@@ -481,12 +568,36 @@ const reversedCompletedGames = computed(() => {
 .save-msg { font-family: monospace; font-size: 11px; color: #44aa44; min-width: 90px; opacity: 0; transition: opacity 0.15s; }
 .save-msg.visible { opacity: 1; }
 
-.content { display: flex; gap: 12px; padding: 12px 20px; flex: 1; min-height: 0; overflow: hidden; }
+.content { display: flex; gap: 12px; padding: 12px 16px; flex: 1; min-height: 0; overflow: hidden; }
 
-.left-column { width: 220px; flex-shrink: 0; overflow-y: auto; }
+.left-column { width: 300px; flex-shrink: 0; overflow-y: auto; }
 .center-column { flex: 1; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; min-width: 0; }
 .panel { background: rgba(20,20,35,.95); border: 1px solid #333; border-radius: 8px; padding: 12px; }
 .log-panel { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+@media (max-width: 900px) {
+  .content { flex-direction: column; overflow-y: auto; }
+  .left-column { width: 100%; }
+  .center-column { overflow: visible; }
+  .log-panel { width: 100%; max-height: 200px; }
+}
+
+@media (max-width: 480px) {
+  .header { gap: 6px; padding: 8px 10px; }
+  .title { font-size: 16px; }
+  .header-controls { flex-wrap: wrap; gap: 4px; }
+  .action-btn { font-size: 11px; padding: 5px 10px; }
+  .start-btn { min-width: 110px; }
+  .content { padding: 8px; gap: 8px; }
+  .charts-row { flex-direction: column; }
+  .chart-box { min-width: 0; }
+  .loss-row { flex-wrap: wrap; gap: 10px; }
+  .stats-grid { grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 4px; }
+  .mini-boards-grid { grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 6px; }
+  .mini-square { width: 10px; height: 10px; }
+  .mini-piece { font-size: 8px; }
+  .games-panel { max-height: none; }
+}
 .panel-title { font-family: monospace; font-size: 12px; color: #aaa; margin: 0 0 10px; text-transform: uppercase; letter-spacing: 1px; }
 
 /* Config */
@@ -496,7 +607,55 @@ const reversedCompletedGames = computed(() => {
 .config-grid input[type="range"] { width: 64px; accent-color: #4a9eff; }
 .config-grid input:disabled { opacity: .4; }
 .config-grid input:focus { outline: none; border-color: #4a9eff; }
-.shaping-label { font-family: monospace; font-size: 9px; color: #555; margin-top: 4px; text-align: center; }
+.config-note { font-family: monospace; font-size: 10px; color: #666; margin: 0; line-height: 1.4; }
+.config-readonly { font-family: monospace; font-size: 12px; color: #aaa; }
+/* Reward sliders */
+.reward-slider-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.rw-label { font-family: monospace; font-size: 10px; color: #888; width: 75px; flex-shrink: 0; }
+.rw-slider {
+  flex: 1;
+  min-width: 80px;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,.1);
+  outline: none;
+  cursor: pointer;
+}
+.rw-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #4a9eff;
+  border: 2px solid #1a1a2e;
+  cursor: pointer;
+  box-shadow: 0 0 4px rgba(74,158,255,.4);
+}
+.rw-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #4a9eff;
+  border: 2px solid #1a1a2e;
+  cursor: pointer;
+  box-shadow: 0 0 4px rgba(74,158,255,.4);
+}
+.rw-slider:disabled { opacity: .4; cursor: not-allowed; }
+.rw-slider:disabled::-webkit-slider-thumb { background: #666; box-shadow: none; }
+.rw-slider:disabled::-moz-range-thumb { background: #666; box-shadow: none; }
+.rw-value { font-family: 'Courier New', monospace; font-size: 10px; color: #aaa; width: 45px; flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.rw-value.off { color: #555; }
+
+@media (max-width: 480px) {
+  .reward-slider-row { gap: 4px; margin-bottom: 8px; }
+  .rw-label { font-size: 9px; width: 65px; }
+  .rw-slider { height: 8px; }
+  .rw-slider::-webkit-slider-thumb { width: 24px; height: 24px; }
+  .rw-slider::-moz-range-thumb { width: 24px; height: 24px; }
+}
 
 /* Stats */
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 6px; margin-bottom: 12px; }

@@ -62,7 +62,7 @@ function oppositeColor(c: PieceColor): PieceColor {
   return c === 'white' ? 'black' : 'white';
 }
 
-function evaluatePosition(state: ChessGameState, color: PieceColor): number {
+function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWeights, precomputedMoveCount?: number): number {
   const board = state.board;
   const opp = oppositeColor(color);
   const backRank = color === 'white' ? 7 : 0;
@@ -70,13 +70,12 @@ function evaluatePosition(state: ChessGameState, color: PieceColor): number {
 
   let score = 0;
 
-  // --- Piece census (single board scan) ---
   let ownMaterial = 0, oppMaterial = 0;
   let ownBishops = 0, oppBishops = 0;
-  let ownDeveloped = 0; // Non-pawn, non-king pieces off back rank
+  let ownDeveloped = 0;
   let ownCenterPieces = 0, oppCenterPieces = 0;
-  let ownPawnFiles: number[] = [];
-  let oppPawnFiles: number[] = [];
+  const ownPawnFiles: number[] = [];
+  const oppPawnFiles: number[] = [];
   let ownKingPos = { rank: 0, file: 0 };
 
   for (let r = 0; r < 8; r++) {
@@ -85,147 +84,112 @@ function evaluatePosition(state: ChessGameState, color: PieceColor): number {
       if (!piece) continue;
       const isOwn = piece.color === color;
       const val = PIECE_VALUES[piece.type] ?? 0;
-
       if (isOwn) {
         ownMaterial += val;
         if (piece.type === 'bishop') ownBishops++;
         if (piece.type === 'king') ownKingPos = { rank: r, file: f };
-
-        // Development: non-pawn, non-king pieces off own back rank
-        if (piece.type !== 'pawn' && piece.type !== 'king' && r !== backRank) {
-          ownDeveloped++;
-        }
-
-        // Center presence
-        if ((r === 3 || r === 4) && (f === 3 || f === 4)) {
-          ownCenterPieces++;
-        }
-
-        // Track pawn files
-        if (piece.type === 'pawn') {
-          ownPawnFiles.push(f);
-        }
+        if (piece.type !== 'pawn' && piece.type !== 'king' && r !== backRank) ownDeveloped++;
+        if ((r === 3 || r === 4) && (f === 3 || f === 4)) ownCenterPieces++;
+        if (piece.type === 'pawn') ownPawnFiles.push(f);
       } else {
         oppMaterial += val;
         if (piece.type === 'bishop') oppBishops++;
-
-        if ((r === 3 || r === 4) && (f === 3 || f === 4)) {
-          oppCenterPieces++;
-        }
-
-        if (piece.type === 'pawn') {
-          oppPawnFiles.push(f);
-        }
+        if ((r === 3 || r === 4) && (f === 3 || f === 4)) oppCenterPieces++;
+        if (piece.type === 'pawn') oppPawnFiles.push(f);
       }
     }
   }
 
-  // 1. Material advantage (primary signal, ~0.3 max)
-  score += (ownMaterial - oppMaterial) / 39;
+  // Material
+  if (w.material) score += ((ownMaterial - oppMaterial) / 39) * w.material;
 
-  // 2. Check delivered (+0.02)
-  if (isInCheck(board, opp)) {
-    score += 0.02;
+  // Check
+  if (w.check && isInCheck(board, opp)) score += w.check;
+
+  // Development (early game only)
+  if (w.development && moveNumber <= 20) score += Math.min(ownDeveloped, 6) * w.development;
+
+  // Center occupation
+  if (w.centerOccupation) {
+    score += (ownCenterPieces - oppCenterPieces) * w.centerOccupation;
   }
 
-  // 3. Piece development (+0.01 per developed minor/major piece, max ~0.06)
-  //    Only relevant in first ~15 moves
-  if (moveNumber <= 20) {
-    score += Math.min(ownDeveloped, 6) * 0.01;
+  // Center attacks
+  if (w.centerAttack) {
+    for (const sq of CENTER_SQUARES) {
+      if (isSquareAttackedBy(board, sq, color)) score += w.centerAttack;
+      if (isSquareAttackedBy(board, sq, opp)) score -= w.centerAttack;
+    }
   }
 
-  // 4. Center control (+0.01 per center square with own piece/pawn)
-  score += ownCenterPieces * 0.01;
-  score -= oppCenterPieces * 0.01;
-
-  // 5. Center square attacks (control without occupying)
-  for (const sq of CENTER_SQUARES) {
-    if (isSquareAttackedBy(board, sq, color)) score += 0.005;
-    if (isSquareAttackedBy(board, sq, opp)) score -= 0.005;
-  }
-
-  // 6. Castling (+0.03 if castled, -0.03 if not castled after move 15)
+  // Castling
   const kingOnCastledSquare =
     (color === 'white' && ownKingPos.rank === 7 && (ownKingPos.file === 6 || ownKingPos.file === 2)) ||
     (color === 'black' && ownKingPos.rank === 0 && (ownKingPos.file === 6 || ownKingPos.file === 2));
-
-  if (kingOnCastledSquare) {
-    score += 0.03;
-  } else if (moveNumber > 15) {
-    // King still on starting square or wandering -- penalize
+  if (w.castled && kingOnCastledSquare) score += w.castled;
+  if (w.uncastled && !kingOnCastledSquare && moveNumber > 15) {
     const kingOnStart =
       (color === 'white' && ownKingPos.rank === 7 && ownKingPos.file === 4) ||
       (color === 'black' && ownKingPos.rank === 0 && ownKingPos.file === 4);
-    if (kingOnStart) {
-      score -= 0.03;
+    if (kingOnStart) score -= w.uncastled;
+  }
+
+  // Mobility
+  if (w.mobility && state.currentTurn === color && precomputedMoveCount !== undefined) {
+    score += Math.min(precomputedMoveCount, 40) * w.mobility;
+  }
+
+  // Bishop pair
+  if (w.bishopPair) {
+    if (ownBishops >= 2) score += w.bishopPair;
+    if (oppBishops >= 2) score -= w.bishopPair;
+  }
+
+  // Doubled pawns
+  if (w.doubledPawns) {
+    const fileCount = new Map<number, number>();
+    for (const f of ownPawnFiles) fileCount.set(f, (fileCount.get(f) ?? 0) + 1);
+    for (const count of fileCount.values()) {
+      if (count > 1) score -= w.doubledPawns * (count - 1);
     }
   }
 
-  // 7. Mobility advantage (+0.01 per 10 extra legal moves)
-  //    Only compute if it's this color's turn (legal moves are turn-dependent)
-  if (state.currentTurn === color) {
-    const ownMoves = getLegalMoves(state).length;
-    // Approximate opponent mobility (we can't easily compute opponent legal moves
-    // without switching turns, so just reward having many options)
-    score += Math.min(ownMoves, 40) * 0.001; // up to +0.04
-  }
-
-  // 8. Bishop pair (+0.02)
-  if (ownBishops >= 2) score += 0.02;
-  if (oppBishops >= 2) score -= 0.02;
-
-  // 9. Pawn structure
-  //    Doubled pawns: penalty for having 2+ pawns on same file
-  const ownFileCount = new Map<number, number>();
-  for (const f of ownPawnFiles) {
-    ownFileCount.set(f, (ownFileCount.get(f) ?? 0) + 1);
-  }
-  for (const count of ownFileCount.values()) {
-    if (count > 1) score -= 0.01 * (count - 1);
-  }
-
-  //    Passed pawns: own pawn with no opposing pawns on same or adjacent files ahead
-  for (const f of ownPawnFiles) {
-    let passed = true;
-    for (const of2 of oppPawnFiles) {
-      if (Math.abs(of2 - f) <= 1) {
-        // Check if opponent pawn is ahead
-        // For white (pawnDir=-1), "ahead" means lower rank number
-        // For black (pawnDir=1), "ahead" means higher rank number
-        // We simplify: if opponent has a pawn on adjacent file, it's not passed
-        passed = false;
-        break;
+  // Passed pawns
+  if (w.passedPawns) {
+    for (const f of ownPawnFiles) {
+      let passed = true;
+      for (const of2 of oppPawnFiles) {
+        if (Math.abs(of2 - f) <= 1) { passed = false; break; }
       }
+      if (passed) score += w.passedPawns;
     }
-    if (passed && ownPawnFiles.length > 0) score += 0.02;
   }
 
-  // 10. Hanging pieces: own pieces attacked by opponent but not defended
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const piece = board[r][f];
-      if (!piece || piece.color !== color || piece.type === 'king') continue;
-      const pos = { rank: r, file: f };
-      const attacked = isSquareAttackedBy(board, pos, opp);
-      if (attacked) {
-        const defended = isSquareAttackedBy(board, pos, color);
-        if (!defended) {
-          // Hanging piece -- penalty proportional to piece value
-          score -= (PIECE_VALUES[piece.type] ?? 0) * 0.005;
+  // Hanging pieces
+  if (w.hangingPieces) {
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        const piece = board[r][f];
+        if (!piece || piece.color !== color || piece.type === 'king') continue;
+        const pos = { rank: r, file: f };
+        if (isSquareAttackedBy(board, pos, opp) && !isSquareAttackedBy(board, pos, color)) {
+          score -= (PIECE_VALUES[piece.type] ?? 0) * w.hangingPieces;
         }
       }
     }
   }
 
-  // 11. Rooks on open/semi-open files (+0.01 per rook)
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const piece = board[r][f];
-      if (!piece || piece.color !== color || piece.type !== 'rook') continue;
-      const hasOwnPawn = ownPawnFiles.includes(f);
-      const hasOppPawn = oppPawnFiles.includes(f);
-      if (!hasOwnPawn && !hasOppPawn) score += 0.01; // Open file
-      else if (!hasOwnPawn) score += 0.005; // Semi-open
+  // Rooks on open files
+  if (w.rookOpenFile) {
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        const piece = board[r][f];
+        if (!piece || piece.color !== color || piece.type !== 'rook') continue;
+        const hasOwnPawn = ownPawnFiles.includes(f);
+        const hasOppPawn = oppPawnFiles.includes(f);
+        if (!hasOwnPawn && !hasOppPawn) score += w.rookOpenFile;
+        else if (!hasOwnPawn) score += w.rookOpenFile * 0.5;
+      }
     }
   }
 
@@ -292,11 +256,44 @@ export type TrainingStats = {
   lossHistory: Array<{ gen: number; policy: number; value: number; total: number }>;
   isRunning: boolean;
   log: LogEntry[];
-  rewardShaping: number;
   gameSlots: GameSlotSnapshot[];
   completedGames: CompletedGameSnapshot[];
   gpuBackend: string;
   sampleWeights: number[];
+};
+
+export type RewardWeights = {
+  winning: number;        // Game outcome: checkmate = +winning, loss = -winning
+  material: number;       // Piece value advantage
+  check: number;          // Delivering check
+  development: number;    // Pieces off back rank (early game)
+  centerOccupation: number; // Pieces on center squares
+  centerAttack: number;   // Attacking center squares
+  castled: number;        // King has castled
+  uncastled: number;      // Penalty for king stuck on start square
+  mobility: number;       // Legal move count
+  bishopPair: number;     // Having both bishops
+  doubledPawns: number;   // Penalty per doubled pawn
+  passedPawns: number;    // Pawns with no opposing blockers
+  hangingPieces: number;  // Penalty for undefended attacked pieces
+  rookOpenFile: number;   // Rooks on open/semi-open files
+};
+
+export const DEFAULT_REWARD_WEIGHTS: RewardWeights = {
+  winning: 1.0,
+  material: 0.3,
+  check: 0.02,
+  development: 0.01,
+  centerOccupation: 0.01,
+  centerAttack: 0.005,
+  castled: 0.03,
+  uncastled: 0.03,
+  mobility: 0.001,
+  bishopPair: 0.02,
+  doubledPawns: 0.01,
+  passedPawns: 0.02,
+  hangingPieces: 0.005,
+  rookOpenFile: 0.01,
 };
 
 export type TrainerConfig = {
@@ -305,24 +302,26 @@ export type TrainerConfig = {
   learningRate: number;
   trainingBatchSize: number;
   replayBufferMax: number;
-  gradientStepsPerTrain: number; // Number of optimizer steps each time we train
+  gradientStepsPerTrain: number;
   numResBlocks: number;
   numFilters: number;
-  maxGameMoves: number;
-  rewardShaping: number;
+  kernelSize: number;
+  valueHeadSize: number;
+  rewards: RewardWeights;
 };
 
 export const DEFAULT_CONFIG: TrainerConfig = {
-  numConcurrentGames: 16,
-  mctsSimulations: 25,
-  learningRate: 0.01,
-  trainingBatchSize: 64,
-  replayBufferMax: 4000,
-  gradientStepsPerTrain: 8,
+  numConcurrentGames: 24,
+  mctsSimulations: 40,
+  learningRate: 0.002,
+  trainingBatchSize: 128,
+  replayBufferMax: 8000,
+  gradientStepsPerTrain: 4,
   numResBlocks: 1,
   numFilters: 16,
-  maxGameMoves: 150,
-  rewardShaping: 0.3,
+  kernelSize: 3,
+  valueHeadSize: 32,
+  rewards: { ...DEFAULT_REWARD_WEIGHTS },
 };
 
 // --- Self-play game slot ---
@@ -338,6 +337,7 @@ type GameSlot = {
   state: ChessGameState;
   examples: GameSlotExample[];
   moveCount: number;
+  moveCap: number; // Random cap for this game (20-200)
 };
 
 // --- Starting position generators ---
@@ -382,6 +382,7 @@ export class Trainer {
   private running = false;
 
   private replayBuffer: TrainingExample[] = [];
+  private replayBufferHead = 0; // Ring buffer write pointer
   private games: GameSlot[] = [];
 
   private generation = 0;
@@ -400,6 +401,8 @@ export class Trainer {
   private completedGames: CompletedGameSnapshot[] = [];
   private nextGameRandom = false;
   private lastSaveNotifyTime = 0;
+  private statsCallCount = 0;
+  private cachedSampleWeights: number[] = [];
 
   public onStatsUpdate?: (stats: TrainingStats) => void;
   public onSaved?: () => void;
@@ -412,6 +415,14 @@ export class Trainer {
     const time = this.startTime > 0 ? Date.now() - this.startTime : 0;
     this.log.push({ time, message });
     if (this.log.length > 200) this.log.shift();
+  }
+
+  private getCachedSampleWeights(): number[] {
+    this.statsCallCount++;
+    if (this.statsCallCount % 10 === 0 && this.net) {
+      this.cachedSampleWeights = this.net.getSampleWeights();
+    }
+    return this.cachedSampleWeights;
   }
 
   private getGameSlotSnapshots(): GameSlotSnapshot[] {
@@ -434,7 +445,7 @@ export class Trainer {
       generation: this.generation,
       gamesCompleted: this.gamesCompleted,
       gamesPerMinute: elapsed > 0 ? this.gamesCompleted / elapsed : 0,
-      replayBufferSize: this.replayBuffer.length,
+      replayBufferSize: this.replayBufferSize,
       policyLoss: this.policyLoss,
       valueLoss: this.valueLoss,
       totalLoss: this.totalLoss,
@@ -447,11 +458,10 @@ export class Trainer {
       lossHistory: this.lossHistory,
       isRunning: this.running,
       log: this.log,
-      rewardShaping: this.config.rewardShaping,
       gameSlots: this.getGameSlotSnapshots(),
       completedGames: this.completedGames,
       gpuBackend: this.gpuBackend,
-      sampleWeights: this.net?.getSampleWeights() ?? [],
+      sampleWeights: this.getCachedSampleWeights(),
     };
   }
 
@@ -473,6 +483,8 @@ export class Trainer {
         this.net = ChessNet.create({
           numResBlocks: this.config.numResBlocks,
           numFilters: this.config.numFilters,
+          kernelSize: this.config.kernelSize,
+          valueHeadSize: this.config.valueHeadSize,
           learningRate: this.config.learningRate,
         });
         this.addLog(`New network: ${this.config.numResBlocks} res blocks, ${this.config.numFilters} filters, ${this.net.getParamCount().toLocaleString()} params`);
@@ -537,10 +549,18 @@ export class Trainer {
   }
 
   private addToBuffer(example: TrainingExample): void {
-    this.replayBuffer.push(example);
-    if (this.replayBuffer.length > this.config.replayBufferMax) {
-      this.replayBuffer.shift();
+    const max = this.config.replayBufferMax;
+    if (this.replayBuffer.length < max) {
+      this.replayBuffer.push(example);
+    } else {
+      // Ring buffer: overwrite oldest entry in O(1)
+      this.replayBuffer[this.replayBufferHead] = example;
+      this.replayBufferHead = (this.replayBufferHead + 1) % max;
     }
+  }
+
+  private get replayBufferSize(): number {
+    return this.replayBuffer.length;
   }
 
   private createGameSlot(useRandom?: boolean): GameSlot {
@@ -550,7 +570,9 @@ export class Trainer {
       this.nextGameRandom = !this.nextGameRandom;
     }
     const state = random ? randomStartingPosition() : normalStartingPosition();
-    return { state, examples: [], moveCount: 0 };
+    // Random move cap per game: short games recycle slots faster, long games see endgames
+    const moveCap = 20 + Math.floor(Math.random() * 181); // 20-200
+    return { state, examples: [], moveCount: 0, moveCap };
   }
 
   // Main loop: advance ALL games by one move using batched MCTS, then check for completions
@@ -581,7 +603,7 @@ export class Trainer {
           }
         }
 
-        const posScore = evaluatePosition(slot.state, slot.state.currentTurn);
+        const posScore = evaluatePosition(slot.state, slot.state.currentTurn, this.config.rewards, legalMoves.length);
 
         slot.examples.push({
           board,
@@ -590,26 +612,16 @@ export class Trainer {
           positionScore: posScore,
         });
 
-        // Push to replay buffer immediately with positional evaluation
-        // so the network gets fresh data every round, not just when games end.
-        // When the game finishes, positions are added again with the full
-        // game-outcome + positional blended value.
-        this.addToBuffer({
-          board,
-          policy: canonPolicy,
-          value: Math.max(-1, Math.min(1, posScore)),
-        });
-
         // Apply move
         slot.state = applyMove(slot.state, move);
         slot.moveCount++;
 
-        // Check game end (cap prevents shuffling games from hogging slots)
+        // Check game end (per-game random cap prevents shuffling games from hogging slots)
         const isOver =
           slot.state.status === 'checkmate' ||
           slot.state.status === 'stalemate' ||
           slot.state.status === 'draw' ||
-          slot.moveCount >= this.config.maxGameMoves;
+          slot.moveCount >= slot.moveCap;
 
         if (isOver) {
           this.finishGame(slot);
@@ -637,7 +649,7 @@ export class Trainer {
   }
 
   private finishGame(slot: GameSlot): void {
-    const hitCap = slot.moveCount >= this.config.maxGameMoves &&
+    const hitCap = slot.moveCount >= slot.moveCap &&
       slot.state.status !== 'checkmate' &&
       slot.state.status !== 'stalemate' &&
       slot.state.status !== 'draw';
@@ -661,15 +673,16 @@ export class Trainer {
       outcomeLabel = slot.state.status === 'stalemate' ? 'stalemate' : 'draw';
     }
 
-    const alpha = this.config.rewardShaping;
+    const winWeight = this.config.rewards.winning;
 
     for (const ex of slot.examples) {
       const outcomeFromPerspective = ex.turnColor === 'white' ? whiteOutcome : -whiteOutcome;
-      const blendedValue = (1 - alpha) * outcomeFromPerspective + alpha * ex.positionScore;
+      // Value = weighted game outcome + positional score (already weighted by individual reward weights)
+      const value = outcomeFromPerspective * winWeight + ex.positionScore;
       this.addToBuffer({
         board: ex.board,
         policy: ex.policy,
-        value: Math.max(-1, Math.min(1, blendedValue)),
+        value: Math.max(-1, Math.min(1, value)),
       });
     }
 

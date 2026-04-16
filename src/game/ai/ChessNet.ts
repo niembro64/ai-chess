@@ -95,8 +95,14 @@ export function indexToPosition(index: number, isWhite: boolean): { from: Positi
 export type NetConfig = {
   numResBlocks: number;
   numFilters: number;
+  kernelSize: number;       // 3 or 5
+  valueHeadSize: number;    // Hidden units in value head (16-64)
   learningRate: number;
 };
+
+// Policy channels is fixed at 64 (one per destination square).
+// This is structural, not tunable: the move encoding is from_square * 64 + to_square.
+const POLICY_CHANNELS = 64;
 
 export type SerializedWeights = {
   shapes: number[][];
@@ -115,7 +121,7 @@ export class ChessNet {
   }
 
   static create(config: NetConfig): ChessNet {
-    const model = buildModel(config.numResBlocks, config.numFilters);
+    const model = buildModel(config);
     return new ChessNet(model, config.learningRate);
   }
 
@@ -302,29 +308,28 @@ export class ChessNet {
 
 // --- Model architecture ---
 
-function buildModel(numResBlocks: number, numFilters: number): tf.LayersModel {
+function buildModel(cfg: NetConfig): tf.LayersModel {
   const input = tf.input({ shape: [8, 8, NUM_PLANES] });
+  const ks = cfg.kernelSize;
 
-  let x = conv2d(input, numFilters, 3);
-  for (let i = 0; i < numResBlocks; i++) {
-    x = residualBlock(x, numFilters);
+  let x = convBlock(input, cfg.numFilters, ks);
+  for (let i = 0; i < cfg.numResBlocks; i++) {
+    x = residualBlock(x, cfg.numFilters, ks);
   }
 
-  // Policy head
-  let ph = tf.layers.conv2d({ filters: 2, kernelSize: 1, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
-  ph = tf.layers.batchNormalization().apply(ph) as tf.SymbolicTensor;
-  ph = tf.layers.activation({ activation: 'relu' }).apply(ph) as tf.SymbolicTensor;
+  // Policy head: Conv2D(filters→policyChannels, 1×1) → flatten → softmax
+  let ph = tf.layers.conv2d({ filters: POLICY_CHANNELS, kernelSize: 1, padding: 'same', useBias: true }).apply(x) as tf.SymbolicTensor;
   ph = tf.layers.flatten().apply(ph) as tf.SymbolicTensor;
-  const policyOutput = tf.layers.dense({
-    units: POLICY_SIZE, activation: 'softmax', name: 'policy_output',
+  const policyOutput = tf.layers.activation({
+    activation: 'softmax', name: 'policy_output',
   }).apply(ph) as tf.SymbolicTensor;
 
-  // Value head
+  // Value head: Conv2D(filters→1, 1×1) → BN → ReLU → flatten → Dense(valueHeadSize) → Dense(1, tanh)
   let vh = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
   vh = tf.layers.batchNormalization().apply(vh) as tf.SymbolicTensor;
   vh = tf.layers.activation({ activation: 'relu' }).apply(vh) as tf.SymbolicTensor;
   vh = tf.layers.flatten().apply(vh) as tf.SymbolicTensor;
-  vh = tf.layers.dense({ units: 32, activation: 'relu' }).apply(vh) as tf.SymbolicTensor;
+  vh = tf.layers.dense({ units: cfg.valueHeadSize, activation: 'relu' }).apply(vh) as tf.SymbolicTensor;
   const valueOutput = tf.layers.dense({
     units: 1, activation: 'tanh', name: 'value_output',
   }).apply(vh) as tf.SymbolicTensor;
@@ -332,18 +337,18 @@ function buildModel(numResBlocks: number, numFilters: number): tf.LayersModel {
   return tf.model({ inputs: input, outputs: [policyOutput, valueOutput] });
 }
 
-function conv2d(x: tf.SymbolicTensor, filters: number, kernelSize: number): tf.SymbolicTensor {
+function convBlock(x: tf.SymbolicTensor, filters: number, kernelSize: number): tf.SymbolicTensor {
   let out = tf.layers.conv2d({ filters, kernelSize, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
   out = tf.layers.batchNormalization().apply(out) as tf.SymbolicTensor;
   out = tf.layers.activation({ activation: 'relu' }).apply(out) as tf.SymbolicTensor;
   return out;
 }
 
-function residualBlock(x: tf.SymbolicTensor, filters: number): tf.SymbolicTensor {
-  let out = tf.layers.conv2d({ filters, kernelSize: 3, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
+function residualBlock(x: tf.SymbolicTensor, filters: number, kernelSize: number): tf.SymbolicTensor {
+  let out = tf.layers.conv2d({ filters, kernelSize, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
   out = tf.layers.batchNormalization().apply(out) as tf.SymbolicTensor;
   out = tf.layers.activation({ activation: 'relu' }).apply(out) as tf.SymbolicTensor;
-  out = tf.layers.conv2d({ filters, kernelSize: 3, padding: 'same', useBias: false }).apply(out) as tf.SymbolicTensor;
+  out = tf.layers.conv2d({ filters, kernelSize, padding: 'same', useBias: false }).apply(out) as tf.SymbolicTensor;
   out = tf.layers.batchNormalization().apply(out) as tf.SymbolicTensor;
   out = tf.layers.add().apply([out, x]) as tf.SymbolicTensor;
   out = tf.layers.activation({ activation: 'relu' }).apply(out) as tf.SymbolicTensor;

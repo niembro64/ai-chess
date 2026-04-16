@@ -55,4 +55,13 @@ const mode = ref<'play' | 'train'>('play');
   border-color: #6666cc;
   color: white;
 }
+
+@media (max-width: 480px) {
+  .train-toggle {
+    bottom: 8px;
+    right: 8px;
+    font-size: 11px;
+    padding: 6px 12px;
+  }
+}
 </style>

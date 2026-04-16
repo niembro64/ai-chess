@@ -195,9 +195,17 @@ const canJoin = computed(() => {
   border: 2px solid #4444aa;
   border-radius: 16px;
   padding: 40px 50px;
-  min-width: 420px;
+  min-width: min(420px, 90vw);
+  max-width: 90vw;
   text-align: center;
   box-shadow: 0 0 60px rgba(68, 68, 170, 0.3);
+}
+
+@media (max-width: 480px) {
+  .lobby-modal {
+    padding: 24px 20px;
+    border-radius: 12px;
+  }
 }
 
 .title {

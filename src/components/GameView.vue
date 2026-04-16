@@ -481,6 +481,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow-y: auto;
 }
 
 .game-layout {
@@ -490,12 +491,37 @@ onUnmounted(() => {
   padding: 20px;
 }
 
+@media (max-width: 900px) {
+  .game-layout {
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+  }
+}
+
 .sidebar {
   width: 200px;
   background: rgba(20, 20, 35, 0.95);
   border: 1px solid #333;
   border-radius: 8px;
   overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    width: 100%;
+    max-width: 400px;
+  }
+  .sidebar:first-child {
+    order: 2;
+  }
+  .sidebar:last-child {
+    order: 3;
+  }
+  .board-area {
+    order: 1;
+  }
 }
 
 .sidebar-header {
@@ -549,7 +575,7 @@ onUnmounted(() => {
   background: rgba(20, 20, 35, 0.95);
   border: 1px solid #333;
   border-radius: 8px;
-  min-width: 400px;
+  min-width: min(400px, 90vw);
   justify-content: center;
 }
 
