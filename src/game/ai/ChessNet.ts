@@ -1,7 +1,7 @@
-// Neural network for chess: ResNet with policy + value heads
-// Input: 8x8x18 board planes (channels-last)
+// Neural network for chess: ResNet with SE blocks, policy head + WDL value head
+// Input: 8x8x20 board planes (channels-last)
 // Policy output: 4096 probabilities (64 from-squares × 64 to-squares)
-// Value output: scalar in [-1, 1]
+// Value output: WDL distribution [P(win), P(draw), P(loss)]; scalar value = P(win) - P(loss)
 
 import * as tf from '@tensorflow/tfjs';
 import type { ChessGameState, PieceType, Position, Move } from '@/types/chess';
@@ -10,10 +10,19 @@ import { extractWeights, cpuPredict, cpuPredictBatch, type CPUWeights } from './
 // --- Board encoding ---
 
 const PIECE_TYPES: PieceType[] = ['king', 'queen', 'rook', 'bishop', 'knight', 'pawn'];
-const NUM_PLANES = 18;
-const BOARD_FLOATS = 8 * 8 * NUM_PLANES; // 1152
+export const NUM_PLANES = 20;
+const BOARD_FLOATS = 8 * 8 * NUM_PLANES;
 export const POLICY_SIZE = 4096; // 64 * 64
 
+// Plane layout (from current player's perspective; board is flipped for black so "own"
+// always occupies the bottom half of the 8x8 input):
+//   0- 5  own pieces (K Q R B N P)
+//   6-11  opp pieces
+//   12    bias (constant 1)
+//   13    halfMoveClock / 50          (50-move rule awareness)
+//   14    fullMoveNumber / 100        (game phase awareness)
+//   15-18 castling rights (own K-side, own Q-side, opp K-side, opp Q-side)
+//   19    en passant target
 export function encodeBoard(state: ChessGameState): Float32Array {
   const data = new Float32Array(BOARD_FLOATS);
   const isWhite = state.currentTurn === 'white';
@@ -33,12 +42,24 @@ export function encodeBoard(state: ChessGameState): Float32Array {
     }
   }
 
-  // Channel 12: constant ones (bias plane)
+  // Channel 12: bias plane
   for (let i = 0; i < 64; i++) {
     data[i * NUM_PLANES + 12] = 1;
   }
 
-  // Channels 13-16: castling rights
+  // Channel 13: halfMoveClock / 50 (clamp to 1)
+  const hmc = Math.min(1, state.halfMoveClock / 50);
+  if (hmc > 0) {
+    for (let i = 0; i < 64; i++) data[i * NUM_PLANES + 13] = hmc;
+  }
+
+  // Channel 14: fullMoveNumber / 100 (clamp to 1)
+  const fmn = Math.min(1, state.fullMoveNumber / 100);
+  if (fmn > 0) {
+    for (let i = 0; i < 64; i++) data[i * NUM_PLANES + 14] = fmn;
+  }
+
+  // Channels 15-18: castling rights
   const cr = state.castlingRights;
   const castling = [
     isWhite ? cr.whiteKingside : cr.blackKingside,
@@ -49,16 +70,16 @@ export function encodeBoard(state: ChessGameState): Float32Array {
   for (let c = 0; c < 4; c++) {
     if (castling[c]) {
       for (let i = 0; i < 64; i++) {
-        data[i * NUM_PLANES + 13 + c] = 1;
+        data[i * NUM_PLANES + 15 + c] = 1;
       }
     }
   }
 
-  // Channel 17: en passant target
+  // Channel 19: en passant target
   if (state.enPassantTarget) {
     const epRank = isWhite ? state.enPassantTarget.rank : 7 - state.enPassantTarget.rank;
     const epFile = isWhite ? state.enPassantTarget.file : 7 - state.enPassantTarget.file;
-    data[(epRank * 8 + epFile) * NUM_PLANES + 17] = 1;
+    data[(epRank * 8 + epFile) * NUM_PLANES + 19] = 1;
   }
 
   return data;
@@ -98,15 +119,21 @@ export type NetConfig = {
   numFilters: number;
   kernelSize: number;       // 3 or 5
   valueHeadSize: number;    // Hidden units in value head (16-64)
+  seReduction: number;      // Squeeze-and-excitation channel reduction ratio (typically 8)
   learningRate: number;
 };
 
 // Policy channels is fixed at 64 (one per destination square).
 const POLICY_CHANNELS = 64;
+export const WDL_SIZE = 3;
 
 // Detect architecture config from a loaded TF.js model.
 // Uses model.weights (layer variable metadata) to read shapes WITHOUT
 // creating or disposing any tensors.
+//
+// Expected weight ordering (per res block with SE):
+//   conv1 W, bn1 γ β μ σ², conv2 W, bn2 γ β μ σ², SE_dense1 W b, SE_dense2 W b  (14 weights)
+// Value head: conv W, BN γ β μ σ², dense1 W b, dense2(3) W b
 function detectConfigFromModel(model: tf.LayersModel): Omit<NetConfig, 'learningRate'> {
   const shapes = model.weights.map(w => w.shape as number[]);
 
@@ -121,18 +148,30 @@ function detectConfigFromModel(model: tf.LayersModel): Omit<NetConfig, 'learning
   }
   const numResBlocks = Math.floor(resConvs / 2);
 
-  let valueHeadSize = 64;
+  // Detect SE reduction from dense weight [numFilters, hidden] where hidden < numFilters
+  let seReduction = 8;
   for (const s of shapes) {
-    if (s.length === 2 && s[0] === 64) {
+    if (s.length === 2 && s[0] === numFilters && s[1] > 0 && s[1] < numFilters) {
+      seReduction = Math.max(1, Math.round(numFilters / s[1]));
+      break;
+    }
+  }
+
+  // Value head size: dense [64, vhs] followed later by [vhs, 3]
+  let valueHeadSize = 64;
+  for (let i = 0; i < shapes.length; i++) {
+    const s = shapes[i];
+    if (s.length === 2 && s[0] === 64 && s[1] !== WDL_SIZE) {
       valueHeadSize = s[1];
       break;
     }
   }
 
-  return { numResBlocks, numFilters, kernelSize, valueHeadSize };
+  return { numResBlocks, numFilters, kernelSize, valueHeadSize, seReduction };
 }
 
 export type SerializedWeights = {
+  config?: NetConfig;   // Optional explicit config; if absent, detected from shapes
   shapes: number[][];
   data: number[][];
 };
@@ -165,6 +204,7 @@ export class ChessNet {
       this.config.numFilters,
       this.config.numResBlocks,
       this.config.valueHeadSize,
+      this.config.seReduction,
     );
   }
 
@@ -187,10 +227,14 @@ export class ChessNet {
     return samples;
   }
 
+  getConfig(): NetConfig {
+    return { ...this.config };
+  }
+
   // Export all weights as a serializable object.
   // Uses model.weights (LayerVariable refs) to avoid the getWeights copy/dispose ambiguity.
   exportWeights(): SerializedWeights {
-    const result: SerializedWeights = { shapes: [], data: [] };
+    const result: SerializedWeights = { config: { ...this.config }, shapes: [], data: [] };
     for (const w of this.model.weights) {
       result.shapes.push(w.shape as number[]);
       result.data.push(Array.from(w.read().dataSync() as Float32Array));
@@ -213,21 +257,23 @@ export class ChessNet {
     return this.cpu !== null && this.config.numFilters <= 32;
   }
 
-  predict(state: ChessGameState): { policy: Float32Array; value: number } {
+  predict(state: ChessGameState): { policy: Float32Array; wdl: Float32Array; value: number } {
     if (this.useCPU) {
       return cpuPredict(encodeBoard(state), this.cpu!);
     }
     return tf.tidy(() => {
       const input = tf.tensor4d(encodeBoard(state), [1, 8, 8, NUM_PLANES]);
       const outputs = this.model.predict(input) as tf.Tensor[];
+      const wdl = new Float32Array(outputs[1].dataSync() as Float32Array);
       return {
         policy: new Float32Array(outputs[0].dataSync() as Float32Array),
-        value: (outputs[1].dataSync() as Float32Array)[0],
+        wdl,
+        value: wdl[0] - wdl[2],
       };
     });
   }
 
-  predictBatch(boards: Float32Array[]): Array<{ policy: Float32Array; value: number }> {
+  predictBatch(boards: Float32Array[]): Array<{ policy: Float32Array; wdl: Float32Array; value: number }> {
     if (boards.length === 0) return [];
     if (this.useCPU) {
       return cpuPredictBatch(boards, this.cpu!);
@@ -241,12 +287,14 @@ export class ChessNet {
       const input = tf.tensor4d(buf, [batchSize, 8, 8, NUM_PLANES]);
       const outputs = this.model.predict(input) as tf.Tensor[];
       const allPolicy = outputs[0].dataSync() as Float32Array;
-      const allValue = outputs[1].dataSync() as Float32Array;
-      const results: Array<{ policy: Float32Array; value: number }> = [];
+      const allWdl = outputs[1].dataSync() as Float32Array;
+      const results: Array<{ policy: Float32Array; wdl: Float32Array; value: number }> = [];
       for (let i = 0; i < batchSize; i++) {
+        const wdl = allWdl.slice(i * WDL_SIZE, (i + 1) * WDL_SIZE);
         results.push({
           policy: allPolicy.slice(i * POLICY_SIZE, (i + 1) * POLICY_SIZE),
-          value: allValue[i],
+          wdl,
+          value: wdl[0] - wdl[2],
         });
       }
       return results;
@@ -262,16 +310,23 @@ export class ChessNet {
 
     const boardBuf = new Float32Array(batchSize * BOARD_FLOATS);
     const policyBuf = new Float32Array(batchSize * POLICY_SIZE);
-    const valueBuf = new Float32Array(batchSize);
+    // Convert continuous value [-1,1] to WDL target: P(win)=max(0,v), P(loss)=max(0,-v),
+    // P(draw)=1-P(win)-P(loss). v=1 → [1,0,0], v=-1 → [0,0,1], v=0 → [0,1,0].
+    const wdlBuf = new Float32Array(batchSize * WDL_SIZE);
     for (let i = 0; i < batchSize; i++) {
       boardBuf.set(boards[i], i * BOARD_FLOATS);
       policyBuf.set(policies[i], i * POLICY_SIZE);
-      valueBuf[i] = values[i];
+      const v = Math.max(-1, Math.min(1, values[i]));
+      const w = Math.max(0, v);
+      const l = Math.max(0, -v);
+      wdlBuf[i * WDL_SIZE + 0] = w;
+      wdlBuf[i * WDL_SIZE + 1] = 1 - w - l;
+      wdlBuf[i * WDL_SIZE + 2] = l;
     }
 
     const inputTensor = tf.tensor4d(boardBuf, [batchSize, 8, 8, NUM_PLANES]);
     const policyTarget = tf.tensor2d(policyBuf, [batchSize, POLICY_SIZE]);
-    const valueTarget = tf.tensor2d(valueBuf, [batchSize, 1]);
+    const wdlTarget = tf.tensor2d(wdlBuf, [batchSize, WDL_SIZE]);
 
     let policyLoss = 0;
     let valueLoss = 0;
@@ -281,7 +336,8 @@ export class ChessNet {
     const totalLossTensor = this.optimizer.minimize(() => {
       const outputs = this.model.apply(inputTensor, { training: true }) as tf.Tensor[];
       const pLoss = tf.neg(tf.sum(tf.mul(policyTarget, tf.log(tf.add(outputs[0], 1e-8))))).div(tf.scalar(batchSize));
-      const vLoss = tf.losses.meanSquaredError(valueTarget, outputs[1]) as tf.Scalar;
+      // WDL cross-entropy loss: -mean(sum(target * log(pred), axis=1))
+      const vLoss = tf.neg(tf.mean(tf.sum(tf.mul(wdlTarget, tf.log(tf.add(outputs[1], 1e-8))), 1))) as tf.Scalar;
 
       // L2 weight decay (simulates AdamW) — computed as a single sum to minimize intermediate tensors
       const allSquaredWeights = this.model.trainableWeights.map(w => tf.sum(tf.square(w.read())));
@@ -298,7 +354,7 @@ export class ChessNet {
     totalLossTensor!.dispose();
     inputTensor.dispose();
     policyTarget.dispose();
-    valueTarget.dispose();
+    wdlTarget.dispose();
 
     return { policyLoss, valueLoss, totalLoss };
   }
@@ -342,9 +398,19 @@ export class ChessNet {
   }
 
   // Load directly from IndexedDB without creating a throwaway model first.
+  // Returns null (and deletes the stored model) if the saved architecture is
+  // incompatible with the current encoder (e.g., a model saved before the
+  // plane-count / WDL-head upgrade).
   static async loadFromSaved(lr: number): Promise<ChessNet | null> {
     try {
       const model = await tf.loadLayersModel('indexeddb://chess-net');
+      const firstConvShape = model.weights[0]?.shape as number[] | undefined;
+      const savedPlanes = firstConvShape?.[2];
+      if (savedPlanes !== NUM_PLANES) {
+        model.dispose();
+        await ChessNet.deleteSavedModel();
+        return null;
+      }
       const config = detectConfigFromModel(model);
       return new ChessNet(model, lr, { ...config, learningRate: lr });
     } catch {
@@ -366,7 +432,7 @@ function buildModel(cfg: NetConfig): tf.LayersModel {
 
   let x = convBlock(input, cfg.numFilters, ks);
   for (let i = 0; i < cfg.numResBlocks; i++) {
-    x = residualBlock(x, cfg.numFilters, ks);
+    x = residualBlockSE(x, cfg.numFilters, ks, cfg.seReduction);
   }
 
   // Policy head: Conv2D(filters→policyChannels, 1×1) → flatten → softmax
@@ -376,17 +442,17 @@ function buildModel(cfg: NetConfig): tf.LayersModel {
     activation: 'softmax', name: 'policy_output',
   }).apply(ph) as tf.SymbolicTensor;
 
-  // Value head: Conv2D(filters→1, 1×1) → BN → ReLU → flatten → Dense(valueHeadSize) → Dense(1, tanh)
+  // Value head: Conv2D(filters→1, 1×1) → BN → ReLU → flatten → Dense(vhs, relu) → Dense(3, softmax)
   let vh = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
   vh = tf.layers.batchNormalization().apply(vh) as tf.SymbolicTensor;
   vh = tf.layers.activation({ activation: 'relu' }).apply(vh) as tf.SymbolicTensor;
   vh = tf.layers.flatten().apply(vh) as tf.SymbolicTensor;
   vh = tf.layers.dense({ units: cfg.valueHeadSize, activation: 'relu' }).apply(vh) as tf.SymbolicTensor;
-  const valueOutput = tf.layers.dense({
-    units: 1, activation: 'tanh', name: 'value_output',
+  const wdlOutput = tf.layers.dense({
+    units: WDL_SIZE, activation: 'softmax', name: 'wdl_output',
   }).apply(vh) as tf.SymbolicTensor;
 
-  return tf.model({ inputs: input, outputs: [policyOutput, valueOutput] });
+  return tf.model({ inputs: input, outputs: [policyOutput, wdlOutput] });
 }
 
 function convBlock(x: tf.SymbolicTensor, filters: number, kernelSize: number): tf.SymbolicTensor {
@@ -396,12 +462,24 @@ function convBlock(x: tf.SymbolicTensor, filters: number, kernelSize: number): t
   return out;
 }
 
-function residualBlock(x: tf.SymbolicTensor, filters: number, kernelSize: number): tf.SymbolicTensor {
+// Residual block with Squeeze-and-Excitation (channel-wise attention).
+// Layer ordering determines weight serialization order — DO NOT REORDER without
+// also updating CPUForward.extractWeights and the Python weight exporter.
+function residualBlockSE(x: tf.SymbolicTensor, filters: number, kernelSize: number, seReduction: number): tf.SymbolicTensor {
   let out = tf.layers.conv2d({ filters, kernelSize, padding: 'same', useBias: false }).apply(x) as tf.SymbolicTensor;
   out = tf.layers.batchNormalization().apply(out) as tf.SymbolicTensor;
   out = tf.layers.activation({ activation: 'relu' }).apply(out) as tf.SymbolicTensor;
   out = tf.layers.conv2d({ filters, kernelSize, padding: 'same', useBias: false }).apply(out) as tf.SymbolicTensor;
   out = tf.layers.batchNormalization().apply(out) as tf.SymbolicTensor;
+
+  // SE: global avg pool → dense(hidden, relu) → dense(filters, sigmoid) → per-channel scale
+  const hidden = Math.max(1, Math.floor(filters / seReduction));
+  let se = tf.layers.globalAveragePooling2d({ dataFormat: 'channelsLast' }).apply(out) as tf.SymbolicTensor;
+  se = tf.layers.dense({ units: hidden, activation: 'relu', useBias: true }).apply(se) as tf.SymbolicTensor;
+  se = tf.layers.dense({ units: filters, activation: 'sigmoid', useBias: true }).apply(se) as tf.SymbolicTensor;
+  se = tf.layers.reshape({ targetShape: [1, 1, filters] }).apply(se) as tf.SymbolicTensor;
+  out = tf.layers.multiply().apply([out, se]) as tf.SymbolicTensor;
+
   out = tf.layers.add().apply([out, x]) as tf.SymbolicTensor;
   out = tf.layers.activation({ activation: 'relu' }).apply(out) as tf.SymbolicTensor;
   return out;

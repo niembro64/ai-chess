@@ -2,35 +2,46 @@
 // ~10-50x faster than TF.js WebGL for our tiny model because:
 // - No GPU dispatch overhead (~0.1ms per op)
 // - No tensor creation/disposal
-// - Entire model fits in L1 cache (40KB)
+// - Entire small model fits in cache
 // - Direct array math, no framework abstraction
+//
+// Supports: input encoding with NUM_PLANES channels, ResNet with SE blocks,
+//           policy head (softmax over POLICY_SIZE), WDL value head (softmax over 3).
 
 import * as tf from '@tensorflow/tfjs';
-import { POLICY_SIZE } from './ChessNet';
+import { POLICY_SIZE, NUM_PLANES, WDL_SIZE } from './ChessNet';
 
 const BOARD = 8;
 const BOARD_SQ = BOARD * BOARD; // 64
 
 // --- Weight storage ---
 
+export type CPUResBlock = {
+  conv1: Float32Array;
+  scale1: Float32Array;
+  bias1: Float32Array;
+  conv2: Float32Array;
+  scale2: Float32Array;
+  bias2: Float32Array;
+  seHidden: number;
+  seDense1W: Float32Array; // [filters * seHidden]
+  seDense1B: Float32Array; // [seHidden]
+  seDense2W: Float32Array; // [seHidden * filters]
+  seDense2B: Float32Array; // [filters]
+};
+
 export type CPUWeights = {
   kernelSize: number;
   numFilters: number;
   numResBlocks: number;
   valueHeadSize: number;
+  seReduction: number;
   // Fused BN: output = input * scale + bias (precomputed from gamma, beta, mean, var)
   // Conv weights stored as [kH * kW * inC * outC]
   initConv: Float32Array;
   initScale: Float32Array; // gamma / sqrt(var + eps)
   initBias: Float32Array;  // beta - mean * scale
-  resBlocks: Array<{
-    conv1: Float32Array;
-    scale1: Float32Array;
-    bias1: Float32Array;
-    conv2: Float32Array;
-    scale2: Float32Array;
-    bias2: Float32Array;
-  }>;
+  resBlocks: CPUResBlock[];
   policyConv: Float32Array; // [1 * 1 * filters * 64]
   policyBias: Float32Array; // [64]
   valueConv: Float32Array;  // [1 * 1 * filters * 1]
@@ -38,8 +49,8 @@ export type CPUWeights = {
   valueBias: Float32Array;
   valueDense1W: Float32Array; // [64 * valueHeadSize]
   valueDense1B: Float32Array;
-  valueDense2W: Float32Array; // [valueHeadSize * 1]
-  valueDense2B: Float32Array;
+  valueDense2W: Float32Array; // [valueHeadSize * 3]  (WDL)
+  valueDense2B: Float32Array; // [3]
 };
 
 const BN_EPS = 0.001; // TF.js default BatchNorm epsilon
@@ -56,10 +67,13 @@ function fuseBN(gamma: Float32Array, beta: Float32Array, mean: Float32Array, var
   return { scale, bias };
 }
 
-// Extract weights from TF.js model into CPU-friendly format
-export function extractWeights(model: tf.LayersModel, kernelSize: number, numFilters: number, numResBlocks: number, valueHeadSize: number): CPUWeights {
-  // Read weights via model.weights (LayerVariable references, not copies).
-  // dataSync copies the data into a JS array. No tensors to dispose.
+// Extract weights from TF.js model into CPU-friendly format.
+// Weight order (must match buildModel layer application order in ChessNet.ts):
+//   initial:     conv(1) bn(γ β μ σ²) = 5
+//   per res blk: conv1(1) bn1(4) conv2(1) bn2(4) seDense1(W,b) seDense2(W,b) = 14
+//   policy head: conv(W,b) = 2
+//   value head:  conv(W) bn(4) dense1(W,b) dense2(W,b) = 9
+export function extractWeights(model: tf.LayersModel, kernelSize: number, numFilters: number, numResBlocks: number, valueHeadSize: number, seReduction: number): CPUWeights {
   const allWeights = model.weights;
   let idx = 0;
   const next = () => {
@@ -76,8 +90,9 @@ export function extractWeights(model: tf.LayersModel, kernelSize: number, numFil
   const initVar = next();
   const initBN = fuseBN(initGamma, initBeta, initMean, initVar);
 
-  // Res blocks
-  const resBlocks: CPUWeights['resBlocks'] = [];
+  // Res blocks (now with SE)
+  const seHidden = Math.max(1, Math.floor(numFilters / seReduction));
+  const resBlocks: CPUResBlock[] = [];
   for (let b = 0; b < numResBlocks; b++) {
     const conv1 = next();
     const g1 = next(), b1 = next(), m1 = next(), v1 = next();
@@ -85,9 +100,15 @@ export function extractWeights(model: tf.LayersModel, kernelSize: number, numFil
     const conv2 = next();
     const g2 = next(), b2 = next(), m2 = next(), v2 = next();
     const bn2 = fuseBN(g2, b2, m2, v2);
+    const seDense1W = next();
+    const seDense1B = next();
+    const seDense2W = next();
+    const seDense2B = next();
     resBlocks.push({
       conv1, scale1: bn1.scale, bias1: bn1.bias,
       conv2, scale2: bn2.scale, bias2: bn2.bias,
+      seHidden,
+      seDense1W, seDense1B, seDense2W, seDense2B,
     });
   }
 
@@ -95,7 +116,7 @@ export function extractWeights(model: tf.LayersModel, kernelSize: number, numFil
   const policyConv = next();
   const policyBias = next();
 
-  // Value head: conv (no bias) + BN + dense1 + dense2
+  // Value head: conv (no bias) + BN + dense1 + dense2 (WDL, 3 outputs)
   const valueConv = next();
   const vg = next(), vb = next(), vm = next(), vv = next();
   const valueBN = fuseBN(vg, vb, vm, vv);
@@ -105,7 +126,7 @@ export function extractWeights(model: tf.LayersModel, kernelSize: number, numFil
   const valueDense2B = next();
 
   return {
-    kernelSize, numFilters, numResBlocks, valueHeadSize,
+    kernelSize, numFilters, numResBlocks, valueHeadSize, seReduction,
     initConv, initScale: initBN.scale, initBias: initBN.bias,
     resBlocks,
     policyConv, policyBias,
@@ -200,7 +221,7 @@ function bnRelu(input: Float32Array, scale: Float32Array, bias: Float32Array, ch
   }
 }
 
-// Fused BatchNorm (no ReLU) for value head before its own ReLU
+// Fused BatchNorm (no ReLU) — used before SE scaling so SE applies to BN output
 function bn(input: Float32Array, scale: Float32Array, bias: Float32Array, channels: number, output: Float32Array): void {
   const n = BOARD_SQ * channels;
   for (let i = 0; i < n; i++) {
@@ -253,6 +274,55 @@ function softmax(input: Float32Array, size: number, output: Float32Array): void 
   }
 }
 
+// Squeeze-Excite: global avg pool (channels-last) → dense(hidden, relu) → dense(filters, sigmoid)
+// Returns per-channel scale factor in seScale.
+function seCompute(
+  spatial: Float32Array,     // [BOARD_SQ * filters] post-BN activations
+  filters: number,
+  block: CPUResBlock,
+  seAvgBuf: Float32Array,    // [filters]
+  seHiddenBuf: Float32Array, // [hidden]
+  seScaleBuf: Float32Array,  // [filters]
+): void {
+  const hidden = block.seHidden;
+  // Global avg pool over 64 spatial positions
+  for (let c = 0; c < filters; c++) seAvgBuf[c] = 0;
+  for (let pos = 0; pos < BOARD_SQ; pos++) {
+    const base = pos * filters;
+    for (let c = 0; c < filters; c++) seAvgBuf[c] += spatial[base + c];
+  }
+  const inv = 1 / BOARD_SQ;
+  for (let c = 0; c < filters; c++) seAvgBuf[c] *= inv;
+
+  // Dense1 + ReLU: [filters] → [hidden]
+  for (let j = 0; j < hidden; j++) {
+    let s = block.seDense1B[j];
+    for (let i = 0; i < filters; i++) {
+      s += seAvgBuf[i] * block.seDense1W[i * hidden + j];
+    }
+    seHiddenBuf[j] = s > 0 ? s : 0;
+  }
+
+  // Dense2 + sigmoid: [hidden] → [filters]
+  for (let j = 0; j < filters; j++) {
+    let s = block.seDense2B[j];
+    for (let i = 0; i < hidden; i++) {
+      s += seHiddenBuf[i] * block.seDense2W[i * filters + j];
+    }
+    seScaleBuf[j] = 1 / (1 + Math.exp(-s));
+  }
+}
+
+// Apply per-channel SE scale in place
+function seApply(spatial: Float32Array, seScale: Float32Array, filters: number): void {
+  for (let pos = 0; pos < BOARD_SQ; pos++) {
+    const base = pos * filters;
+    for (let c = 0; c < filters; c++) {
+      spatial[base + c] *= seScale[c];
+    }
+  }
+}
+
 // --- Full forward pass ---
 
 // Pre-allocated buffers to avoid GC pressure
@@ -262,9 +332,14 @@ let buf3: Float32Array | null = null;
 let policyBuf: Float32Array | null = null;
 let valueFlatBuf: Float32Array | null = null;
 let valueDense1Buf: Float32Array | null = null;
+let valueDense2Buf: Float32Array | null = null; // [WDL_SIZE]
+let seAvgBuf: Float32Array | null = null;
+let seHiddenBuf: Float32Array | null = null;
+let seScaleBuf: Float32Array | null = null;
 
-function ensureBuffers(filters: number, valueHeadSize: number): void {
+function ensureBuffers(filters: number, valueHeadSize: number, seReduction: number): void {
   const spatialSize = BOARD_SQ * filters;
+  const hidden = Math.max(1, Math.floor(filters / seReduction));
   if (!buf1 || buf1.length < spatialSize) {
     buf1 = new Float32Array(spatialSize);
     buf2 = new Float32Array(spatialSize);
@@ -272,33 +347,47 @@ function ensureBuffers(filters: number, valueHeadSize: number): void {
     policyBuf = new Float32Array(POLICY_SIZE);
     valueFlatBuf = new Float32Array(BOARD_SQ);
     valueDense1Buf = new Float32Array(valueHeadSize);
+    valueDense2Buf = new Float32Array(WDL_SIZE);
+    seAvgBuf = new Float32Array(filters);
+    seHiddenBuf = new Float32Array(hidden);
+    seScaleBuf = new Float32Array(filters);
+  } else {
+    if (!valueDense1Buf || valueDense1Buf.length < valueHeadSize) valueDense1Buf = new Float32Array(valueHeadSize);
+    if (!valueDense2Buf) valueDense2Buf = new Float32Array(WDL_SIZE);
+    if (!seAvgBuf || seAvgBuf.length < filters) seAvgBuf = new Float32Array(filters);
+    if (!seHiddenBuf || seHiddenBuf.length < hidden) seHiddenBuf = new Float32Array(hidden);
+    if (!seScaleBuf || seScaleBuf.length < filters) seScaleBuf = new Float32Array(filters);
   }
 }
 
 export function cpuPredict(
-  board: Float32Array, // [8*8*18] encoded board
+  board: Float32Array, // [8*8*NUM_PLANES] encoded board
   w: CPUWeights,
-): { policy: Float32Array; value: number } {
+): { policy: Float32Array; wdl: Float32Array; value: number } {
   const f = w.numFilters;
   const ks = w.kernelSize;
   const vhs = w.valueHeadSize;
-  ensureBuffers(f, vhs);
+  ensureBuffers(f, vhs, w.seReduction);
 
   // Initial conv + BN + ReLU
-  conv2d(board, w.initConv, 18, f, ks, buf1!);
+  conv2d(board, w.initConv, NUM_PLANES, f, ks, buf1!);
   bnRelu(buf1!, w.initScale, w.initBias, f, buf2!);
 
-  // Residual blocks
+  // Residual blocks with SE
   let current = buf2!;
   for (let b = 0; b < w.numResBlocks; b++) {
     const block = w.resBlocks[b];
     conv2d(current, block.conv1, f, f, ks, buf3!);
     bnRelu(buf3!, block.scale1, block.bias1, f, buf1!);
     conv2d(buf1!, block.conv2, f, f, ks, buf3!);
-    // BN (no ReLU yet) + residual add + ReLU
+    // BN (no ReLU yet); SE is applied before residual add
     bn(buf3!, block.scale2, block.bias2, f, buf1!);
+    // SE: compute scale from buf1, apply to buf1 in place
+    seCompute(buf1!, f, block, seAvgBuf!, seHiddenBuf!, seScaleBuf!);
+    seApply(buf1!, seScaleBuf!, f);
+    // Residual add + ReLU: buf1 (SE-scaled) + current → buf3
     residualAddRelu(buf1!, current, BOARD_SQ * f, buf3!);
-    // Swap: buf3 is now current, buf2 is free
+    // Swap: buf3 is now current, old current goes into buf3 slot
     const tmp = current;
     current = buf3!;
     buf3 = tmp;
@@ -309,30 +398,26 @@ export function cpuPredict(
   const policy = new Float32Array(POLICY_SIZE);
   softmax(policyBuf!, POLICY_SIZE, policy);
 
-  // Value head: 1x1 conv → BN → ReLU → dense → ReLU → dense → tanh
+  // Value head: 1x1 conv → BN → ReLU → dense → ReLU → dense(3) → softmax
   conv1x1(current, w.valueConv, f, 1, valueFlatBuf!);
-  // BN + ReLU (1 channel, 64 spatial positions)
   for (let i = 0; i < BOARD_SQ; i++) {
     const val = valueFlatBuf![i] * w.valueScale[0] + w.valueBias[0];
     valueFlatBuf![i] = val > 0 ? val : 0;
   }
-  // Dense1 + ReLU
   dense(valueFlatBuf!, w.valueDense1W, w.valueDense1B, BOARD_SQ, vhs, valueDense1Buf!);
   reluInPlace(valueDense1Buf!, vhs);
-  // Dense2 + tanh
-  let valueOut = w.valueDense2B[0];
-  for (let i = 0; i < vhs; i++) {
-    valueOut += valueDense1Buf![i] * w.valueDense2W[i];
-  }
-  const value = Math.tanh(valueOut);
+  dense(valueDense1Buf!, w.valueDense2W, w.valueDense2B, vhs, WDL_SIZE, valueDense2Buf!);
+  const wdl = new Float32Array(WDL_SIZE);
+  softmax(valueDense2Buf!, WDL_SIZE, wdl);
+  const value = wdl[0] - wdl[2];
 
-  return { policy, value };
+  return { policy, wdl, value };
 }
 
 // Batch predict: just loop (no batch overhead on CPU)
 export function cpuPredictBatch(
   boards: Float32Array[],
   w: CPUWeights,
-): Array<{ policy: Float32Array; value: number }> {
+): Array<{ policy: Float32Array; wdl: Float32Array; value: number }> {
   return boards.map(b => cpuPredict(b, w));
 }

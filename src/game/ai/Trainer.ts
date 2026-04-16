@@ -337,6 +337,7 @@ export type TrainerConfig = {
   numFilters: number;
   kernelSize: number;
   valueHeadSize: number;
+  seReduction: number;
   rewards: RewardWeights;
 };
 
@@ -351,6 +352,7 @@ export const DEFAULT_CONFIG: TrainerConfig = {
   numFilters: 64,
   kernelSize: 3,
   valueHeadSize: 64,
+  seReduction: 8,
   rewards: { ...DEFAULT_REWARD_WEIGHTS },
 };
 
@@ -524,6 +526,7 @@ export class Trainer {
           numFilters: this.config.numFilters,
           kernelSize: this.config.kernelSize,
           valueHeadSize: this.config.valueHeadSize,
+          seReduction: this.config.seReduction,
           learningRate: this.config.learningRate,
         });
         this.addLog(`New network: ${this.config.numResBlocks} res blocks, ${this.config.numFilters} filters, ${this.net.getParamCount().toLocaleString()} params`);

@@ -1,22 +1,26 @@
 // AIPlayer: loads a trained model and generates moves via MCTS
 
-import { ChessNet, type SerializedWeights } from './ChessNet';
+import { ChessNet, type NetConfig, type SerializedWeights, WDL_SIZE } from './ChessNet';
 import { runMCTS } from './MCTS';
 import type { ChessGameState, Move } from '@/types/chess';
 
 export type AIModelSource = 'trained' | 'preset' | 'untrained';
 
-const DEFAULT_NET_CONFIG = { numResBlocks: 6, numFilters: 64, kernelSize: 3, valueHeadSize: 64, learningRate: 0.01 };
+const DEFAULT_NET_CONFIG: NetConfig = {
+  numResBlocks: 6,
+  numFilters: 64,
+  kernelSize: 3,
+  valueHeadSize: 64,
+  seReduction: 8,
+  learningRate: 0.01,
+};
 
 // Detect architecture from weight shapes so we create a matching model
-function detectConfigFromWeights(weights: SerializedWeights): typeof DEFAULT_NET_CONFIG {
-  // First weight is the initial conv: [kernelSize, kernelSize, 18, numFilters]
+function detectConfigFromWeights(weights: SerializedWeights): NetConfig {
   const firstShape = weights.shapes[0];
-  const kernelSize = firstShape[0]; // 3 or 5
-  const numFilters = firstShape[3]; // e.g. 8, 16, 32
+  const kernelSize = firstShape[0];
+  const numFilters = firstShape[3];
 
-  // Count res blocks: each block has 2 conv weights (kernelSize×kernelSize×filters×filters)
-  // After the initial conv weight + BN weights, res block convs come in pairs
   let resBlockConvs = 0;
   for (const shape of weights.shapes) {
     if (shape.length === 4 && shape[0] === kernelSize && shape[2] === numFilters && shape[3] === numFilters) {
@@ -25,16 +29,25 @@ function detectConfigFromWeights(weights: SerializedWeights): typeof DEFAULT_NET
   }
   const numResBlocks = Math.floor(resBlockConvs / 2);
 
-  // Find value head dense layer: shape [64, N] where N is the value head size
+  // SE reduction: detect from dense [numFilters, hidden] with hidden < numFilters
+  let seReduction = 8;
+  for (const shape of weights.shapes) {
+    if (shape.length === 2 && shape[0] === numFilters && shape[1] > 0 && shape[1] < numFilters) {
+      seReduction = Math.max(1, Math.round(numFilters / shape[1]));
+      break;
+    }
+  }
+
+  // Value head size: first dense [64, vhs] that isn't the [vhs, 3] WDL layer
   let valueHeadSize = 64;
   for (const shape of weights.shapes) {
-    if (shape.length === 2 && shape[0] === 64) {
+    if (shape.length === 2 && shape[0] === 64 && shape[1] !== WDL_SIZE) {
       valueHeadSize = shape[1];
       break;
     }
   }
 
-  return { numResBlocks, numFilters, kernelSize, valueHeadSize, learningRate: 0.01 };
+  return { numResBlocks, numFilters, kernelSize, valueHeadSize, seReduction, learningRate: 0.01 };
 }
 
 export class AIPlayer {
@@ -55,9 +68,11 @@ export class AIPlayer {
     return new AIPlayer(net, sims, 'trained');
   }
 
-  // Load from preset weights (detect architecture from weight shapes)
+  // Load from preset weights (use embedded config or detect from weight shapes)
   static createFromPreset(weights: SerializedWeights, sims: number = 50): AIPlayer {
-    const config = detectConfigFromWeights(weights);
+    const config: NetConfig = weights.config
+      ? { ...weights.config, learningRate: 0.01 }
+      : detectConfigFromWeights(weights);
     const net = ChessNet.create(config);
     net.importWeights(weights);
     return new AIPlayer(net, sims, 'preset');
