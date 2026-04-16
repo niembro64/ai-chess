@@ -184,8 +184,9 @@ const canJoin = computed(() => {
   bottom: 0;
   background: rgba(10, 10, 20, 0.85);
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: safe center;
+  justify-content: safe center;
+  overflow-y: auto;
   z-index: 3000;
 }
 
@@ -195,8 +196,8 @@ const canJoin = computed(() => {
   border: 2px solid #4444aa;
   border-radius: 16px;
   padding: 40px 50px;
-  min-width: min(420px, 90vw);
-  max-width: 90vw;
+  min-width: min(420px, 90dvw);
+  max-width: 90dvw;
   text-align: center;
   box-shadow: 0 0 60px rgba(68, 68, 170, 0.3);
 }

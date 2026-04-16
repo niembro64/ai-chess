@@ -236,8 +236,8 @@ function rankLabel(rank: number): string {
 }
 
 .square {
-  width: min(72px, calc((100vw - 48px) / 8));
-  height: min(72px, calc((100vw - 48px) / 8));
+  width: min(72px, calc((100dvw - 56px) / 8));
+  height: min(72px, calc((100dvw - 56px) / 8));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -275,7 +275,7 @@ function rankLabel(rank: number): string {
 }
 
 .piece {
-  font-size: min(48px, calc((100vw - 48px) / 12));
+  font-size: min(48px, calc((100dvw - 56px) / 12));
   line-height: 1;
   pointer-events: none;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
@@ -307,13 +307,13 @@ function rankLabel(rank: number): string {
   flex: 1;
   text-align: center;
   font-family: monospace;
-  font-size: min(13px, 3vw);
+  font-size: min(13px, 3dvw);
   color: #888;
   padding-top: 4px;
 }
 
 .rank-label {
-  font-size: min(13px, 3vw) !important;
+  font-size: min(13px, 3dvw) !important;
 }
 
 /* Promotion dialog */

@@ -479,9 +479,10 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: safe center;
+  justify-content: safe center;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .game-layout {
@@ -497,6 +498,8 @@ onUnmounted(() => {
     align-items: center;
     gap: 12px;
     padding: 10px;
+    max-width: 100dvw;
+    box-sizing: border-box;
   }
 }
 
@@ -575,7 +578,7 @@ onUnmounted(() => {
   background: rgba(20, 20, 35, 0.95);
   border: 1px solid #333;
   border-radius: 8px;
-  min-width: min(400px, 90vw);
+  min-width: min(400px, 90dvw);
   justify-content: center;
 }
 
