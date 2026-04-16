@@ -68,11 +68,20 @@ function fuseBN(gamma: Float32Array, beta: Float32Array, mean: Float32Array, var
 }
 
 // Extract weights from TF.js model into CPU-friendly format.
-// Weight order (must match buildModel layer application order in ChessNet.ts):
-//   initial:     conv(1) bn(γ β μ σ²) = 5
-//   per res blk: conv1(1) bn1(4) conv2(1) bn2(4) seDense1(W,b) seDense2(W,b) = 14
-//   policy head: conv(W,b) = 2
-//   value head:  conv(W) bn(4) dense1(W,b) dense2(W,b) = 9
+//
+// TF.js `model.weights` layout (see `training/src/chess_ai/weight_io.py` for the
+// full derivation — this MUST stay in sync):
+//   [trainable (γ β for BN, no μ σ²), in layer topo order]
+//   [non-trainable (μ σ² for all BNs), in BN creation order]
+//
+// Trainable section:
+//   init conv, init bn (γ β),
+//   per block: conv1, bn1 (γ β), conv2, bn2 (γ β), SE fc1 (W b), SE fc2 (W b),
+//   heads (interleaved): value_conv, value_bn (γ β), policy_conv (W b),
+//                         value_fc1 (W b), value_fc2 (W b)
+//
+// Non-trainable section (μ σ² per BN in creation order):
+//   init_bn, (res blocks: bn1, bn2) × N, value_bn
 export function extractWeights(model: tf.LayersModel, kernelSize: number, numFilters: number, numResBlocks: number, valueHeadSize: number, seReduction: number): CPUWeights {
   const allWeights = model.weights;
   let idx = 0;
@@ -82,48 +91,98 @@ export function extractWeights(model: tf.LayersModel, kernelSize: number, numFil
     return new Float32Array(w.read().dataSync() as Float32Array);
   };
 
-  // Initial conv + BN
+  // ----- Trainable -----
+
+  // Initial conv + BN γ/β
   const initConv = next();
   const initGamma = next();
   const initBeta = next();
-  const initMean = next();
-  const initVar = next();
-  const initBN = fuseBN(initGamma, initBeta, initMean, initVar);
 
-  // Res blocks (now with SE)
-  const seHidden = Math.max(1, Math.floor(numFilters / seReduction));
-  const resBlocks: CPUResBlock[] = [];
+  // Res block trainable weights (γ/β only for BNs; SE denses)
+  interface PartialResBlock {
+    conv1: Float32Array;
+    g1: Float32Array;
+    b1: Float32Array;
+    conv2: Float32Array;
+    g2: Float32Array;
+    b2: Float32Array;
+    seDense1W: Float32Array;
+    seDense1B: Float32Array;
+    seDense2W: Float32Array;
+    seDense2B: Float32Array;
+  }
+  const partialBlocks: PartialResBlock[] = [];
   for (let b = 0; b < numResBlocks; b++) {
-    const conv1 = next();
-    const g1 = next(), b1 = next(), m1 = next(), v1 = next();
-    const bn1 = fuseBN(g1, b1, m1, v1);
-    const conv2 = next();
-    const g2 = next(), b2 = next(), m2 = next(), v2 = next();
-    const bn2 = fuseBN(g2, b2, m2, v2);
-    const seDense1W = next();
-    const seDense1B = next();
-    const seDense2W = next();
-    const seDense2B = next();
-    resBlocks.push({
-      conv1, scale1: bn1.scale, bias1: bn1.bias,
-      conv2, scale2: bn2.scale, bias2: bn2.bias,
-      seHidden,
-      seDense1W, seDense1B, seDense2W, seDense2B,
+    partialBlocks.push({
+      conv1: next(),
+      g1: next(),
+      b1: next(),
+      conv2: next(),
+      g2: next(),
+      b2: next(),
+      seDense1W: next(),
+      seDense1B: next(),
+      seDense2W: next(),
+      seDense2B: next(),
     });
   }
 
-  // Policy head: conv (with bias, no BN)
+  // Heads — order is interleaved (value conv+BN first, then policy, then value denses)
+  const valueConv = next();
+  const valueGamma = next();
+  const valueBeta = next();
   const policyConv = next();
   const policyBias = next();
-
-  // Value head: conv (no bias) + BN + dense1 + dense2 (WDL, 3 outputs)
-  const valueConv = next();
-  const vg = next(), vb = next(), vm = next(), vv = next();
-  const valueBN = fuseBN(vg, vb, vm, vv);
   const valueDense1W = next();
   const valueDense1B = next();
   const valueDense2W = next();
   const valueDense2B = next();
+
+  // ----- Non-trainable: μ/σ² for every BN in creation order -----
+
+  const initMean = next();
+  const initVar = next();
+
+  const blockBNStats: Array<{ m1: Float32Array; v1: Float32Array; m2: Float32Array; v2: Float32Array }> = [];
+  for (let b = 0; b < numResBlocks; b++) {
+    blockBNStats.push({
+      m1: next(),
+      v1: next(),
+      m2: next(),
+      v2: next(),
+    });
+  }
+
+  const valueMean = next();
+  const valueVar = next();
+
+  if (idx !== allWeights.length) {
+    throw new Error(
+      `extractWeights consumed ${idx} weights but model has ${allWeights.length}. ` +
+      `This means the TS/Python weight-order contract has drifted.`,
+    );
+  }
+
+  // ----- Fuse BN params now that we have γ β μ σ² for each -----
+
+  const initBN = fuseBN(initGamma, initBeta, initMean, initVar);
+  const valueBN = fuseBN(valueGamma, valueBeta, valueMean, valueVar);
+
+  const seHidden = Math.max(1, Math.floor(numFilters / seReduction));
+  const resBlocks: CPUResBlock[] = [];
+  for (let b = 0; b < numResBlocks; b++) {
+    const p = partialBlocks[b];
+    const s = blockBNStats[b];
+    const bn1 = fuseBN(p.g1, p.b1, s.m1, s.v1);
+    const bn2 = fuseBN(p.g2, p.b2, s.m2, s.v2);
+    resBlocks.push({
+      conv1: p.conv1, scale1: bn1.scale, bias1: bn1.bias,
+      conv2: p.conv2, scale2: bn2.scale, bias2: bn2.bias,
+      seHidden,
+      seDense1W: p.seDense1W, seDense1B: p.seDense1B,
+      seDense2W: p.seDense2W, seDense2B: p.seDense2B,
+    });
+  }
 
   return {
     kernelSize, numFilters, numResBlocks, valueHeadSize, seReduction,

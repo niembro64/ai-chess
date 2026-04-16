@@ -8,7 +8,8 @@
     "dev": "vite --host",
     "build": "vue-tsc && vite build",
     "preview": "vite preview --host",
-    "dump-parity": "tsx scripts/dump_parity.ts"
+    "dump-parity": "tsx scripts/dump_parity.ts",
+    "verify-weights": "tsx scripts/verify_weights.ts"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
