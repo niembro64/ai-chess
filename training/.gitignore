@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+checkpoints/
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# Parity fixture is regenerated deterministically via `npm run dump-parity`
+tests/fixtures/*.json
