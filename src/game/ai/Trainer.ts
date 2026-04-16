@@ -2,9 +2,9 @@
 // Uses batched MCTS for fast GPU utilization across all concurrent games
 
 import type { ChessGameState, PieceColor, Board } from '@/types/chess';
-import { createInitialGameState, applyMove, getLegalMoves } from '@/game/chess/ChessEngine';
+import { createInitialGameState, applyMove, getLegalMoves, isInCheck, isSquareAttackedBy } from '@/game/chess/ChessEngine';
 import * as tf from '@tensorflow/tfjs';
-import { ChessNet, encodeBoard, moveToIndex, POLICY_SIZE } from './ChessNet';
+import { ChessNet, encodeBoard, moveToIndex, POLICY_SIZE, type SerializedWeights } from './ChessNet';
 import { runBatchedMCTS } from './MCTS';
 
 // Try to register WebGPU backend (faster than WebGL for training)
@@ -43,12 +43,196 @@ async function initBestBackend(): Promise<string> {
   }
 }
 
-// --- Material evaluation ---
+// --- Position evaluation ---
+// Comprehensive positional scoring for reward shaping.
+// Returns a value roughly in [-1, 1] from the perspective of `color`.
+// Combines material + tactical + positional signals.
 
 const PIECE_VALUES: Record<string, number> = {
   pawn: 1, knight: 3, bishop: 3, rook: 5, queen: 9, king: 0,
 };
 
+// Center squares (most valuable for control)
+const CENTER_SQUARES = [
+  { rank: 3, file: 3 }, { rank: 3, file: 4 }, // d5, e5
+  { rank: 4, file: 3 }, { rank: 4, file: 4 }, // d4, e4
+];
+
+function oppositeColor(c: PieceColor): PieceColor {
+  return c === 'white' ? 'black' : 'white';
+}
+
+function evaluatePosition(state: ChessGameState, color: PieceColor): number {
+  const board = state.board;
+  const opp = oppositeColor(color);
+  const backRank = color === 'white' ? 7 : 0;
+  const moveNumber = state.fullMoveNumber;
+
+  let score = 0;
+
+  // --- Piece census (single board scan) ---
+  let ownMaterial = 0, oppMaterial = 0;
+  let ownBishops = 0, oppBishops = 0;
+  let ownDeveloped = 0; // Non-pawn, non-king pieces off back rank
+  let ownCenterPieces = 0, oppCenterPieces = 0;
+  let ownPawnFiles: number[] = [];
+  let oppPawnFiles: number[] = [];
+  let ownKingPos = { rank: 0, file: 0 };
+
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const piece = board[r][f];
+      if (!piece) continue;
+      const isOwn = piece.color === color;
+      const val = PIECE_VALUES[piece.type] ?? 0;
+
+      if (isOwn) {
+        ownMaterial += val;
+        if (piece.type === 'bishop') ownBishops++;
+        if (piece.type === 'king') ownKingPos = { rank: r, file: f };
+
+        // Development: non-pawn, non-king pieces off own back rank
+        if (piece.type !== 'pawn' && piece.type !== 'king' && r !== backRank) {
+          ownDeveloped++;
+        }
+
+        // Center presence
+        if ((r === 3 || r === 4) && (f === 3 || f === 4)) {
+          ownCenterPieces++;
+        }
+
+        // Track pawn files
+        if (piece.type === 'pawn') {
+          ownPawnFiles.push(f);
+        }
+      } else {
+        oppMaterial += val;
+        if (piece.type === 'bishop') oppBishops++;
+
+        if ((r === 3 || r === 4) && (f === 3 || f === 4)) {
+          oppCenterPieces++;
+        }
+
+        if (piece.type === 'pawn') {
+          oppPawnFiles.push(f);
+        }
+      }
+    }
+  }
+
+  // 1. Material advantage (primary signal, ~0.3 max)
+  score += (ownMaterial - oppMaterial) / 39;
+
+  // 2. Check delivered (+0.02)
+  if (isInCheck(board, opp)) {
+    score += 0.02;
+  }
+
+  // 3. Piece development (+0.01 per developed minor/major piece, max ~0.06)
+  //    Only relevant in first ~15 moves
+  if (moveNumber <= 20) {
+    score += Math.min(ownDeveloped, 6) * 0.01;
+  }
+
+  // 4. Center control (+0.01 per center square with own piece/pawn)
+  score += ownCenterPieces * 0.01;
+  score -= oppCenterPieces * 0.01;
+
+  // 5. Center square attacks (control without occupying)
+  for (const sq of CENTER_SQUARES) {
+    if (isSquareAttackedBy(board, sq, color)) score += 0.005;
+    if (isSquareAttackedBy(board, sq, opp)) score -= 0.005;
+  }
+
+  // 6. Castling (+0.03 if castled, -0.03 if not castled after move 15)
+  const kingOnCastledSquare =
+    (color === 'white' && ownKingPos.rank === 7 && (ownKingPos.file === 6 || ownKingPos.file === 2)) ||
+    (color === 'black' && ownKingPos.rank === 0 && (ownKingPos.file === 6 || ownKingPos.file === 2));
+
+  if (kingOnCastledSquare) {
+    score += 0.03;
+  } else if (moveNumber > 15) {
+    // King still on starting square or wandering -- penalize
+    const kingOnStart =
+      (color === 'white' && ownKingPos.rank === 7 && ownKingPos.file === 4) ||
+      (color === 'black' && ownKingPos.rank === 0 && ownKingPos.file === 4);
+    if (kingOnStart) {
+      score -= 0.03;
+    }
+  }
+
+  // 7. Mobility advantage (+0.01 per 10 extra legal moves)
+  //    Only compute if it's this color's turn (legal moves are turn-dependent)
+  if (state.currentTurn === color) {
+    const ownMoves = getLegalMoves(state).length;
+    // Approximate opponent mobility (we can't easily compute opponent legal moves
+    // without switching turns, so just reward having many options)
+    score += Math.min(ownMoves, 40) * 0.001; // up to +0.04
+  }
+
+  // 8. Bishop pair (+0.02)
+  if (ownBishops >= 2) score += 0.02;
+  if (oppBishops >= 2) score -= 0.02;
+
+  // 9. Pawn structure
+  //    Doubled pawns: penalty for having 2+ pawns on same file
+  const ownFileCount = new Map<number, number>();
+  for (const f of ownPawnFiles) {
+    ownFileCount.set(f, (ownFileCount.get(f) ?? 0) + 1);
+  }
+  for (const count of ownFileCount.values()) {
+    if (count > 1) score -= 0.01 * (count - 1);
+  }
+
+  //    Passed pawns: own pawn with no opposing pawns on same or adjacent files ahead
+  for (const f of ownPawnFiles) {
+    let passed = true;
+    for (const of2 of oppPawnFiles) {
+      if (Math.abs(of2 - f) <= 1) {
+        // Check if opponent pawn is ahead
+        // For white (pawnDir=-1), "ahead" means lower rank number
+        // For black (pawnDir=1), "ahead" means higher rank number
+        // We simplify: if opponent has a pawn on adjacent file, it's not passed
+        passed = false;
+        break;
+      }
+    }
+    if (passed && ownPawnFiles.length > 0) score += 0.02;
+  }
+
+  // 10. Hanging pieces: own pieces attacked by opponent but not defended
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const piece = board[r][f];
+      if (!piece || piece.color !== color || piece.type === 'king') continue;
+      const pos = { rank: r, file: f };
+      const attacked = isSquareAttackedBy(board, pos, opp);
+      if (attacked) {
+        const defended = isSquareAttackedBy(board, pos, color);
+        if (!defended) {
+          // Hanging piece -- penalty proportional to piece value
+          score -= (PIECE_VALUES[piece.type] ?? 0) * 0.005;
+        }
+      }
+    }
+  }
+
+  // 11. Rooks on open/semi-open files (+0.01 per rook)
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const piece = board[r][f];
+      if (!piece || piece.color !== color || piece.type !== 'rook') continue;
+      const hasOwnPawn = ownPawnFiles.includes(f);
+      const hasOppPawn = oppPawnFiles.includes(f);
+      if (!hasOwnPawn && !hasOppPawn) score += 0.01; // Open file
+      else if (!hasOwnPawn) score += 0.005; // Semi-open
+    }
+  }
+
+  return score;
+}
+
+// Simple material-only evaluation (for UI display)
 function materialAdvantage(state: ChessGameState, color: PieceColor): number {
   let own = 0, opp = 0;
   for (let r = 0; r < 8; r++) {
@@ -112,6 +296,7 @@ export type TrainingStats = {
   gameSlots: GameSlotSnapshot[];
   completedGames: CompletedGameSnapshot[];
   gpuBackend: string;
+  sampleWeights: number[];
 };
 
 export type TrainerConfig = {
@@ -146,7 +331,7 @@ type GameSlotExample = {
   board: Float32Array;
   policy: Float32Array;
   turnColor: PieceColor;
-  materialAdv: number;
+  positionScore: number; // Full positional evaluation for this player
 };
 
 type GameSlot = {
@@ -213,9 +398,11 @@ export class Trainer {
   private startTime = 0;
   private log: LogEntry[] = [];
   private completedGames: CompletedGameSnapshot[] = [];
-  private nextGameRandom = false; // Alternates: false=normal, true=random
+  private nextGameRandom = false;
+  private lastSaveNotifyTime = 0;
 
   public onStatsUpdate?: (stats: TrainingStats) => void;
+  public onSaved?: () => void;
 
   constructor(config: Partial<TrainerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -264,6 +451,7 @@ export class Trainer {
       gameSlots: this.getGameSlotSnapshots(),
       completedGames: this.completedGames,
       gpuBackend: this.gpuBackend,
+      sampleWeights: this.net?.getSampleWeights() ?? [],
     };
   }
 
@@ -277,12 +465,18 @@ export class Trainer {
     this.addLog(`GPU backend: ${this.gpuBackend}`);
 
     if (!this.net) {
-      this.net = ChessNet.create({
-        numResBlocks: this.config.numResBlocks,
-        numFilters: this.config.numFilters,
-        learningRate: this.config.learningRate,
-      });
-      this.addLog(`Network: ${this.config.numResBlocks} res blocks, ${this.config.numFilters} filters, ${this.net.getParamCount().toLocaleString()} params`);
+      // Try to load a previously saved model directly (avoids create-then-dispose)
+      this.net = await ChessNet.loadFromSaved(this.config.learningRate);
+      if (this.net) {
+        this.addLog(`Loaded saved model (${this.net.getParamCount().toLocaleString()} params)`);
+      } else {
+        this.net = ChessNet.create({
+          numResBlocks: this.config.numResBlocks,
+          numFilters: this.config.numFilters,
+          learningRate: this.config.learningRate,
+        });
+        this.addLog(`New network: ${this.config.numResBlocks} res blocks, ${this.config.numFilters} filters, ${this.net.getParamCount().toLocaleString()} params`);
+      }
     }
 
     this.games = [];
@@ -296,9 +490,12 @@ export class Trainer {
     await this.trainLoop();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
-    this.addLog('Stopped');
+    if (this.net) {
+      await this.net.save();
+      this.addLog('Saved and stopped');
+    }
     this.emitStats();
   }
 
@@ -309,24 +506,30 @@ export class Trainer {
     }
   }
 
+  static async hasSavedModel(): Promise<boolean> {
+    return ChessNet.hasSavedModel();
+  }
+
+  static async deleteSavedModel(): Promise<void> {
+    await ChessNet.deleteSavedModel();
+  }
+
+  exportWeights(): SerializedWeights | null {
+    return this.net?.exportWeights() ?? null;
+  }
+
   async loadModel(): Promise<boolean> {
-    // Create a placeholder network if none exists (will be replaced by loaded weights)
-    if (!this.net) {
-      this.net = ChessNet.create({
-        numResBlocks: this.config.numResBlocks,
-        numFilters: this.config.numFilters,
-        learningRate: this.config.learningRate,
-      });
-    }
-    const ok = await this.net.load();
-    if (ok) {
-      this.addLog(`Model loaded (${this.net.getParamCount().toLocaleString()} params)`);
-    } else {
-      // Dispose the placeholder since there's nothing to load
+    // Dispose existing net if any, then load fresh from IndexedDB
+    if (this.net) {
       this.net.dispose();
       this.net = null;
     }
-    return ok;
+    this.net = await ChessNet.loadFromSaved(this.config.learningRate);
+    if (this.net) {
+      this.addLog(`Model loaded (${this.net.getParamCount().toLocaleString()} params)`);
+      return true;
+    }
+    return false;
   }
 
   updateConfig(config: Partial<TrainerConfig>): void {
@@ -378,23 +581,23 @@ export class Trainer {
           }
         }
 
-        const matAdv = materialAdvantage(slot.state, slot.state.currentTurn);
+        const posScore = evaluatePosition(slot.state, slot.state.currentTurn);
 
         slot.examples.push({
           board,
           policy: canonPolicy,
           turnColor: slot.state.currentTurn,
-          materialAdv: matAdv,
+          positionScore: posScore,
         });
 
-        // Push to replay buffer immediately with material-only value
+        // Push to replay buffer immediately with positional evaluation
         // so the network gets fresh data every round, not just when games end.
         // When the game finishes, positions are added again with the full
-        // game-outcome + material blended value.
+        // game-outcome + positional blended value.
         this.addToBuffer({
           board,
           policy: canonPolicy,
-          value: Math.max(-1, Math.min(1, matAdv)),
+          value: Math.max(-1, Math.min(1, posScore)),
         });
 
         // Apply move
@@ -417,6 +620,14 @@ export class Trainer {
       // Train every round as long as buffer has enough data
       if (this.replayBuffer.length >= this.config.trainingBatchSize) {
         await this.runTrainStep();
+      }
+
+      // Autosave every 30 seconds
+      const now = Date.now();
+      if (this.net && now - this.lastSaveNotifyTime >= 30_000) {
+        this.lastSaveNotifyTime = now;
+        await this.net.save();
+        this.onSaved?.();
       }
 
       // Yield to UI every step so boards update each move
@@ -454,7 +665,7 @@ export class Trainer {
 
     for (const ex of slot.examples) {
       const outcomeFromPerspective = ex.turnColor === 'white' ? whiteOutcome : -whiteOutcome;
-      const blendedValue = (1 - alpha) * outcomeFromPerspective + alpha * ex.materialAdv;
+      const blendedValue = (1 - alpha) * outcomeFromPerspective + alpha * ex.positionScore;
       this.addToBuffer({
         board: ex.board,
         policy: ex.policy,

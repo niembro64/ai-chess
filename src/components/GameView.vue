@@ -9,7 +9,8 @@ import { networkManager } from '@/game/network/NetworkManager';
 import { ChessServer } from '@/game/server/ChessServer';
 import { LocalGameConnection } from '@/game/server/LocalGameConnection';
 import { RemoteGameConnection } from '@/game/server/RemoteGameConnection';
-import { AIPlayer } from '@/game/ai/AIPlayer';
+import { AIPlayer, type AIModelSource } from '@/game/ai/AIPlayer';
+import { PRESET_WEIGHTS } from '@/game/ai/presetWeights';
 import LobbyModal from './LobbyModal.vue';
 import ChessBoard from './ChessBoard.vue';
 
@@ -36,7 +37,7 @@ let activeConnection: GameConnection | null = null;
 let aiPlayer: AIPlayer | null = null;
 const playingVsAi = ref(false);
 const aiThinking = ref(false);
-const aiModelStatus = ref<'none' | 'trained' | 'untrained'>('none');
+const aiModelStatus = ref<AIModelSource | 'none'>('none');
 
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
@@ -162,18 +163,23 @@ async function handleJoin(code: string): Promise<void> {
   }
 }
 
-async function handlePlayAi(): Promise<void> {
+async function handlePlayAi(source: 'trained' | 'preset'): Promise<void> {
   isConnecting.value = true;
   lobbyError.value = null;
 
-  // Try to load a trained model; fall back to untrained (random)
-  const trained = await AIPlayer.create(50);
-  if (trained) {
-    aiPlayer = trained;
-    aiModelStatus.value = 'trained';
+  if (source === 'preset' && PRESET_WEIGHTS) {
+    aiPlayer = AIPlayer.createFromPreset(PRESET_WEIGHTS, 50);
+    aiModelStatus.value = 'preset';
   } else {
-    aiPlayer = AIPlayer.createUntrained(25);
-    aiModelStatus.value = 'untrained';
+    // Try trained model from IndexedDB, fall back to untrained
+    const trained = await AIPlayer.createFromTrained(50);
+    if (trained) {
+      aiPlayer = trained;
+      aiModelStatus.value = 'trained';
+    } else {
+      aiPlayer = AIPlayer.createUntrained(25);
+      aiModelStatus.value = 'untrained';
+    }
   }
 
   playingVsAi.value = true;
@@ -336,6 +342,7 @@ onUnmounted(() => {
       :local-player-id="localPlayerId"
       :error="lobbyError"
       :is-connecting="isConnecting"
+      :has-preset-model="PRESET_WEIGHTS !== null"
       @host="handleHost"
       @join="handleJoin"
       @start="handleLobbyStart"
@@ -430,8 +437,12 @@ onUnmounted(() => {
             </div>
             <div v-if="playingVsAi" class="info-row">
               <span class="info-label">AI Model:</span>
-              <span class="info-value" :class="{ 'ai-trained': aiModelStatus === 'trained', 'ai-untrained': aiModelStatus === 'untrained' }">
-                {{ aiModelStatus === 'trained' ? 'Trained' : 'Random' }}
+              <span class="info-value" :class="{
+                'ai-trained': aiModelStatus === 'trained',
+                'ai-preset': aiModelStatus === 'preset',
+                'ai-untrained': aiModelStatus === 'untrained',
+              }">
+                {{ aiModelStatus === 'trained' ? 'Your Model' : aiModelStatus === 'preset' ? 'Preset' : 'Random' }}
               </span>
             </div>
             <div v-if="!playingVsAi && roomCode" class="info-row">
@@ -693,6 +704,11 @@ onUnmounted(() => {
 
 .info-value.ai-trained {
   color: #44aa44;
+  font-weight: bold;
+}
+
+.info-value.ai-preset {
+  color: #4a9eff;
   font-weight: bold;
 }
 

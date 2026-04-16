@@ -98,12 +98,19 @@ export type NetConfig = {
   learningRate: number;
 };
 
+export type SerializedWeights = {
+  shapes: number[][];
+  data: number[][];
+};
+
 export class ChessNet {
   model: tf.LayersModel;
   private optimizer: tf.Optimizer;
+  private lr: number;
 
   private constructor(model: tf.LayersModel, lr: number) {
     this.model = model;
+    this.lr = lr;
     this.optimizer = tf.train.adam(lr);
   }
 
@@ -114,6 +121,43 @@ export class ChessNet {
 
   getParamCount(): number {
     return this.model.countParams();
+  }
+
+  // Sample a few weights from the first trainable layer for UI display
+  getSampleWeights(): number[] {
+    const layers = this.model.trainableWeights;
+    if (layers.length === 0) return [];
+    // read() returns the model's own weight tensor -- do NOT dispose it
+    const data = layers[0].read().dataSync() as Float32Array;
+    const count = 8;
+    const step = Math.max(1, Math.floor(data.length / count));
+    const samples: number[] = [];
+    for (let i = 0; i < count && i * step < data.length; i++) {
+      samples.push(data[i * step]);
+    }
+    return samples;
+  }
+
+  // Export all weights as a serializable object
+  exportWeights(): SerializedWeights {
+    const tensors = this.model.getWeights();
+    const result: SerializedWeights = { shapes: [], data: [] };
+    for (const t of tensors) {
+      result.shapes.push(t.shape as number[]);
+      result.data.push(Array.from(t.dataSync() as Float32Array));
+    }
+    return result;
+  }
+
+  // Import weights from a serialized object
+  importWeights(weights: SerializedWeights): void {
+    const tensors: tf.Tensor[] = [];
+    for (let i = 0; i < weights.shapes.length; i++) {
+      tensors.push(tf.tensor(weights.data[i], weights.shapes[i]));
+    }
+    this.model.setWeights(tensors);
+    // Dispose the temporary tensors (setWeights copies the data)
+    for (const t of tensors) t.dispose();
   }
 
   // Single-position predict (for gameplay / single MCTS). Uses dataSync for speed.
@@ -207,14 +251,46 @@ export class ChessNet {
     await this.model.save('indexeddb://chess-net');
   }
 
+  // Check if a saved model exists in IndexedDB without loading it
+  static async hasSavedModel(): Promise<boolean> {
+    try {
+      const models = await tf.io.listModels();
+      return 'indexeddb://chess-net' in models;
+    } catch {
+      return false;
+    }
+  }
+
+  // Delete saved model from IndexedDB (for clearing corrupted saves)
+  static async deleteSavedModel(): Promise<void> {
+    try {
+      await tf.io.removeModel('indexeddb://chess-net');
+    } catch {
+      // Model didn't exist
+    }
+  }
+
   async load(): Promise<boolean> {
     try {
       const loaded = await tf.loadLayersModel('indexeddb://chess-net');
       this.model.dispose();
+      this.optimizer.dispose();
       this.model = loaded;
+      this.optimizer = tf.train.adam(this.lr);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  // Load directly from IndexedDB without creating a throwaway model first.
+  // Avoids TF.js layer name collisions from create-then-dispose.
+  static async loadFromSaved(lr: number): Promise<ChessNet | null> {
+    try {
+      const model = await tf.loadLayersModel('indexeddb://chess-net');
+      return new ChessNet(model, lr);
+    } catch {
+      return null;
     }
   }
 

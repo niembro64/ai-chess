@@ -95,7 +95,7 @@ function findKing(board: Board, color: PieceColor): Position {
 }
 
 // Check if a square is attacked by the given color
-function isSquareAttackedBy(board: Board, pos: Position, byColor: PieceColor): boolean {
+export function isSquareAttackedBy(board: Board, pos: Position, byColor: PieceColor): boolean {
   // Check knight attacks
   const knightMoves = [
     [-2, -1], [-2, 1], [-1, -2], [-1, 2],
@@ -163,7 +163,7 @@ function isSquareAttackedBy(board: Board, pos: Position, byColor: PieceColor): b
   return false;
 }
 
-function isInCheck(board: Board, color: PieceColor): boolean {
+export function isInCheck(board: Board, color: PieceColor): boolean {
   const kingPos = findKing(board, color);
   return isSquareAttackedBy(board, kingPos, oppositeColor(color));
 }

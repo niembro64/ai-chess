@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { Trainer, DEFAULT_CONFIG, type TrainingStats, type TrainerConfig, type GameSlotSnapshot, type CompletedGameSnapshot } from '@/game/ai/Trainer';
 import { getPieceSymbol } from '@/game/chess/ChessEngine';
 
@@ -7,6 +7,17 @@ const trainer = new Trainer();
 const stats = ref<TrainingStats | null>(null);
 const config = ref<TrainerConfig>({ ...DEFAULT_CONFIG });
 const configLocked = ref(false);
+const hasSavedModel = ref(false);
+
+// Check for existing saved model on mount
+onMounted(async () => {
+  hasSavedModel.value = await Trainer.hasSavedModel();
+});
+
+trainer.onSaved = () => {
+  saveMessage.value = 'Saved';
+  setTimeout(() => { saveMessage.value = ''; }, 2000);
+};
 
 trainer.onStatsUpdate = (s) => {
   stats.value = {
@@ -18,29 +29,46 @@ trainer.onStatsUpdate = (s) => {
   };
 };
 
+const startButtonLabel = computed(() => {
+  if (stats.value?.isRunning) return 'Stop';
+  if (hasSavedModel.value) return 'Continue Training';
+  return 'Start Training';
+});
+
 async function handleStart() {
   if (stats.value?.isRunning) {
-    trainer.stop();
+    await trainer.stop();
+    hasSavedModel.value = true; // We just saved on stop
   } else {
     configLocked.value = true;
     trainer.updateConfig(config.value);
     await trainer.start();
+    hasSavedModel.value = true; // Will autosave during training
   }
 }
 
-async function handleSave() {
-  await trainer.saveModel();
-  saveMessage.value = 'Saved!';
-  setTimeout(() => { saveMessage.value = ''; }, 2000);
-}
-
-async function handleLoad() {
-  const ok = await trainer.loadModel();
-  saveMessage.value = ok ? 'Loaded!' : 'No saved model';
-  setTimeout(() => { saveMessage.value = ''; }, 2000);
-}
-
 const saveMessage = ref('');
+
+async function handleCopyWeights() {
+  const weights = trainer.exportWeights();
+  if (!weights) {
+    saveMessage.value = 'No model to copy';
+    setTimeout(() => { saveMessage.value = ''; }, 2000);
+    return;
+  }
+  const json = JSON.stringify(weights);
+  await navigator.clipboard.writeText(json);
+  saveMessage.value = `Copied (${(json.length / 1024).toFixed(0)} KB)`;
+  setTimeout(() => { saveMessage.value = ''; }, 3000);
+}
+
+async function handleReset() {
+  if (!confirm('Delete saved model and start fresh?')) return;
+  await Trainer.deleteSavedModel();
+  hasSavedModel.value = false;
+  saveMessage.value = 'Model deleted';
+  setTimeout(() => { saveMessage.value = ''; }, 2000);
+}
 
 const emit = defineEmits<{
   (e: 'back'): void;
@@ -180,11 +208,11 @@ const reversedCompletedGames = computed(() => {
       <button class="back-btn" @click="emit('back')">&larr; Back</button>
       <h1 class="title">AI Training</h1>
       <div class="header-controls">
-        <button class="action-btn start-btn" :class="{ stop: stats?.isRunning }" @click="handleStart">
-          {{ stats?.isRunning ? 'Stop' : 'Start Training' }}
+        <button class="action-btn start-btn" :class="{ stop: stats?.isRunning, resume: !stats?.isRunning && hasSavedModel }" @click="handleStart">
+          {{ startButtonLabel }}
         </button>
-        <button class="action-btn save-btn" @click="handleSave" :disabled="!stats">Save</button>
-        <button class="action-btn load-btn" @click="handleLoad">Load</button>
+        <button class="action-btn copy-btn" @click="handleCopyWeights" :disabled="!stats || stats.isRunning">Copy Weights</button>
+        <button class="action-btn reset-btn" @click="handleReset" :disabled="stats?.isRunning">Reset</button>
         <span class="save-msg" :class="{ visible: saveMessage }">{{ saveMessage || '&nbsp;' }}</span>
       </div>
     </div>
@@ -232,6 +260,15 @@ const reversedCompletedGames = computed(() => {
               <div class="stat-card"><span class="stat-label">Avg Len</span><span class="stat-value">{{ fmt(stats.avgGameLength, 0) }}</span></div>
               <div class="stat-card"><span class="stat-label">Params</span><span class="stat-value">{{ stats.paramCount.toLocaleString() }}</span></div>
             <div class="stat-card" v-if="stats.gpuBackend"><span class="stat-label">GPU</span><span class="stat-value gpu-val">{{ stats.gpuBackend }}</span></div>
+            </div>
+
+            <!-- Sample weights -->
+            <div v-if="stats.sampleWeights.length > 0" class="weights-row">
+              <span class="weights-label">Weights:</span>
+              <span v-for="(w, i) in stats.sampleWeights" :key="i"
+                class="weight-val"
+                :class="{ positive: w > 0, negative: w < 0 }"
+              >{{ w >= 0 ? '+' : '' }}{{ w.toFixed(4) }}</span>
             </div>
 
             <!-- Loss -->
@@ -436,10 +473,11 @@ const reversedCompletedGames = computed(() => {
 .action-btn { font-family: monospace; font-size: 12px; padding: 6px 16px; border: none; border-radius: 6px; cursor: pointer; color: white; white-space: nowrap; }
 .action-btn:hover { filter: brightness(1.2); }
 .action-btn:disabled { opacity: .5; cursor: not-allowed; }
-.start-btn { background: #44aa44; min-width: 110px; text-align: center; }
+.start-btn { background: #44aa44; min-width: 140px; text-align: center; }
 .start-btn.stop { background: #cc4444; }
-.save-btn { background: #4a9eff; }
-.load-btn { background: #666; }
+.start-btn.resume { background: #4a9eff; }
+.copy-btn { background: #666; }
+.reset-btn { background: #993333; }
 .save-msg { font-family: monospace; font-size: 11px; color: #44aa44; min-width: 90px; opacity: 0; transition: opacity 0.15s; }
 .save-msg.visible { opacity: 1; }
 
@@ -467,6 +505,12 @@ const reversedCompletedGames = computed(() => {
 .stat-value { font-family: monospace; font-size: 13px; color: #ccc; font-weight: bold; }
 .stat-value.big { font-size: 18px; color: #fff; }
 .gpu-val { color: #44aa44; font-size: 11px; }
+
+.weights-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.weights-label { font-family: monospace; font-size: 9px; color: #555; text-transform: uppercase; }
+.weight-val { font-family: 'Courier New', monospace; font-size: 11px; font-variant-numeric: tabular-nums; padding: 2px 4px; background: rgba(0,0,0,.2); border-radius: 3px; }
+.weight-val.positive { color: #5b8; }
+.weight-val.negative { color: #b85; }
 
 .loss-row { display: flex; gap: 16px; margin-bottom: 12px; }
 .loss-card { display: flex; flex-direction: column; gap: 2px; }

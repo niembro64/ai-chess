@@ -11,6 +11,7 @@ const props = defineProps<{
   localPlayerId: PlayerId;
   error: string | null;
   isConnecting: boolean;
+  hasPresetModel: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -18,7 +19,7 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
-  (e: 'playAi'): void;
+  (e: 'playAi', source: 'trained' | 'preset'): void;
 }>();
 
 const joinCode = ref('');
@@ -106,7 +107,8 @@ const canJoin = computed(() => {
             >Join</button>
           </div>
 
-          <button class="lobby-btn ai-btn" @click="emit('playAi')">Play vs AI</button>
+          <button class="lobby-btn ai-btn" @click="emit('playAi', 'trained')">Play vs Your AI</button>
+          <button v-if="props.hasPresetModel" class="lobby-btn preset-btn" @click="emit('playAi', 'preset')">Play vs Preset AI</button>
         </div>
 
         <div v-if="error" class="error-message">{{ error }}</div>
@@ -270,6 +272,16 @@ const canJoin = computed(() => {
 
 .ai-btn:hover:not(:disabled) {
   background: #aa55dd;
+}
+
+.preset-btn {
+  background: #4a9eff;
+  color: white;
+  width: 100%;
+}
+
+.preset-btn:hover:not(:disabled) {
+  background: #5aafff;
 }
 
 .join-btn {
