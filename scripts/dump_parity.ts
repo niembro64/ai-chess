@@ -21,6 +21,10 @@ import {
   NUM_PLANES,
   POLICY_SIZE,
 } from '../src/game/ai/ChessNet';
+import {
+  evaluatePosition,
+  DEFAULT_REWARD_WEIGHTS,
+} from '../src/game/ai/rewardShaping';
 import type { ChessGameState } from '../src/types/chess';
 
 const numPositions = Number.parseInt(process.argv[2] ?? '1000', 10);
@@ -83,6 +87,9 @@ function generate(n: number) {
     const isWhite = state.currentTurn === 'white';
     const encoded = encodeBoard(state);
     const moveIndices = legal.map(m => moveToIndex(m, isWhite));
+    // Shaped reward from each color's perspective, using the default weights.
+    const rewardWhite = evaluatePosition(state, 'white', DEFAULT_REWARD_WEIGHTS, legal.length);
+    const rewardBlack = evaluatePosition(state, 'black', DEFAULT_REWARD_WEIGHTS, legal.length);
 
     positions.push({
       id: positions.length,
@@ -94,6 +101,9 @@ function generate(n: number) {
       })),
       legalMoveIndices: moveIndices,
       encodedBoard: Array.from(encoded),
+      rewardWhite,
+      rewardBlack,
+      legalMoveCount: legal.length,
     });
 
     const move = legal[Math.floor(rng() * legal.length)];
@@ -110,10 +120,11 @@ fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(
   outPath,
   JSON.stringify({
-    version: 1,
+    version: 2,
     seed: 42,
     num_planes: NUM_PLANES,
     policy_size: POLICY_SIZE,
+    reward_weights: DEFAULT_REWARD_WEIGHTS,
     positions,
   }),
 );

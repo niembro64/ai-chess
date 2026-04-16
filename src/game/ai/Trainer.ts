@@ -2,10 +2,17 @@
 // Uses batched MCTS for fast GPU utilization across all concurrent games
 
 import type { ChessGameState, PieceColor, Board } from '@/types/chess';
-import { createInitialGameState, applyMove, getLegalMoves, isInCheck, isSquareAttackedBy } from '@/game/chess/ChessEngine';
+import { createInitialGameState, applyMove, getLegalMoves } from '@/game/chess/ChessEngine';
 import * as tf from '@tensorflow/tfjs';
 import { ChessNet, encodeBoard, moveToIndex, POLICY_SIZE, type SerializedWeights } from './ChessNet';
 import { runBatchedMCTS } from './MCTS';
+import {
+  evaluatePosition,
+  materialAdvantage,
+  DEFAULT_REWARD_WEIGHTS,
+  type RewardWeights,
+} from './rewardShaping';
+export { DEFAULT_REWARD_WEIGHTS, type RewardWeights } from './rewardShaping';
 
 // Try to register WebGPU backend (faster than WebGL for training)
 let webgpuImported = false;
@@ -41,189 +48,6 @@ async function initBestBackend(): Promise<string> {
     await tf.ready();
     return 'cpu (no GPU)';
   }
-}
-
-// --- Position evaluation ---
-// Comprehensive positional scoring for reward shaping.
-// Returns a value roughly in [-1, 1] from the perspective of `color`.
-// Combines material + tactical + positional signals.
-
-const PIECE_VALUES: Record<string, number> = {
-  pawn: 1, knight: 3, bishop: 3, rook: 5, queen: 9, king: 0,
-};
-
-// Center squares (most valuable for control)
-const CENTER_SQUARES = [
-  { rank: 3, file: 3 }, { rank: 3, file: 4 }, // d5, e5
-  { rank: 4, file: 3 }, { rank: 4, file: 4 }, // d4, e4
-];
-
-function oppositeColor(c: PieceColor): PieceColor {
-  return c === 'white' ? 'black' : 'white';
-}
-
-function pieceValue(type: string, w: RewardWeights): number {
-  switch (type) {
-    case 'pawn': return w.pawnVal;
-    case 'knight': return w.knightVal;
-    case 'bishop': return w.bishopVal;
-    case 'rook': return w.rookVal;
-    case 'queen': return w.queenVal;
-    default: return 0;
-  }
-}
-
-function evaluatePosition(state: ChessGameState, color: PieceColor, w: RewardWeights, precomputedMoveCount?: number): number {
-  const board = state.board;
-  const opp = oppositeColor(color);
-  const backRank = color === 'white' ? 7 : 0;
-  const moveNumber = state.fullMoveNumber;
-
-  let score = 0;
-
-  let ownMaterial = 0, oppMaterial = 0;
-  let maxMaterial = 0; // For normalization
-  let ownBishops = 0, oppBishops = 0;
-  let ownDeveloped = 0;
-  let ownCenterPieces = 0, oppCenterPieces = 0;
-  const ownPawnFiles: number[] = [];
-  const oppPawnFiles: number[] = [];
-  let ownKingPos = { rank: 0, file: 0 };
-
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const piece = board[r][f];
-      if (!piece) continue;
-      const isOwn = piece.color === color;
-      const val = pieceValue(piece.type, w);
-      if (isOwn) {
-        ownMaterial += val;
-        if (piece.type === 'bishop') ownBishops++;
-        if (piece.type === 'king') ownKingPos = { rank: r, file: f };
-        if (piece.type !== 'pawn' && piece.type !== 'king' && r !== backRank) ownDeveloped++;
-        if ((r === 3 || r === 4) && (f === 3 || f === 4)) ownCenterPieces++;
-        if (piece.type === 'pawn') ownPawnFiles.push(f);
-      } else {
-        oppMaterial += val;
-        if (piece.type === 'bishop') oppBishops++;
-        if ((r === 3 || r === 4) && (f === 3 || f === 4)) oppCenterPieces++;
-        if (piece.type === 'pawn') oppPawnFiles.push(f);
-      }
-    }
-  }
-
-  // Max possible material for normalization (Q + 2R + 2B + 2N + 8P with current weights)
-  maxMaterial = w.queenVal + 2 * w.rookVal + 2 * w.bishopVal + 2 * w.knightVal + 8 * w.pawnVal;
-  if (maxMaterial <= 0) maxMaterial = 1;
-
-  // Material
-  if (w.material) score += ((ownMaterial - oppMaterial) / maxMaterial) * w.material;
-
-  // Check
-  if (w.check && isInCheck(board, opp)) score += w.check;
-
-  // Development (early game only)
-  if (w.development && moveNumber <= 20) score += Math.min(ownDeveloped, 6) * w.development;
-
-  // Center occupation
-  if (w.centerOccupation) {
-    score += (ownCenterPieces - oppCenterPieces) * w.centerOccupation;
-  }
-
-  // Center attacks
-  if (w.centerAttack) {
-    for (const sq of CENTER_SQUARES) {
-      if (isSquareAttackedBy(board, sq, color)) score += w.centerAttack;
-      if (isSquareAttackedBy(board, sq, opp)) score -= w.centerAttack;
-    }
-  }
-
-  // Castling
-  const kingOnCastledSquare =
-    (color === 'white' && ownKingPos.rank === 7 && (ownKingPos.file === 6 || ownKingPos.file === 2)) ||
-    (color === 'black' && ownKingPos.rank === 0 && (ownKingPos.file === 6 || ownKingPos.file === 2));
-  if (w.castled && kingOnCastledSquare) score += w.castled;
-  if (w.uncastled && !kingOnCastledSquare && moveNumber > 15) {
-    const kingOnStart =
-      (color === 'white' && ownKingPos.rank === 7 && ownKingPos.file === 4) ||
-      (color === 'black' && ownKingPos.rank === 0 && ownKingPos.file === 4);
-    if (kingOnStart) score -= w.uncastled;
-  }
-
-  // Mobility
-  if (w.mobility && state.currentTurn === color && precomputedMoveCount !== undefined) {
-    score += Math.min(precomputedMoveCount, 40) * w.mobility;
-  }
-
-  // Bishop pair
-  if (w.bishopPair) {
-    if (ownBishops >= 2) score += w.bishopPair;
-    if (oppBishops >= 2) score -= w.bishopPair;
-  }
-
-  // Doubled pawns
-  if (w.doubledPawns) {
-    const fileCount = new Map<number, number>();
-    for (const f of ownPawnFiles) fileCount.set(f, (fileCount.get(f) ?? 0) + 1);
-    for (const count of fileCount.values()) {
-      if (count > 1) score -= w.doubledPawns * (count - 1);
-    }
-  }
-
-  // Passed pawns
-  if (w.passedPawns) {
-    for (const f of ownPawnFiles) {
-      let passed = true;
-      for (const of2 of oppPawnFiles) {
-        if (Math.abs(of2 - f) <= 1) { passed = false; break; }
-      }
-      if (passed) score += w.passedPawns;
-    }
-  }
-
-  // Hanging pieces
-  if (w.hangingPieces) {
-    for (let r = 0; r < 8; r++) {
-      for (let f = 0; f < 8; f++) {
-        const piece = board[r][f];
-        if (!piece || piece.color !== color || piece.type === 'king') continue;
-        const pos = { rank: r, file: f };
-        if (isSquareAttackedBy(board, pos, opp) && !isSquareAttackedBy(board, pos, color)) {
-          score -= pieceValue(piece.type, w) * w.hangingPieces;
-        }
-      }
-    }
-  }
-
-  // Rooks on open files
-  if (w.rookOpenFile) {
-    for (let r = 0; r < 8; r++) {
-      for (let f = 0; f < 8; f++) {
-        const piece = board[r][f];
-        if (!piece || piece.color !== color || piece.type !== 'rook') continue;
-        const hasOwnPawn = ownPawnFiles.includes(f);
-        const hasOppPawn = oppPawnFiles.includes(f);
-        if (!hasOwnPawn && !hasOppPawn) score += w.rookOpenFile;
-        else if (!hasOwnPawn) score += w.rookOpenFile * 0.5;
-      }
-    }
-  }
-
-  return score;
-}
-
-// Simple material-only evaluation (for UI display)
-function materialAdvantage(state: ChessGameState, color: PieceColor): number {
-  let own = 0, opp = 0;
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const piece = state.board[r][f];
-      if (!piece) continue;
-      const val = PIECE_VALUES[piece.type] ?? 0;
-      if (piece.color === color) own += val; else opp += val;
-    }
-  }
-  return (own - opp) / 39;
 }
 
 // --- Types ---
@@ -280,50 +104,6 @@ export type TrainingStats = {
   sampleWeights: number[];
   tensorCount: number;  // TF.js live tensor count -- should be stable, not growing
   memoryMB: number;     // TF.js GPU memory usage
-};
-
-export type RewardWeights = {
-  winning: number;        // Game outcome: checkmate = +winning, loss = -winning
-  material: number;       // Overall material scaling
-  pawnVal: number;        // Pawn piece value
-  knightVal: number;      // Knight piece value
-  bishopVal: number;      // Bishop piece value
-  rookVal: number;        // Rook piece value
-  queenVal: number;       // Queen piece value
-  check: number;          // Delivering check
-  development: number;    // Pieces off back rank (early game)
-  centerOccupation: number; // Pieces on center squares
-  centerAttack: number;   // Attacking center squares
-  castled: number;        // King has castled
-  uncastled: number;      // Penalty for king stuck on start square
-  mobility: number;       // Legal move count
-  bishopPair: number;     // Having both bishops
-  doubledPawns: number;   // Penalty per doubled pawn
-  passedPawns: number;    // Pawns with no opposing blockers
-  hangingPieces: number;  // Penalty for undefended attacked pieces
-  rookOpenFile: number;   // Rooks on open/semi-open files
-};
-
-export const DEFAULT_REWARD_WEIGHTS: RewardWeights = {
-  winning: 1.0,
-  material: 0.3,
-  pawnVal: 1,
-  knightVal: 3,
-  bishopVal: 3,
-  rookVal: 5,
-  queenVal: 9,
-  check: 0.02,
-  development: 0.01,
-  centerOccupation: 0.01,
-  centerAttack: 0.005,
-  castled: 0.03,
-  uncastled: 0.03,
-  mobility: 0.001,
-  bishopPair: 0.02,
-  doubledPawns: 0.01,
-  passedPawns: 0.02,
-  hangingPieces: 0.005,
-  rookOpenFile: 0.01,
 };
 
 export type TrainerConfig = {

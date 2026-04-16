@@ -1,0 +1,280 @@
+"""Monte Carlo Tree Search — port of `src/game/ai/MCTS.ts`.
+
+AlphaZero-style MCTS: each node tracks visit count + accumulated value + prior;
+selection uses PUCT; leaf evaluations come from the NN; backprop flips sign
+each ply (zero-sum game convention).
+
+Batched search (`run_batched_mcts`) advances N games in lockstep, gathering all
+pending leaf-eval requests into a single NN batch per simulation step so the
+GPU stays busy. Mirrors the TS `runBatchedMCTS` exactly.
+"""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass
+from typing import Callable
+
+import numpy as np
+
+from .encoding import POLICY_SIZE, encode_board, move_to_index
+from .engine import ChessGameState, Move, apply_move, get_legal_moves
+
+C_PUCT = 1.5
+DIRICHLET_ALPHA = 0.3
+DIRICHLET_EPSILON = 0.25
+
+# Batched evaluator signature: takes an (B, 8*8*NUM_PLANES) numpy array and
+# returns (policies [B, POLICY_SIZE], values [B] scalar from current-player's
+# perspective). Used by the self-play loop to batch calls to the PyTorch net.
+BatchedEvaluator = Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]
+
+
+class MCTSNode:
+    __slots__ = (
+        "parent",
+        "children",
+        "move",
+        "state",
+        "visit_count",
+        "total_value",
+        "prior",
+        "is_expanded",
+        "is_terminal",
+        "terminal_value",
+    )
+
+    def __init__(self, state: ChessGameState, parent: "MCTSNode | None" = None, move: Move | None = None):
+        self.parent: MCTSNode | None = parent
+        self.children: dict[int, MCTSNode] = {}
+        self.move: Move | None = move
+        self.state: ChessGameState = state
+        self.visit_count = 0
+        self.total_value = 0.0
+        self.prior = 0.0
+        self.is_expanded = False
+        self.is_terminal = False
+        self.terminal_value = 0.0
+
+
+@dataclass
+class MCTSResult:
+    policy: np.ndarray       # [POLICY_SIZE] visit-based policy target
+    move: Move               # Sampled move
+    root_value: float        # Root Q (for logging)
+
+
+class MCTSSearch:
+    """Single-game MCTS; fed by an external batched evaluator.
+
+    Call sequence per simulation:
+        board = search.select_leaf()   # None if terminal (already backpropped)
+        # ... NN evaluates `board` ...
+        search.supply_eval(policy, value)
+    After N sims call `search.get_result()`.
+    """
+
+    def __init__(self, state: ChessGameState):
+        self.root = MCTSNode(state)
+        self._pending_leaf: MCTSNode | None = None
+        self._check_terminal(self.root)
+
+    def is_terminal(self) -> bool:
+        return self.root.is_terminal
+
+    def get_root_board(self) -> np.ndarray:
+        return encode_board(self.root.state)
+
+    def init_root(self, policy: np.ndarray, value: float) -> None:
+        """Populate the root's children with priors from the NN, add Dirichlet noise."""
+        self._expand_with_policy(self.root, policy)
+        _add_dirichlet_noise(self.root)
+        _backpropagate(self.root, value)
+
+    def select_leaf(self) -> np.ndarray | None:
+        """Descend from root to an unexpanded (or terminal) leaf."""
+        node = self.root
+        while node.is_expanded and not node.is_terminal:
+            node = _select_child(node)
+
+        if node.is_terminal:
+            _backpropagate(node, node.terminal_value)
+            self._pending_leaf = None
+            return None
+
+        self._pending_leaf = node
+        return encode_board(node.state)
+
+    def supply_eval(self, policy: np.ndarray, value: float) -> None:
+        if self._pending_leaf is None:
+            return
+        self._expand_with_policy(self._pending_leaf, policy)
+        _backpropagate(self._pending_leaf, value)
+        self._pending_leaf = None
+
+    def get_result(self, rng: random.Random | None = None) -> MCTSResult:
+        rng = rng or random
+        policy = np.zeros(POLICY_SIZE, dtype=np.float32)
+        total_visits = sum(c.visit_count for c in self.root.children.values())
+        if total_visits > 0:
+            for idx, child in self.root.children.items():
+                policy[idx] = child.visit_count / total_visits
+        move = _sample_move(self.root, rng)
+        root_value = (
+            self.root.total_value / self.root.visit_count if self.root.visit_count > 0 else 0.0
+        )
+        return MCTSResult(policy=policy, move=move, root_value=root_value)
+
+    # --- internals ---
+
+    def _check_terminal(self, node: MCTSNode) -> None:
+        s = node.state.status
+        if s in ("checkmate", "stalemate", "draw"):
+            node.is_terminal = True
+            node.is_expanded = True
+            # Terminal value is from the perspective of the player-to-move at the
+            # terminal node. Checkmate = they have no moves and are in check, so
+            # they've LOST: value = -1. Stalemate/draw: 0.
+            node.terminal_value = -1.0 if s == "checkmate" else 0.0
+        else:
+            moves = get_legal_moves(node.state)
+            if not moves:
+                node.is_terminal = True
+                node.is_expanded = True
+                node.terminal_value = 0.0
+
+    def _expand_with_policy(self, node: MCTSNode, policy: np.ndarray) -> None:
+        legal = get_legal_moves(node.state)
+        if not legal:
+            node.is_terminal = True
+            node.is_expanded = True
+            node.terminal_value = 0.0
+            return
+
+        is_white = node.state.currentTurn == "white"
+        seen: set[int] = set()
+        prior_sum = 0.0
+        for m in legal:
+            mi = move_to_index(m, is_white)
+            if mi not in seen:
+                seen.add(mi)
+                prior_sum += float(policy[mi])
+
+        seen.clear()
+        for m in legal:
+            mi = move_to_index(m, is_white)
+            if mi in seen:
+                continue
+            seen.add(mi)
+            child_state = apply_move(node.state, m)
+            child = MCTSNode(child_state, parent=node, move=m)
+            child.prior = float(policy[mi]) / prior_sum if prior_sum > 0 else 1.0 / len(seen)
+            self._check_terminal(child)
+            node.children[mi] = child
+
+        node.is_expanded = True
+
+
+# --- Helpers (module-level so they can be shared by the search + tests) ---
+
+
+def _select_child(node: MCTSNode) -> MCTSNode:
+    best_score = -math.inf
+    best_child: MCTSNode | None = None
+    sqrt_parent = math.sqrt(max(node.visit_count, 1))
+    for child in node.children.values():
+        q = child.total_value / child.visit_count if child.visit_count > 0 else 0.0
+        u = C_PUCT * child.prior * sqrt_parent / (1 + child.visit_count)
+        score = q + u
+        if score > best_score:
+            best_score = score
+            best_child = child
+    assert best_child is not None
+    return best_child
+
+
+def _backpropagate(node: MCTSNode, value: float) -> None:
+    current: MCTSNode | None = node
+    v = value
+    while current is not None:
+        current.visit_count += 1
+        current.total_value += v
+        v = -v
+        current = current.parent
+
+
+def _sample_move(root: MCTSNode, rng: random.Random) -> Move:
+    total_visits = sum(c.visit_count for c in root.children.values())
+    if total_visits > 0:
+        r = rng.random() * total_visits
+        for child in root.children.values():
+            r -= child.visit_count
+            if r <= 0:
+                assert child.move is not None
+                return child.move
+
+    # Fallback: greedy by visit count.
+    best_visits = -1
+    best_move: Move | None = None
+    for child in root.children.values():
+        if child.visit_count > best_visits:
+            best_visits = child.visit_count
+            best_move = child.move
+    assert best_move is not None
+    return best_move
+
+
+def _add_dirichlet_noise(root: MCTSNode) -> None:
+    n = len(root.children)
+    if n == 0:
+        return
+    noise = np.random.dirichlet([DIRICHLET_ALPHA] * n)
+    for i, child in enumerate(root.children.values()):
+        child.prior = (1 - DIRICHLET_EPSILON) * child.prior + DIRICHLET_EPSILON * float(noise[i])
+
+
+# --- Batched MCTS across many games ---
+
+
+def run_batched_mcts(
+    states: list[ChessGameState],
+    evaluator: BatchedEvaluator,
+    num_simulations: int,
+    rng: random.Random | None = None,
+) -> list[MCTSResult]:
+    """Run MCTS for each input state, batching all NN evaluations across games.
+
+    Mirrors `runBatchedMCTS` in MCTS.ts. Each simulation step collects every
+    active game's leaf request, submits one big batch to `evaluator`, then
+    distributes the results back. This is what keeps the GPU loaded during
+    self-play.
+    """
+    rng = rng or random
+    searches = [MCTSSearch(s) for s in states]
+
+    active = [s for s in searches if not s.is_terminal()]
+    if not active:
+        return [s.get_result(rng) for s in searches]
+
+    # Batch-evaluate the root positions.
+    root_boards = np.stack([s.get_root_board() for s in active])
+    root_policies, root_values = evaluator(root_boards)
+    for i, s in enumerate(active):
+        s.init_root(root_policies[i], float(root_values[i]))
+
+    # Simulation loop.
+    for _ in range(num_simulations):
+        pending: list[tuple[int, np.ndarray]] = []
+        for i, s in enumerate(active):
+            board = s.select_leaf()
+            if board is not None:
+                pending.append((i, board))
+
+        if pending:
+            boards = np.stack([b for _, b in pending])
+            policies, values = evaluator(boards)
+            for j, (idx, _) in enumerate(pending):
+                active[idx].supply_eval(policies[j], float(values[j]))
+
+    return [s.get_result(rng) for s in searches]
