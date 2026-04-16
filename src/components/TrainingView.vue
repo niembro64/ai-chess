@@ -495,9 +495,10 @@ const reversedCompletedGames = computed(() => {
         <div v-if="stats && stats.gameSlots.length > 0" class="panel games-panel">
           <h2 class="panel-title">Active Games</h2>
           <div class="mini-boards-grid">
-            <div v-for="(slot, i) in stats.gameSlots" :key="i" class="mini-board-card">
+            <div v-for="(slot, i) in stats.gameSlots" :key="i" class="mini-board-card" :class="{ 'standard-start': slot.isStandardStart }">
               <div class="mini-board-header">
                 <span class="mini-id">#{{ i + 1 }}</span>
+                <span v-if="slot.isStandardStart" class="std-badge">STD</span>
                 <span class="mini-moves">{{ slot.moveCount }}/{{ slot.moveCap }}</span>
                 <span class="mini-turn" :class="slot.currentTurn">{{ slot.currentTurn === 'white' ? 'W' : 'B' }}</span>
               </div>
@@ -724,6 +725,8 @@ const reversedCompletedGames = computed(() => {
 .mini-light { background: #c8b080; }
 .mini-dark { background: #8b6b3d; }
 .mini-piece { font-size: 10px; line-height: 1; }
+.standard-start { border-color: rgba(74, 158, 255, 0.4); }
+.std-badge { font-size: 7px; color: #4a9eff; font-weight: bold; background: rgba(74,158,255,.15); padding: 0 3px; border-radius: 2px; }
 
 /* Completed games */
 .completed-panel { opacity: 0.85; }

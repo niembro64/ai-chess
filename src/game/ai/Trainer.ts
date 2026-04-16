@@ -240,6 +240,7 @@ export type LogEntry = { time: number; message: string };
 export type GameSlotSnapshot = {
   moveCount: number;
   moveCap: number;
+  isStandardStart: boolean;
   materialWhite: number;
   materialBlack: number;
   board: Board;
@@ -366,7 +367,8 @@ type GameSlot = {
   state: ChessGameState;
   examples: GameSlotExample[];
   moveCount: number;
-  moveCap: number; // Random cap for this game (20-200)
+  moveCap: number;
+  isStandardStart: boolean;
 };
 
 // --- Starting position generators ---
@@ -462,6 +464,7 @@ export class Trainer {
     return this.games.map(g => ({
       moveCount: g.moveCount,
       moveCap: g.moveCap,
+      isStandardStart: g.isStandardStart,
       materialWhite: materialAdvantage(g.state, 'white'),
       materialBlack: materialAdvantage(g.state, 'black'),
       board: g.state.board,
@@ -602,8 +605,9 @@ export class Trainer {
     // 90% random starts, 10% standard opening
     const random = useRandom ?? (Math.random() > 0.1);
     const state = random ? randomStartingPosition() : normalStartingPosition();
-    const moveCap = 5 + Math.floor(Math.random() * 26); // 5-30
-    return { state, examples: [], moveCount: 0, moveCap };
+    const baseCap = 5 + Math.floor(Math.random() * 26); // 5-30
+    const moveCap = random ? baseCap : baseCap * 10; // Standard starts get 50-300
+    return { state, examples: [], moveCount: 0, moveCap, isStandardStart: !random };
   }
 
   // Main loop: advance ALL games by one move using batched MCTS, then check for completions
