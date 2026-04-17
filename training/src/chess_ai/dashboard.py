@@ -43,7 +43,7 @@ _LOSS_HISTORY_POINTS = 500
 
 CSV_FIELDS = (
     "time", "step", "gen", "games",
-    "white_wins", "black_wins", "draws",
+    "white_wins", "black_wins", "draws", "caps",
     "games_per_min", "replay_size",
     "policy_loss", "value_loss", "total_loss",
 )
@@ -187,6 +187,7 @@ class DashboardLogger:
                     "white_wins": stats.white_wins,
                     "black_wins": stats.black_wins,
                     "draws": stats.draws,
+                    "caps": getattr(stats, "caps", 0),
                     "games_per_min": round(stats.games_per_min, 2),
                     "replay_size": stats.replay_size,
                     "policy_loss": round(stats.policy_loss, 4),
@@ -263,7 +264,9 @@ class DashboardLogger:
         w = getattr(stats, "white_wins", 0) if stats else 0
         b = getattr(stats, "black_wins", 0) if stats else 0
         d = getattr(stats, "draws", 0) if stats else 0
-        total = max(1, w + b + d)
+        c = getattr(stats, "caps", 0) if stats else 0
+        real_total = w + b + d + c
+        total = max(1, real_total)
 
         def row(label: str, count: int, style: str) -> tuple:
             pct = count / total * 100
@@ -280,10 +283,13 @@ class DashboardLogger:
         table.add_column(width=6, justify="right")
         table.add_column(width=8, justify="right")
         table.add_column(ratio=1)
+        # W / B = checkmate. D = true draw (stalemate, 50-move rule).
+        # Cap = hit the move-cap timeout before anything decisive.
         table.add_row(*row("W", w, "green"))
         table.add_row(*row("B", b, "red"))
         table.add_row(*row("D", d, "yellow"))
-        return Panel(table, title=f"outcomes  (n={total if stats else 0})", border_style="blue")
+        table.add_row(*row("Cap", c, "cyan"))
+        return Panel(table, title=f"outcomes  (n={real_total})", border_style="blue")
 
     def _loss_panel(self) -> Panel:
         # plotext renders into a size in cell units. Leave margins for the panel border.

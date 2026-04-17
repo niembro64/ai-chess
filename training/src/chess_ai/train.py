@@ -65,7 +65,8 @@ class TrainStats:
     games_completed: int = 0
     white_wins: int = 0
     black_wins: int = 0
-    draws: int = 0
+    draws: int = 0                   # Stalemate / 50-move / actual draw only
+    caps: int = 0                    # Hit move-cap before anything decisive
     policy_loss: float = 0.0
     value_loss: float = 0.0
     total_loss: float = 0.0
@@ -174,23 +175,24 @@ class Trainer:
         }
 
     def selfplay_step(self) -> None:
-        """Advance all self-play games by one move (single-process mode only).
-
-        Note: games_completed / W/B/D counters are tracked by the engine, not
-        here. In MP mode self-play happens in worker processes and we can't
-        sample per-step GameResults cheaply; instead the trainer counts
-        examples received via the example queue.
-        """
+        """Advance all self-play games by one move (single-process mode)."""
         self.model.eval()
         finished = self.engine.step()
         for r in finished:
-            if r.outcome == "white":
-                self.stats.white_wins += 1
-            elif r.outcome == "black":
-                self.stats.black_wins += 1
-            else:
-                self.stats.draws += 1
-            self.stats.games_completed += 1
+            self._record_outcome(r.outcome)
+
+    def _record_outcome(self, outcome: str) -> None:
+        if outcome == "white":
+            self.stats.white_wins += 1
+        elif outcome == "black":
+            self.stats.black_wins += 1
+        elif outcome == "cap":
+            self.stats.caps += 1
+        else:
+            # "draw" or "stalemate" — anything decisive that isn't a
+            # checkmate or a move-cap timeout.
+            self.stats.draws += 1
+        self.stats.games_completed += 1
 
     def run(
         self,
@@ -266,15 +268,7 @@ class Trainer:
 
                 # Drain any completed-game outcomes and update the counters.
                 for result in self._mp_self_play.drain_results():
-                    if result.outcome == "white":
-                        self.stats.white_wins += 1
-                    elif result.outcome == "black":
-                        self.stats.black_wins += 1
-                    else:
-                        # Includes both "cap" and "draw"/"stalemate" — all
-                        # render as draws in the outcomes panel.
-                        self.stats.draws += 1
-                    self.stats.games_completed += 1
+                    self._record_outcome(result.outcome)
 
                 # Gradient updates run as fast as the buffer allows.
                 if len(self.buffer) >= self.config.min_buffer_for_training:
