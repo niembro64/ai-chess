@@ -27,58 +27,83 @@ _PIECE_TYPE_INDEX = {t: i for i, t in enumerate(_PIECE_TYPES)}
 
 
 def encode_board(state: ChessGameState) -> np.ndarray:
-    """Encode board to a flat [8*8*NUM_PLANES] float32 array matching the TS encoder."""
-    data = np.zeros(8 * 8 * NUM_PLANES, dtype=np.float32)
-    is_white = state.currentTurn == "white"
+    """Encode board to a flat [8*8*NUM_PLANES] float32 array matching the TS encoder.
 
-    for rank in range(8):
-        for file in range(8):
-            board_rank = rank if is_white else 7 - rank
-            board_file = file if is_white else 7 - file
-            piece = state.board[board_rank][board_file]
-            if piece is not None:
-                is_own = piece.color == state.currentTurn
+    Piece planes still require a Python loop over 64 squares (the board is a
+    nested-list-of-Piece-dataclasses, so we need to resolve each cell). The
+    constant planes (bias/counters/castling) are filled with numpy slice
+    broadcasts, which skips 64 Python iterations per plane.
+    """
+    data = np.zeros((8, 8, NUM_PLANES), dtype=np.float32)
+    is_white = state.currentTurn == "white"
+    own_color = state.currentTurn
+    board = state.board
+
+    # Piece planes 0–11.
+    if is_white:
+        for r in range(8):
+            row = board[r]
+            for f in range(8):
+                piece = row[f]
+                if piece is None:
+                    continue
                 type_idx = _PIECE_TYPE_INDEX[piece.type]
-                channel = type_idx if is_own else 6 + type_idx
-                data[(rank * 8 + file) * NUM_PLANES + channel] = 1.0
+                channel = type_idx if piece.color == own_color else 6 + type_idx
+                data[r, f, channel] = 1.0
+    else:
+        for r in range(8):
+            row = board[r]
+            out_r = 7 - r
+            for f in range(8):
+                piece = row[f]
+                if piece is None:
+                    continue
+                type_idx = _PIECE_TYPE_INDEX[piece.type]
+                channel = type_idx if piece.color == own_color else 6 + type_idx
+                data[out_r, 7 - f, channel] = 1.0
 
     # Channel 12: bias
-    for i in range(64):
-        data[i * NUM_PLANES + 12] = 1.0
+    data[:, :, 12] = 1.0
 
-    # Channel 13: halfMoveClock / 50 (clamped)
+    # Channel 13: halfMoveClock / 50
     hmc = min(1.0, state.halfMoveClock / 50.0)
     if hmc > 0:
-        for i in range(64):
-            data[i * NUM_PLANES + 13] = hmc
+        data[:, :, 13] = hmc
 
-    # Channel 14: fullMoveNumber / 100 (clamped)
+    # Channel 14: fullMoveNumber / 100
     fmn = min(1.0, state.fullMoveNumber / 100.0)
     if fmn > 0:
-        for i in range(64):
-            data[i * NUM_PLANES + 14] = fmn
+        data[:, :, 14] = fmn
 
-    # Channels 15-18: castling rights
+    # Channels 15–18: castling rights
     cr = state.castlingRights
-    castling = [
-        cr.whiteKingside if is_white else cr.blackKingside,
-        cr.whiteQueenside if is_white else cr.blackQueenside,
-        cr.blackKingside if is_white else cr.whiteKingside,
-        cr.blackQueenside if is_white else cr.whiteQueenside,
-    ]
-    for c in range(4):
-        if castling[c]:
-            for i in range(64):
-                data[i * NUM_PLANES + 15 + c] = 1.0
+    if is_white:
+        if cr.whiteKingside:
+            data[:, :, 15] = 1.0
+        if cr.whiteQueenside:
+            data[:, :, 16] = 1.0
+        if cr.blackKingside:
+            data[:, :, 17] = 1.0
+        if cr.blackQueenside:
+            data[:, :, 18] = 1.0
+    else:
+        if cr.blackKingside:
+            data[:, :, 15] = 1.0
+        if cr.blackQueenside:
+            data[:, :, 16] = 1.0
+        if cr.whiteKingside:
+            data[:, :, 17] = 1.0
+        if cr.whiteQueenside:
+            data[:, :, 18] = 1.0
 
-    # Channel 19: en passant
+    # Channel 19: en passant target
     ep = state.enPassantTarget
     if ep is not None:
-        ep_rank = ep.rank if is_white else 7 - ep.rank
-        ep_file = ep.file if is_white else 7 - ep.file
-        data[(ep_rank * 8 + ep_file) * NUM_PLANES + 19] = 1.0
+        ep_r = ep.rank if is_white else 7 - ep.rank
+        ep_f = ep.file if is_white else 7 - ep.file
+        data[ep_r, ep_f, 19] = 1.0
 
-    return data
+    return data.reshape(-1)
 
 
 def move_to_index(move: Move, is_white: bool) -> int:

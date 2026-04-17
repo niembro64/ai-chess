@@ -137,7 +137,14 @@ class MCTSSearch:
             # terminal node. Checkmate = they have no moves and are in check, so
             # they've LOST: value = -1. Stalemate/draw: 0.
             node.terminal_value = -1.0 if s == "checkmate" else 0.0
+        elif s in ("active", "check"):
+            # Fresh post-apply_move state: apply_move already computed status via
+            # get_legal_moves, so "active"/"check" guarantees >=1 legal move.
+            # Skipping the recomputation here is a ~2x win on MCTS expansion.
+            pass
         else:
+            # Root node with status "waiting" or unexpected value — fall back to
+            # the safe (but expensive) check.
             moves = get_legal_moves(node.state)
             if not moves:
                 node.is_terminal = True
