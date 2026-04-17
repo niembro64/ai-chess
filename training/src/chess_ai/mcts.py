@@ -113,14 +113,18 @@ class MCTSSearch:
         _backpropagate(self._pending_leaf, value)
         self._pending_leaf = None
 
-    def get_result(self, rng: random.Random | None = None) -> MCTSResult:
+    def get_result(
+        self,
+        rng: random.Random | None = None,
+        temperature: float = 1.0,
+    ) -> MCTSResult:
         rng = rng or random
         policy = np.zeros(POLICY_SIZE, dtype=np.float32)
         total_visits = sum(c.visit_count for c in self.root.children.values())
         if total_visits > 0:
             for idx, child in self.root.children.items():
                 policy[idx] = child.visit_count / total_visits
-        move = _sample_move(self.root, rng)
+        move = _sample_move(self.root, rng, temperature)
         root_value = (
             self.root.total_value / self.root.visit_count if self.root.visit_count > 0 else 0.0
         )
@@ -211,25 +215,42 @@ def _backpropagate(node: MCTSNode, value: float) -> None:
         current = current.parent
 
 
-def _sample_move(root: MCTSNode, rng: random.Random) -> Move:
-    total_visits = sum(c.visit_count for c in root.children.values())
-    if total_visits > 0:
-        r = rng.random() * total_visits
-        for child in root.children.values():
-            r -= child.visit_count
-            if r <= 0:
-                assert child.move is not None
-                return child.move
+def _sample_move(root: MCTSNode, rng: random.Random, temperature: float = 1.0) -> Move:
+    """Pick a move from the root's visit distribution.
 
-    # Fallback: greedy by visit count.
-    best_visits = -1
-    best_move: Move | None = None
-    for child in root.children.values():
-        if child.visit_count > best_visits:
-            best_visits = child.visit_count
-            best_move = child.move
-    assert best_move is not None
-    return best_move
+    temperature == 1.0 → sample proportional to visit counts (exploration).
+    temperature <= ~0  → argmax (greedy; pick the most-visited child).
+
+    AlphaZero uses τ=1 for the opening plies and τ→0 thereafter so the game
+    commits to decisive best moves once the opening is committed. Without
+    this annealing, self-play games keep sampling sub-optimal moves
+    proportionally and the training signal stays mushy.
+    """
+    children = list(root.children.values())
+    if not children:
+        raise RuntimeError("_sample_move called on a root with no children")
+
+    if temperature <= 1e-6:
+        best_child = max(children, key=lambda c: c.visit_count)
+        assert best_child.move is not None
+        return best_child.move
+
+    total_visits = sum(c.visit_count for c in children)
+    if total_visits == 0:
+        # No sims completed yet on any child — fall back to a uniform pick.
+        return rng.choice([c.move for c in children if c.move is not None])  # type: ignore[return-value]
+
+    r = rng.random() * total_visits
+    for child in children:
+        r -= child.visit_count
+        if r <= 0:
+            assert child.move is not None
+            return child.move
+
+    # Float drift guard.
+    best_child = max(children, key=lambda c: c.visit_count)
+    assert best_child.move is not None
+    return best_child.move
 
 
 def _add_dirichlet_noise(root: MCTSNode) -> None:
@@ -249,20 +270,27 @@ def run_batched_mcts(
     evaluator: BatchedEvaluator,
     num_simulations: int,
     rng: random.Random | None = None,
+    temperatures: list[float] | None = None,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
 
-    Mirrors `runBatchedMCTS` in MCTS.ts. Each simulation step collects every
-    active game's leaf request, submits one big batch to `evaluator`, then
-    distributes the results back. This is what keeps the GPU loaded during
-    self-play.
+    `temperatures[i]` controls the move-selection temperature for game `i`.
+    Defaults to τ=1.0 for every game (AlphaZero-style exploration). Pass a
+    list of zeros to get argmax (greedy) selection for all games.
     """
     rng = rng or random
+    if temperatures is None:
+        temperatures = [1.0] * len(states)
+    elif len(temperatures) != len(states):
+        raise ValueError(
+            f"temperatures length {len(temperatures)} != states length {len(states)}"
+        )
+
     searches = [MCTSSearch(s) for s in states]
 
     active = [s for s in searches if not s.is_terminal()]
     if not active:
-        return [s.get_result(rng) for s in searches]
+        return [s.get_result(rng, temperatures[i]) for i, s in enumerate(searches)]
 
     # Batch-evaluate the root positions.
     root_boards = np.stack([s.get_root_board() for s in active])
@@ -284,4 +312,4 @@ def run_batched_mcts(
             for j, (idx, _) in enumerate(pending):
                 active[idx].supply_eval(policies[j], float(values[j]))
 
-    return [s.get_result(rng) for s in searches]
+    return [s.get_result(rng, temperatures[i]) for i, s in enumerate(searches)]

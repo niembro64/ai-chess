@@ -47,6 +47,9 @@ def test_train_loop_runs_and_checkpoints(tmp_path: Path):
         mcts_simulations=4,
         batch_size=16,
         gradient_steps_per_selfplay_step=1,
+        # Tiny smoke config: don't rate-limit gradient steps, we just want
+        # to verify the whole loop runs + checkpoints.
+        min_examples_between_grad_steps=1,
         learning_rate=1e-3,
         replay_buffer_capacity=500,
         min_buffer_for_training=8,        # Low threshold so training kicks in fast

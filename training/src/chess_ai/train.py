@@ -47,6 +47,17 @@ class TrainConfig:
     gradient_steps_per_selfplay_step: int = 1
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
+    # Rate-limit gradient steps: require at least this many *new* training
+    # examples to have arrived since the last update before taking another
+    # gradient step. Prevents overtraining on tiny buffers in MP mode where
+    # the trainer main-loop spins much faster than workers produce data.
+    # AlphaZero-style ratio is ~1 grad step per 1000+ positions; 32 is a
+    # reasonable default for our smaller scale.
+    min_examples_between_grad_steps: int = 32
+    # Starting-position mix + move-selection temperature (plumbed from the
+    # SelfPlayConfig defaults for CLI convenience).
+    random_start_prob: float = 0.3
+    temperature_threshold_plies: int = 15
     # Replay
     replay_buffer_capacity: int = 100_000
     min_buffer_for_training: int = 2_000
@@ -122,6 +133,8 @@ class Trainer:
                 games_per_worker=self.config.games_per_worker,
                 mcts_simulations=self.config.mcts_simulations,
                 batch_wait_ms=self.config.mp_batch_wait_ms,
+                random_start_prob=self.config.random_start_prob,
+                temperature_threshold_plies=self.config.temperature_threshold_plies,
                 rewards=self.config.rewards,
             )
             self._mp_self_play = MultiprocessingSelfPlay(
@@ -138,6 +151,8 @@ class Trainer:
                 config=SelfPlayConfig(
                     num_concurrent_games=self.config.num_concurrent_games,
                     mcts_simulations=self.config.mcts_simulations,
+                    random_start_prob=self.config.random_start_prob,
+                    temperature_threshold_plies=self.config.temperature_threshold_plies,
                     rewards=self.config.rewards,
                 ),
                 rng=self.rng,
@@ -210,14 +225,22 @@ class Trainer:
             return
 
         step = 0
+        buffer_size_before = len(self.buffer)
+        examples_since_grad = 0
         while True:
             if num_steps is not None and step >= num_steps:
                 break
             step += 1
 
             self.selfplay_step()
+            examples_since_grad += max(0, len(self.buffer) - buffer_size_before)
+            buffer_size_before = len(self.buffer)
 
-            if len(self.buffer) >= self.config.min_buffer_for_training:
+            min_new = self.config.min_examples_between_grad_steps
+            if (
+                len(self.buffer) >= self.config.min_buffer_for_training
+                and examples_since_grad >= min_new
+            ):
                 last_losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
                 for _ in range(self.config.gradient_steps_per_selfplay_step):
                     last_losses = self.train_step()
@@ -225,6 +248,7 @@ class Trainer:
                 self.stats.policy_loss = last_losses["policy_loss"]
                 self.stats.value_loss = last_losses["value_loss"]
                 self.stats.total_loss = last_losses["total_loss"]
+                examples_since_grad = 0
 
             self.stats.step = step
             self.stats.replay_size = len(self.buffer)
@@ -257,6 +281,7 @@ class Trainer:
         self._mp_self_play.start()
 
         step = 0
+        examples_since_grad = 0
         try:
             while True:
                 if num_steps is not None and step >= num_steps:
@@ -264,14 +289,21 @@ class Trainer:
                 step += 1
 
                 # Drain as many training examples as are available right now.
-                self._mp_self_play.drain_examples(self.buffer)
+                drained = self._mp_self_play.drain_examples(self.buffer)
+                examples_since_grad += drained
 
                 # Drain any completed-game outcomes and update the counters.
                 for result in self._mp_self_play.drain_results():
                     self._record_outcome(result.outcome)
 
-                # Gradient updates run as fast as the buffer allows.
-                if len(self.buffer) >= self.config.min_buffer_for_training:
+                # Gradient updates are rate-limited by new-example arrival so
+                # we don't over-train on a thin buffer (classic RL failure
+                # mode that collapses the policy distribution).
+                min_new = self.config.min_examples_between_grad_steps
+                if (
+                    len(self.buffer) >= self.config.min_buffer_for_training
+                    and examples_since_grad >= min_new
+                ):
                     last_losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
                     for _ in range(self.config.gradient_steps_per_selfplay_step):
                         last_losses = self.train_step()
@@ -282,9 +314,10 @@ class Trainer:
                     self.stats.policy_loss = last_losses["policy_loss"]
                     self.stats.value_loss = last_losses["value_loss"]
                     self.stats.total_loss = last_losses["total_loss"]
+                    examples_since_grad = 0
                 else:
-                    # Nothing to train on yet: yield so we don't hot-loop the
-                    # queue drain.
+                    # Either buffer isn't ready yet, or we're waiting for
+                    # fresh examples. Yield so we don't hot-loop.
                     time.sleep(0.05)
 
                 self.stats.step = step

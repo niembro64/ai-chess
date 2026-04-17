@@ -118,8 +118,14 @@ def _random_start(rng: random.Random) -> ChessGameState:
     return state
 
 
-def _make_game_slot(rng: random.Random, use_random: bool | None = None) -> GameSlot:
-    is_random = use_random if use_random is not None else (rng.random() > 0.1)
+def _make_game_slot(rng: random.Random, random_start_prob: float = 0.3) -> GameSlot:
+    """Create a fresh game slot.
+
+    With probability `random_start_prob`, the slot starts from a randomized
+    mid-/end-game position with a short move cap (coverage). Otherwise it
+    starts from the standard opening with a long cap (tactical depth).
+    """
+    is_random = rng.random() < random_start_prob
     state = _random_start(rng) if is_random else _normal_start()
     base_cap = rng.randint(5, 30)
     move_cap = base_cap if is_random else base_cap * 10
@@ -189,6 +195,16 @@ def make_local_selfplay_engine(
 class SelfPlayConfig:
     num_concurrent_games: int = 32
     mcts_simulations: int = 25
+    # Probability that a fresh game slot starts from a randomized mid-/end-game
+    # position (with a short move cap). The rest start from the standard
+    # opening with a long cap. Higher = more coverage, lower = more tactical
+    # depth. 0.3 means 30% random starts, 70% standard.
+    random_start_prob: float = 0.3
+    # Plies from the start of an episode during which move selection samples
+    # proportional to visit counts (τ=1). After this many plies we switch to
+    # argmax (τ→0) so the game commits to the best move. Matches the
+    # AlphaZero move-selection schedule.
+    temperature_threshold_plies: int = 15
     rewards: RewardWeights = field(default_factory=lambda: RewardWeights(**DEFAULT_REWARD_WEIGHTS.__dict__))
 
 
@@ -212,7 +228,7 @@ class SelfPlayEngine:
         self.rng = rng or random.Random()
 
         self.games: list[GameSlot] = [
-            _make_game_slot(self.rng, use_random=self.rng.random() > 0.1)
+            _make_game_slot(self.rng, self.config.random_start_prob)
             for _ in range(self.config.num_concurrent_games)
         ]
         self.games_completed = 0
@@ -224,8 +240,12 @@ class SelfPlayEngine:
     def step(self) -> list[GameResult]:
         """Advance every active game by one move. Returns results for games that ended this step."""
         states = [g.state for g in self.games]
+        temperatures = [
+            1.0 if g.move_count < self.config.temperature_threshold_plies else 0.0
+            for g in self.games
+        ]
         mcts_results = run_batched_mcts(
-            states, self.evaluator, self.config.mcts_simulations, self.rng
+            states, self.evaluator, self.config.mcts_simulations, self.rng, temperatures
         )
 
         finished: list[GameResult] = []
@@ -268,7 +288,7 @@ class SelfPlayEngine:
             )
             if is_over:
                 finished.append(self._finish_game(slot))
-                self.games[i] = _make_game_slot(self.rng)
+                self.games[i] = _make_game_slot(self.rng, self.config.random_start_prob)
 
         return finished
 

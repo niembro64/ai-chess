@@ -65,8 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
     # Training
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--grad-steps-per-step", type=int, default=1)
+    p.add_argument("--min-examples-between-grad-steps", type=int, default=32,
+                   help="Rate-limit gradient updates: require this many new "
+                        "training examples since the last step before taking "
+                        "another. Prevents overtraining on a thin buffer.")
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
+    # Self-play scheduling
+    p.add_argument("--random-start-prob", type=float, default=0.3,
+                   help="Fraction of new episodes that start from a random "
+                        "mid-/end-game position with a short move cap. "
+                        "The rest start from the standard opening.")
+    p.add_argument("--temperature-threshold-plies", type=int, default=15,
+                   help="Plies from episode start during which move selection "
+                        "samples proportional to MCTS visits (τ=1). After this, "
+                        "the game commits to argmax (τ→0).")
     # Replay
     p.add_argument("--replay-buffer", type=int, default=100_000)
     p.add_argument("--min-buffer", type=int, default=2_000)
@@ -124,6 +137,9 @@ def main() -> None:
         weight_broadcast_every=args.weight_broadcast_every,
         batch_size=args.batch_size,
         gradient_steps_per_selfplay_step=args.grad_steps_per_step,
+        min_examples_between_grad_steps=args.min_examples_between_grad_steps,
+        random_start_prob=args.random_start_prob,
+        temperature_threshold_plies=args.temperature_threshold_plies,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         replay_buffer_capacity=args.replay_buffer,

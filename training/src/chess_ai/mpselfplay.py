@@ -65,6 +65,9 @@ class MultiprocessingConfig:
     # (or until enough arrive) before dispatching to the GPU. Small numbers
     # trade latency for throughput.
     batch_wait_ms: float = 5.0
+    # Self-play scheduling knobs — mirrored to each worker's SelfPlayConfig.
+    random_start_prob: float = 0.3
+    temperature_threshold_plies: int = 15
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -222,6 +225,8 @@ def _worker_main(
         config=SelfPlayConfig(
             num_concurrent_games=config.games_per_worker,
             mcts_simulations=config.mcts_simulations,
+            random_start_prob=config.random_start_prob,
+            temperature_threshold_plies=config.temperature_threshold_plies,
             rewards=config.rewards,
         ),
         rng=rng,
