@@ -73,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Rate-limit gradient updates: require this many new "
                         "training examples since the last step before taking "
                         "another. Prevents overtraining on a thin buffer.")
+    p.add_argument("--target-gens", type=int, default=100_000,
+                   help="'Well trained' milestone used for the dashboard "
+                        "progress bar and ETA. Training continues past this "
+                        "point — it's just a visible target.")
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     # Self-play scheduling
@@ -145,6 +149,7 @@ def main() -> None:
         batch_size=args.batch_size,
         gradient_steps_per_selfplay_step=args.grad_steps_per_step,
         min_examples_between_grad_steps=args.min_examples_between_grad_steps,
+        target_gens=args.target_gens,
         random_start_prob=args.random_start_prob,
         temperature_threshold_plies=args.temperature_threshold_plies,
         learning_rate=args.lr,
@@ -163,12 +168,15 @@ def main() -> None:
     def plain_on_step(stats) -> None:
         if stats.step % args.log_every != 0:
             return
+        pct = stats.generation / max(1, stats.target_gens) * 100
         log.info(
-            "step=%d gen=%d games=%d (W/B/D=%d/%d/%d) gpm=%.1f "
-            "buf=%d loss p=%.3f v=%.3f",
-            stats.step, stats.generation, stats.games_completed,
-            stats.white_wins, stats.black_wins, stats.draws,
-            stats.games_per_min, stats.replay_size,
+            "gen=%d/%d (%.1f%%) gen/min=%.1f games=%d (%.1f/min) "
+            "W/B/D/Cap=%d/%d/%d/%d buf=%d loss p=%.3f v=%.3f",
+            stats.generation, stats.target_gens, pct,
+            stats.gen_per_min,
+            stats.games_completed, stats.games_per_min,
+            stats.white_wins, stats.black_wins, stats.draws, stats.caps,
+            stats.replay_size,
             stats.policy_loss, stats.value_loss,
         )
 

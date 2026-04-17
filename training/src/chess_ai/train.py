@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -61,6 +62,14 @@ class TrainConfig:
     # Replay
     replay_buffer_capacity: int = 100_000
     min_buffer_for_training: int = 2_000
+    # "Well trained" milestone — drives the dashboard progress bar and ETA.
+    # Not a hard stop; training runs until interrupted. Tune to your compute
+    # budget and model size: 100k gradient updates is a reasonable ceiling
+    # for a 3M-param chess network at our self-play throughput.
+    target_gens: int = 100_000
+    # Window (in seconds) used to compute recent gen/min + games/min rates.
+    # Short = noisy but responsive; long = smoother but slow to reflect change.
+    rate_window_seconds: float = 120.0
     # Checkpointing
     checkpoint_every_seconds: float = 60.0
     # Logging
@@ -72,7 +81,8 @@ class TrainConfig:
 @dataclass
 class TrainStats:
     step: int = 0
-    generation: int = 0              # Count of gradient steps
+    generation: int = 0              # Count of gradient steps taken so far
+    target_gens: int = 0             # Goal for "well trained" (for progress bar / ETA)
     games_completed: int = 0
     white_wins: int = 0
     black_wins: int = 0
@@ -82,7 +92,13 @@ class TrainStats:
     value_loss: float = 0.0
     total_loss: float = 0.0
     replay_size: int = 0
+    # Rates measured over a recent sliding window (not cumulative) so they
+    # reflect the current pace after the worker startup transient.
+    gen_per_min: float = 0.0
     games_per_min: float = 0.0
+    # Seconds-remaining estimate to reach target_gens at the current rate.
+    # None if we haven't completed any gradient updates yet.
+    eta_seconds: float | None = None
 
 
 def values_to_wdl_targets(values: np.ndarray) -> np.ndarray:
@@ -158,9 +174,41 @@ class Trainer:
                 rng=self.rng,
             )
 
-        self.stats = TrainStats()
+        self.stats = TrainStats(target_gens=self.config.target_gens)
         self._start_time = time.time()
         self._last_checkpoint_time = 0.0
+        # (timestamp, generation, games_completed) samples used for windowed rates.
+        self._rate_samples: deque[tuple[float, int, int]] = deque()
+
+    def _update_rates(self) -> None:
+        """Recompute gen/min + games/min over the last `rate_window_seconds`.
+
+        Using a sliding window (rather than cumulative averages) keeps the
+        dashboard responsive after the initial worker warm-up, and gives an
+        honest ETA that reflects the current pace, not the startup drag.
+        """
+        now = time.time()
+        self._rate_samples.append((now, self.stats.generation, self.stats.games_completed))
+        cutoff = now - self.config.rate_window_seconds
+        while self._rate_samples and self._rate_samples[0][0] < cutoff:
+            self._rate_samples.popleft()
+
+        if len(self._rate_samples) >= 2:
+            first = self._rate_samples[0]
+            last = self._rate_samples[-1]
+            dt_min = (last[0] - first[0]) / 60.0
+            if dt_min > 0:
+                self.stats.gen_per_min = (last[1] - first[1]) / dt_min
+                self.stats.games_per_min = (last[2] - first[2]) / dt_min
+
+        # ETA to target, based on the windowed rate.
+        if self.stats.gen_per_min > 0 and self.stats.generation < self.stats.target_gens:
+            remaining = self.stats.target_gens - self.stats.generation
+            self.stats.eta_seconds = remaining / self.stats.gen_per_min * 60.0
+        elif self.stats.generation >= self.stats.target_gens:
+            self.stats.eta_seconds = 0.0
+        else:
+            self.stats.eta_seconds = None
 
     def train_step(self) -> dict[str, float]:
         """One gradient step. Samples a batch from the replay buffer and updates weights."""
@@ -252,8 +300,7 @@ class Trainer:
 
             self.stats.step = step
             self.stats.replay_size = len(self.buffer)
-            elapsed_min = (time.time() - self._start_time) / 60.0
-            self.stats.games_per_min = self.stats.games_completed / elapsed_min if elapsed_min > 0 else 0.0
+            self._update_rates()
 
             if on_step is not None:
                 on_step(self.stats)
@@ -322,10 +369,7 @@ class Trainer:
 
                 self.stats.step = step
                 self.stats.replay_size = len(self.buffer)
-                elapsed_min = (time.time() - self._start_time) / 60.0
-                self.stats.games_per_min = (
-                    self.stats.games_completed / elapsed_min if elapsed_min > 0 else 0.0
-                )
+                self._update_rates()
 
                 if on_step is not None:
                     on_step(self.stats)

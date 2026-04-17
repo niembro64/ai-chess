@@ -42,9 +42,10 @@ from rich.text import Text
 _LOSS_HISTORY_POINTS = 500
 
 CSV_FIELDS = (
-    "time", "step", "gen", "games",
+    "time", "step", "gen", "target_gens", "games",
     "white_wins", "black_wins", "draws", "caps",
-    "games_per_min", "replay_size",
+    "gen_per_min", "games_per_min", "replay_size",
+    "eta_seconds",
     "policy_loss", "value_loss", "total_loss",
 )
 
@@ -56,6 +57,25 @@ def _format_duration(seconds: float) -> str:
     if h:
         return f"{h}h{m:02d}m"
     return f"{m}m{s:02d}s"
+
+
+def _format_eta(seconds: float | None) -> str:
+    """Friendly remaining-time label for the dashboard ETA row."""
+    if seconds is None:
+        return "—"
+    if seconds <= 0:
+        return "done"
+    total = int(seconds)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days > 0:
+        return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m"
+    return f"{total}s"
 
 
 class _LossHistory:
@@ -178,18 +198,22 @@ class DashboardLogger:
         )
 
         if self._csv_writer is not None:
+            eta = getattr(stats, "eta_seconds", None)
             self._csv_writer.writerow(
                 {
                     "time": datetime.now().isoformat(timespec="seconds"),
                     "step": stats.step,
                     "gen": stats.generation,
+                    "target_gens": getattr(stats, "target_gens", 0),
                     "games": stats.games_completed,
                     "white_wins": stats.white_wins,
                     "black_wins": stats.black_wins,
                     "draws": stats.draws,
                     "caps": getattr(stats, "caps", 0),
+                    "gen_per_min": round(getattr(stats, "gen_per_min", 0.0), 2),
                     "games_per_min": round(stats.games_per_min, 2),
                     "replay_size": stats.replay_size,
+                    "eta_seconds": "" if eta is None else round(eta, 1),
                     "policy_loss": round(stats.policy_loss, 4),
                     "value_loss": round(stats.value_loss, 4),
                     "total_loss": round(stats.total_loss, 4),
@@ -232,18 +256,53 @@ class DashboardLogger:
         return Panel(header, border_style="cyan")
 
     def _progress_panel(self, stats) -> Panel:
-        t = Table.grid(padding=(0, 2))
-        t.add_column(style="dim", justify="right")
-        t.add_column()
+        """Progress toward the 'well-trained' target + current pace + ETA.
+
+        Rendered layout:
+            gradient updates  N / target  (X.X%)
+                              [▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱]
+            gen / min         <windowed rate>
+            ETA               <Dd Hh Mm>
+            games             N  (X.X / min)
+            buffer            N
+        """
+        t = Table.grid(padding=(0, 2), expand=True)
+        t.add_column(style="dim", justify="right", width=18)
+        t.add_column(ratio=1)
+
         if stats is None:
-            for label in ("step", "gen", "games", "games/min", "buffer"):
+            for label in (
+                "gradient updates", "progress", "gen / min",
+                "ETA", "games", "buffer",
+            ):
                 t.add_row(label, "—")
-        else:
-            t.add_row("step", f"{stats.step:,}")
-            t.add_row("gen", f"{stats.generation:,}")
-            t.add_row("games", f"{stats.games_completed:,}")
-            t.add_row("games/min", f"{stats.games_per_min:,.1f}")
-            t.add_row("buffer", f"{stats.replay_size:,}")
+            return Panel(t, title="progress", border_style="blue")
+
+        target = max(1, getattr(stats, "target_gens", 0) or 1)
+        pct = min(100.0, stats.generation / target * 100)
+
+        t.add_row(
+            "gradient updates",
+            f"{stats.generation:,} / {target:,}  ({pct:.2f}%)",
+        )
+        t.add_row(
+            "",
+            ProgressBar(
+                total=target,
+                completed=min(stats.generation, target),
+                width=46,
+                style="blue",
+                complete_style="bright_blue",
+            ),
+        )
+        t.add_row("gen / min", f"{stats.gen_per_min:,.1f}")
+        t.add_row("ETA", _format_eta(getattr(stats, "eta_seconds", None)))
+        t.add_row(
+            "games",
+            f"{stats.games_completed:,}  ({stats.games_per_min:,.1f} / min)",
+        )
+        t.add_row("buffer", f"{stats.replay_size:,}")
+
         return Panel(t, title="progress", border_style="blue")
 
     def _model_panel(self) -> Panel:
