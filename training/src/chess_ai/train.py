@@ -255,7 +255,6 @@ class Trainer:
         self._mp_self_play.start()
 
         step = 0
-        examples_seen = 0
         try:
             while True:
                 if num_steps is not None and step >= num_steps:
@@ -263,8 +262,19 @@ class Trainer:
                 step += 1
 
                 # Drain as many training examples as are available right now.
-                drained = self._mp_self_play.drain_examples(self.buffer)
-                examples_seen += drained
+                self._mp_self_play.drain_examples(self.buffer)
+
+                # Drain any completed-game outcomes and update the counters.
+                for result in self._mp_self_play.drain_results():
+                    if result.outcome == "white":
+                        self.stats.white_wins += 1
+                    elif result.outcome == "black":
+                        self.stats.black_wins += 1
+                    else:
+                        # Includes both "cap" and "draw"/"stalemate" — all
+                        # render as draws in the outcomes panel.
+                        self.stats.draws += 1
+                    self.stats.games_completed += 1
 
                 # Gradient updates run as fast as the buffer allows.
                 if len(self.buffer) >= self.config.min_buffer_for_training:
@@ -283,15 +293,12 @@ class Trainer:
                     # queue drain.
                     time.sleep(0.05)
 
-                # Stats (no per-step game counts available in MP mode;
-                # examples-seen is the closest proxy).
                 self.stats.step = step
                 self.stats.replay_size = len(self.buffer)
                 elapsed_min = (time.time() - self._start_time) / 60.0
-                # Approximate games/min from examples at ~50 moves/game.
-                approx_games = examples_seen / 50.0
-                self.stats.games_completed = int(approx_games)
-                self.stats.games_per_min = approx_games / elapsed_min if elapsed_min > 0 else 0.0
+                self.stats.games_per_min = (
+                    self.stats.games_completed / elapsed_min if elapsed_min > 0 else 0.0
+                )
 
                 if on_step is not None:
                     on_step(self.stats)

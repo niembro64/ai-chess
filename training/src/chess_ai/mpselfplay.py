@@ -43,6 +43,7 @@ import torch.multiprocessing as mp
 from .model import NUM_PLANES, ChessNet, encoded_to_nchw
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
 from .selfplay import (
+    GameResult,
     ReplayBuffer,
     SelfPlayConfig,
     SelfPlayEngine,
@@ -198,6 +199,7 @@ def _worker_main(
     request_q: "mp.Queue",
     response_q: "mp.Queue",
     example_q: "mp.Queue",
+    results_q: "mp.Queue",
     stop_event: Any,
     seed: int,
 ) -> None:
@@ -226,7 +228,11 @@ def _worker_main(
     )
 
     while not stop_event.is_set():
-        engine.step()
+        finished = engine.step()
+        # Surface per-game outcomes back to the trainer so the dashboard's
+        # outcomes panel shows real W/B/D/cap counts instead of zeros.
+        for result in finished:
+            results_q.put(result)
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +281,10 @@ class MultiprocessingSelfPlay:
             for _ in range(config.num_workers)
         ]
         self._example_q: mp.Queue = self._ctx.Queue(maxsize=config.example_q_maxsize)
+        # Worker-reported GameResult stream (W/B/D/cap, move counts). Bounded
+        # so that if the trainer ever stops draining, workers block rather
+        # than leaking memory.
+        self._results_q: mp.Queue = self._ctx.Queue(maxsize=config.example_q_maxsize)
         # weights_q: bounded to 1 so stale updates are auto-evicted.
         self._weights_q: mp.Queue = self._ctx.Queue(maxsize=1)
 
@@ -307,6 +317,7 @@ class MultiprocessingSelfPlay:
                     self._request_q,
                     self._response_qs[wid],
                     self._example_q,
+                    self._results_q,
                     self._stop_event,
                     self.seed + wid + 1,
                 ),
@@ -330,6 +341,16 @@ class MultiprocessingSelfPlay:
             buffer.add(ex)
             pulled += 1
         return pulled
+
+    def drain_results(self, max_drain: int = 4096) -> list[GameResult]:
+        """Pull any GameResults workers have posted since the last drain."""
+        results: list[GameResult] = []
+        for _ in range(max_drain):
+            try:
+                results.append(self._results_q.get_nowait())
+            except Empty:
+                break
+        return results
 
     def broadcast_weights(self, state_dict: dict) -> None:
         """Push fresh weights to the inference server. Only the latest is
