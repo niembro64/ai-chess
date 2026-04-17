@@ -581,6 +581,141 @@ fn is_in_check_py(board_list: Bound<'_, PyList>, color: &str) -> PyResult<bool> 
     Ok(is_in_check(&board, color == "white"))
 }
 
+/// Full `apply_move` port: accepts the same state fields `ChessGameState`
+/// holds, applies the move in-place on a local board, runs the status
+/// detection (checkmate / stalemate / check / draw / active) via the
+/// Rust engine, and returns all the fields the Python wrapper needs to
+/// rebuild a new `ChessGameState`. The board is returned as a flat list
+/// of 64 ints (signed piece codes: +/- {1..6}, 0 = empty) which the
+/// Python wrapper maps back to `Piece` dataclass instances via a static
+/// lookup table — significantly cheaper than round-tripping through
+/// dict-of-dicts.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn apply_move_full(
+    py: Python<'_>,
+    board_list: Bound<'_, PyList>,
+    current_turn: &str,
+    castling: Bound<'_, PyDict>,
+    en_passant: Bound<'_, PyAny>,
+    half_move_clock: i32,
+    full_move_number: i32,
+    from_r: i32,
+    from_f: i32,
+    to_r: i32,
+    to_f: i32,
+    promotion: Option<String>,
+) -> PyResult<Py<PyDict>> {
+    let mut board = pack_board(&board_list)?;
+    let mut cr = pack_castling(&castling)?;
+    let ep = pack_en_passant(&en_passant)?;
+    let white_to_move = current_turn == "white";
+
+    let promo: i8 = match promotion.as_deref() {
+        Some(s) => piece_type_from_str(s)?,
+        None => 0,
+    };
+    let m = Move {
+        from_r: from_r as u8,
+        from_f: from_f as u8,
+        to_r: to_r as u8,
+        to_f: to_f as u8,
+        promotion: promo,
+    };
+
+    let piece_before = board[m.from_r as usize][m.from_f as usize];
+    if piece_before == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "No piece at source square",
+        ));
+    }
+    let is_pawn_move = piece_before.abs() == PAWN;
+    let was_capture = board[m.to_r as usize][m.to_f as usize] != 0;
+
+    let (_, is_en_passant, _) = apply_move_to_board(&mut board, &m, &mut cr);
+
+    let new_ep: Option<(u8, u8)> = if is_pawn_move && (m.to_r as i32 - m.from_r as i32).abs() == 2 {
+        Some(((m.from_r + m.to_r) / 2, m.from_f))
+    } else {
+        None
+    };
+
+    let new_hmc = if is_pawn_move || was_capture || is_en_passant {
+        0
+    } else {
+        half_move_clock + 1
+    };
+
+    // Full-move number increments after black's move (Python: `if
+    // state.currentTurn == "black": newState.fullMoveNumber += 1`).
+    let new_fmn = if !white_to_move {
+        full_move_number + 1
+    } else {
+        full_move_number
+    };
+
+    let new_white_to_move = !white_to_move;
+
+    // Status: check legal-move count on a scratch copy (legal_moves_impl
+    // restores in-place, but being defensive is cheap).
+    let mut test_board = board;
+    let mut test_cr = cr;
+    let next_legal = legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep);
+    let in_check = is_in_check(&board, new_white_to_move);
+    let status: &str = if next_legal.is_empty() {
+        if in_check { "checkmate" } else { "stalemate" }
+    } else if in_check {
+        "check"
+    } else if new_hmc >= 100 {
+        "draw"
+    } else {
+        "active"
+    };
+
+    // Pack new state. Board goes out as a flat list of 64 signed ints
+    // — the Python wrapper maps each int back to its cached Piece via a
+    // dict lookup.
+    let result = PyDict::new_bound(py);
+
+    let board_flat = PyList::empty_bound(py);
+    for r in 0..8 {
+        for f in 0..8 {
+            board_flat.append(board[r][f] as i32)?;
+        }
+    }
+    result.set_item("board", board_flat)?;
+
+    result.set_item(
+        "currentTurn",
+        if new_white_to_move { "white" } else { "black" },
+    )?;
+
+    let cr_dict = PyDict::new_bound(py);
+    cr_dict.set_item("whiteKingside", cr.wk)?;
+    cr_dict.set_item("whiteQueenside", cr.wq)?;
+    cr_dict.set_item("blackKingside", cr.bk)?;
+    cr_dict.set_item("blackQueenside", cr.bq)?;
+    result.set_item("castlingRights", cr_dict)?;
+
+    match new_ep {
+        Some((r, f)) => {
+            let ep_dict = PyDict::new_bound(py);
+            ep_dict.set_item("rank", r as i32)?;
+            ep_dict.set_item("file", f as i32)?;
+            result.set_item("enPassantTarget", ep_dict)?;
+        }
+        None => {
+            result.set_item("enPassantTarget", py.None())?;
+        }
+    }
+
+    result.set_item("halfMoveClock", new_hmc)?;
+    result.set_item("fullMoveNumber", new_fmn)?;
+    result.set_item("status", status)?;
+
+    Ok(result.unbind())
+}
+
 #[pyfunction]
 fn is_square_attacked_by_py(
     board_list: Bound<'_, PyList>,
@@ -601,5 +736,6 @@ fn chess_ai_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_legal_moves, m)?)?;
     m.add_function(wrap_pyfunction!(is_in_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(is_square_attacked_by_py, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_move_full, m)?)?;
     Ok(())
 }
