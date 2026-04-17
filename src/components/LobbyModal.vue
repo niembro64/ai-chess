@@ -11,7 +11,7 @@ const props = defineProps<{
   localPlayerId: PlayerId;
   error: string | null;
   isConnecting: boolean;
-  hasPresetModel: boolean;
+  hasBotModel: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -19,7 +19,7 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
-  (e: 'playAi', source: 'trained' | 'preset'): void;
+  (e: 'playBot'): void;
 }>();
 
 const joinCode = ref('');
@@ -107,8 +107,12 @@ const canJoin = computed(() => {
             >Join</button>
           </div>
 
-          <button class="lobby-btn ai-btn" @click="emit('playAi', 'trained')">Play vs Your AI</button>
-          <button v-if="props.hasPresetModel" class="lobby-btn preset-btn" @click="emit('playAi', 'preset')">Play vs Preset AI</button>
+          <button
+            class="lobby-btn ai-btn"
+            :disabled="!props.hasBotModel"
+            :title="props.hasBotModel ? '' : 'No trained model available. Build one with the Python trainer and copy to src/game/ai/presetWeights.txt.'"
+            @click="emit('playBot')"
+          >Play Against Bot</button>
         </div>
 
         <div v-if="error" class="error-message">{{ error }}</div>

@@ -127,49 +127,6 @@ export type NetConfig = {
 const POLICY_CHANNELS = 64;
 export const WDL_SIZE = 3;
 
-// Detect architecture config from a loaded TF.js model.
-// Uses model.weights (layer variable metadata) to read shapes WITHOUT
-// creating or disposing any tensors.
-//
-// Expected weight ordering (per res block with SE):
-//   conv1 W, bn1 γ β μ σ², conv2 W, bn2 γ β μ σ², SE_dense1 W b, SE_dense2 W b  (14 weights)
-// Value head: conv W, BN γ β μ σ², dense1 W b, dense2(3) W b
-function detectConfigFromModel(model: tf.LayersModel): Omit<NetConfig, 'learningRate'> {
-  const shapes = model.weights.map(w => w.shape as number[]);
-
-  const kernelSize = shapes[0][0];
-  const numFilters = shapes[0][3];
-
-  let resConvs = 0;
-  for (const s of shapes) {
-    if (s.length === 4 && s[0] === kernelSize && s[2] === numFilters && s[3] === numFilters) {
-      resConvs++;
-    }
-  }
-  const numResBlocks = Math.floor(resConvs / 2);
-
-  // Detect SE reduction from dense weight [numFilters, hidden] where hidden < numFilters
-  let seReduction = 8;
-  for (const s of shapes) {
-    if (s.length === 2 && s[0] === numFilters && s[1] > 0 && s[1] < numFilters) {
-      seReduction = Math.max(1, Math.round(numFilters / s[1]));
-      break;
-    }
-  }
-
-  // Value head size: dense [64, vhs] followed later by [vhs, 3]
-  let valueHeadSize = 64;
-  for (let i = 0; i < shapes.length; i++) {
-    const s = shapes[i];
-    if (s.length === 2 && s[0] === 64 && s[1] !== WDL_SIZE) {
-      valueHeadSize = s[1];
-      break;
-    }
-  }
-
-  return { numResBlocks, numFilters, kernelSize, valueHeadSize, seReduction };
-}
-
 export type SerializedWeights = {
   config?: NetConfig;   // Optional explicit config; if absent, detected from shapes
   shapes: number[][];
@@ -178,22 +135,18 @@ export type SerializedWeights = {
 
 export class ChessNet {
   model: tf.LayersModel;
-  private optimizer: tf.Optimizer;
-  private lr: number;
   private config: NetConfig;
   private cpu: CPUWeights | null = null; // CPU-side weight cache for fast inference
 
-  private constructor(model: tf.LayersModel, lr: number, config: NetConfig) {
+  private constructor(model: tf.LayersModel, config: NetConfig) {
     this.model = model;
-    this.lr = lr;
     this.config = config;
-    this.optimizer = tf.train.adam(lr);
     this.syncCPU();
   }
 
   static create(config: NetConfig): ChessNet {
     const model = buildModel(config);
-    return new ChessNet(model, config.learningRate, config);
+    return new ChessNet(model, config);
   }
 
   // Copy weights from TF.js model to CPU arrays for fast inference
@@ -206,40 +159,6 @@ export class ChessNet {
       this.config.valueHeadSize,
       this.config.seReduction,
     );
-  }
-
-  getParamCount(): number {
-    return this.model.countParams();
-  }
-
-  // Sample a few weights from the first trainable layer for UI display
-  getSampleWeights(): number[] {
-    const layers = this.model.trainableWeights;
-    if (layers.length === 0) return [];
-    // read() returns the model's own weight tensor -- do NOT dispose it
-    const data = layers[0].read().dataSync() as Float32Array;
-    const count = 8;
-    const step = Math.max(1, Math.floor(data.length / count));
-    const samples: number[] = [];
-    for (let i = 0; i < count && i * step < data.length; i++) {
-      samples.push(data[i * step]);
-    }
-    return samples;
-  }
-
-  getConfig(): NetConfig {
-    return { ...this.config };
-  }
-
-  // Export all weights as a serializable object.
-  // Uses model.weights (LayerVariable refs) to avoid the getWeights copy/dispose ambiguity.
-  exportWeights(): SerializedWeights {
-    const result: SerializedWeights = { config: { ...this.config }, shapes: [], data: [] };
-    for (const w of this.model.weights) {
-      result.shapes.push(w.shape as number[]);
-      result.data.push(Array.from(w.read().dataSync() as Float32Array));
-    }
-    return result;
   }
 
   importWeights(weights: SerializedWeights): void {
@@ -301,126 +220,8 @@ export class ChessNet {
     });
   }
 
-  async train(
-    boards: Float32Array[],
-    policies: Float32Array[],
-    values: number[],
-  ): Promise<{ policyLoss: number; valueLoss: number; totalLoss: number }> {
-    const batchSize = boards.length;
-
-    const boardBuf = new Float32Array(batchSize * BOARD_FLOATS);
-    const policyBuf = new Float32Array(batchSize * POLICY_SIZE);
-    // Convert continuous value [-1,1] to WDL target: P(win)=max(0,v), P(loss)=max(0,-v),
-    // P(draw)=1-P(win)-P(loss). v=1 → [1,0,0], v=-1 → [0,0,1], v=0 → [0,1,0].
-    const wdlBuf = new Float32Array(batchSize * WDL_SIZE);
-    for (let i = 0; i < batchSize; i++) {
-      boardBuf.set(boards[i], i * BOARD_FLOATS);
-      policyBuf.set(policies[i], i * POLICY_SIZE);
-      const v = Math.max(-1, Math.min(1, values[i]));
-      const w = Math.max(0, v);
-      const l = Math.max(0, -v);
-      wdlBuf[i * WDL_SIZE + 0] = w;
-      wdlBuf[i * WDL_SIZE + 1] = 1 - w - l;
-      wdlBuf[i * WDL_SIZE + 2] = l;
-    }
-
-    const inputTensor = tf.tensor4d(boardBuf, [batchSize, 8, 8, NUM_PLANES]);
-    const policyTarget = tf.tensor2d(policyBuf, [batchSize, POLICY_SIZE]);
-    const wdlTarget = tf.tensor2d(wdlBuf, [batchSize, WDL_SIZE]);
-
-    let policyLoss = 0;
-    let valueLoss = 0;
-
-    const WEIGHT_DECAY = 1e-4;
-
-    const totalLossTensor = this.optimizer.minimize(() => {
-      const outputs = this.model.apply(inputTensor, { training: true }) as tf.Tensor[];
-      const pLoss = tf.neg(tf.sum(tf.mul(policyTarget, tf.log(tf.add(outputs[0], 1e-8))))).div(tf.scalar(batchSize));
-      // WDL cross-entropy loss: -mean(sum(target * log(pred), axis=1))
-      const vLoss = tf.neg(tf.mean(tf.sum(tf.mul(wdlTarget, tf.log(tf.add(outputs[1], 1e-8))), 1))) as tf.Scalar;
-
-      // L2 weight decay (simulates AdamW) — computed as a single sum to minimize intermediate tensors
-      const allSquaredWeights = this.model.trainableWeights.map(w => tf.sum(tf.square(w.read())));
-      const l2 = tf.addN(allSquaredWeights) as tf.Scalar;
-      const decay = tf.mul(l2, tf.scalar(WEIGHT_DECAY)) as tf.Scalar;
-
-      const total = tf.add(tf.add(pLoss, vLoss), decay) as tf.Scalar;
-      policyLoss = pLoss.dataSync()[0];
-      valueLoss = vLoss.dataSync()[0];
-      return total;
-    }, true) as tf.Scalar;
-
-    const totalLoss = totalLossTensor!.dataSync()[0];
-    totalLossTensor!.dispose();
-    inputTensor.dispose();
-    policyTarget.dispose();
-    wdlTarget.dispose();
-
-    return { policyLoss, valueLoss, totalLoss };
-  }
-
-  async save(): Promise<void> {
-    await this.model.save('indexeddb://chess-net');
-  }
-
-  // Check if a saved model exists in IndexedDB without loading it
-  static async hasSavedModel(): Promise<boolean> {
-    try {
-      const models = await tf.io.listModels();
-      return 'indexeddb://chess-net' in models;
-    } catch {
-      return false;
-    }
-  }
-
-  // Delete saved model from IndexedDB (for clearing corrupted saves)
-  static async deleteSavedModel(): Promise<void> {
-    try {
-      await tf.io.removeModel('indexeddb://chess-net');
-    } catch {
-      // Model didn't exist
-    }
-  }
-
-  async load(): Promise<boolean> {
-    try {
-      const loaded = await tf.loadLayersModel('indexeddb://chess-net');
-      this.model.dispose();
-      this.optimizer.dispose();
-      this.model = loaded;
-      this.optimizer = tf.train.adam(this.lr);
-      this.config = { ...detectConfigFromModel(loaded), learningRate: this.lr };
-      this.syncCPU();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // Load directly from IndexedDB without creating a throwaway model first.
-  // Returns null (and deletes the stored model) if the saved architecture is
-  // incompatible with the current encoder (e.g., a model saved before the
-  // plane-count / WDL-head upgrade).
-  static async loadFromSaved(lr: number): Promise<ChessNet | null> {
-    try {
-      const model = await tf.loadLayersModel('indexeddb://chess-net');
-      const firstConvShape = model.weights[0]?.shape as number[] | undefined;
-      const savedPlanes = firstConvShape?.[2];
-      if (savedPlanes !== NUM_PLANES) {
-        model.dispose();
-        await ChessNet.deleteSavedModel();
-        return null;
-      }
-      const config = detectConfigFromModel(model);
-      return new ChessNet(model, lr, { ...config, learningRate: lr });
-    } catch {
-      return null;
-    }
-  }
-
   dispose(): void {
     this.model.dispose();
-    this.optimizer.dispose();
   }
 }
 

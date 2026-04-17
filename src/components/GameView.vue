@@ -9,7 +9,7 @@ import { networkManager } from '@/game/network/NetworkManager';
 import { ChessServer } from '@/game/server/ChessServer';
 import { LocalGameConnection } from '@/game/server/LocalGameConnection';
 import { RemoteGameConnection } from '@/game/server/RemoteGameConnection';
-import { AIPlayer, type AIModelSource } from '@/game/ai/AIPlayer';
+import { AIPlayer } from '@/game/ai/AIPlayer';
 import { PRESET_WEIGHTS } from '@/game/ai/presetWeights';
 import LobbyModal from './LobbyModal.vue';
 import ChessBoard from './ChessBoard.vue';
@@ -33,11 +33,11 @@ const drawOffer = ref<PlayerId | null>(null);
 let currentServer: ChessServer | null = null;
 let activeConnection: GameConnection | null = null;
 
-// AI opponent
+// AI opponent. The bot is the single model in `PRESET_WEIGHTS`
+// (produced by the Python trainer and deployed via deploy_to_browser.py).
 let aiPlayer: AIPlayer | null = null;
-const playingVsAi = ref(false);
+const playingVsBot = ref(false);
 const aiThinking = ref(false);
-const aiModelStatus = ref<AIModelSource | 'none'>('none');
 
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
@@ -54,7 +54,7 @@ const statusText = computed(() => {
     case 'waiting':
       return 'Waiting to start...';
     case 'active':
-      if (playingVsAi.value && !isMyTurn.value) {
+      if (playingVsBot.value && !isMyTurn.value) {
         return aiThinking.value ? 'AI is thinking...' : "AI's turn";
       }
       return isMyTurn.value ? 'Your turn' : "Opponent's turn";
@@ -62,7 +62,7 @@ const statusText = computed(() => {
       return isMyTurn.value ? 'You are in check!' : 'Opponent is in check';
     case 'checkmate':
       if (gs.winner === localColor.value) return 'Checkmate - You win!';
-      return playingVsAi.value ? 'Checkmate - AI wins' : 'Checkmate - You lose';
+      return playingVsBot.value ? 'Checkmate - AI wins' : 'Checkmate - You lose';
     case 'stalemate':
       return 'Stalemate - Draw';
     case 'draw':
@@ -74,7 +74,7 @@ const statusText = computed(() => {
 
 const turnIndicator = computed(() => {
   if (isGameOver.value) return '';
-  const extra = playingVsAi.value ? ` (${aiModelStatus.value === 'trained' ? 'trained model' : 'random model'})` : '';
+  const extra = playingVsBot.value ? ' (bot)' : '';
   return (gameState.value.currentTurn === 'white' ? 'White to move' : 'Black to move') + extra;
 });
 
@@ -97,15 +97,15 @@ function formatMove(move: Move): string {
   return `${from}${to}${promo}`;
 }
 
-// --- AI move scheduling ---
+// --- Bot move scheduling ---
 
-function scheduleAiMove(): void {
-  if (!playingVsAi.value || !currentServer || !aiPlayer) return;
+function scheduleBotMove(): void {
+  if (!playingVsBot.value || !currentServer || !aiPlayer) return;
   if (isGameOver.value) return;
   if (gameState.value.currentTurn === localColor.value) return; // Human's turn
 
   aiThinking.value = true;
-  // Use setTimeout so the UI updates before AI starts computing
+  // Let the UI update before the bot starts computing.
   setTimeout(() => {
     if (!aiPlayer || !currentServer || isGameOver.value) {
       aiThinking.value = false;
@@ -113,7 +113,6 @@ function scheduleAiMove(): void {
     }
     const move = aiPlayer.getMove(gameState.value);
     aiThinking.value = false;
-    // Send AI's move as player 2
     currentServer.receiveCommand({ type: 'move', move }, 2);
   }, 50);
 }
@@ -163,26 +162,16 @@ async function handleJoin(code: string): Promise<void> {
   }
 }
 
-async function handlePlayAi(source: 'trained' | 'preset'): Promise<void> {
+function handlePlayBot(): void {
+  if (!PRESET_WEIGHTS) {
+    lobbyError.value = 'No bot weights available. See training/README.md.';
+    return;
+  }
   isConnecting.value = true;
   lobbyError.value = null;
 
-  if (source === 'preset' && PRESET_WEIGHTS) {
-    aiPlayer = AIPlayer.createFromPreset(PRESET_WEIGHTS, 50);
-    aiModelStatus.value = 'preset';
-  } else {
-    // Try trained model from IndexedDB, fall back to untrained
-    const trained = await AIPlayer.createFromTrained(50);
-    if (trained) {
-      aiPlayer = trained;
-      aiModelStatus.value = 'trained';
-    } else {
-      aiPlayer = AIPlayer.createUntrained(25);
-      aiModelStatus.value = 'untrained';
-    }
-  }
-
-  playingVsAi.value = true;
+  aiPlayer = AIPlayer.create(PRESET_WEIGHTS, 50);
+  playingVsBot.value = true;
   networkRole.value = null;
   localPlayerId.value = 1;
   isConnecting.value = false;
@@ -242,9 +231,9 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
       gameState.value = snapshot.gameState;
       drawOffer.value = snapshot.drawOffer;
 
-      // If playing vs AI and it's AI's turn, schedule its move
-      if (playingVsAi.value) {
-        scheduleAiMove();
+      // If playing vs Bot and it's bot's turn, schedule its move
+      if (playingVsBot.value) {
+        scheduleBotMove();
       }
     });
 
@@ -313,9 +302,8 @@ function returnToLobby(): void {
   gameStarted.value = false;
   showLobby.value = true;
   networkRole.value = null;
-  playingVsAi.value = false;
+  playingVsBot.value = false;
   aiThinking.value = false;
-  aiModelStatus.value = 'none';
   lobbyPlayers.value = [];
   roomCode.value = '';
   isHost.value = false;
@@ -342,12 +330,12 @@ onUnmounted(() => {
       :local-player-id="localPlayerId"
       :error="lobbyError"
       :is-connecting="isConnecting"
-      :has-preset-model="PRESET_WEIGHTS !== null"
+      :has-bot-model="PRESET_WEIGHTS !== null"
       @host="handleHost"
       @join="handleJoin"
       @start="handleLobbyStart"
       @cancel="handleLobbyCancel"
-      @play-ai="handlePlayAi"
+      @play-bot="handlePlayBot"
     />
 
     <!-- Game UI (visible when game started) -->
@@ -433,19 +421,9 @@ onUnmounted(() => {
           <div class="game-info-content">
             <div class="info-row">
               <span class="info-label">Mode:</span>
-              <span class="info-value">{{ playingVsAi ? 'vs AI' : networkRole === 'host' ? 'Host' : networkRole === 'client' ? 'Client' : 'Local' }}</span>
+              <span class="info-value">{{ playingVsBot ? 'vs Bot' : networkRole === 'host' ? 'Host' : networkRole === 'client' ? 'Client' : 'Local' }}</span>
             </div>
-            <div v-if="playingVsAi" class="info-row">
-              <span class="info-label">AI Model:</span>
-              <span class="info-value" :class="{
-                'ai-trained': aiModelStatus === 'trained',
-                'ai-preset': aiModelStatus === 'preset',
-                'ai-untrained': aiModelStatus === 'untrained',
-              }">
-                {{ aiModelStatus === 'trained' ? 'Your Model' : aiModelStatus === 'preset' ? 'Preset' : 'Random' }}
-              </span>
-            </div>
-            <div v-if="!playingVsAi && roomCode" class="info-row">
+            <div v-if="!playingVsBot && roomCode" class="info-row">
               <span class="info-label">Room:</span>
               <span class="info-value">{{ roomCode }}</span>
             </div>
@@ -729,20 +707,6 @@ onUnmounted(() => {
   font-family: monospace;
   font-size: 12px;
   color: #aaa;
-}
-
-.info-value.ai-trained {
-  color: #44aa44;
-  font-weight: bold;
-}
-
-.info-value.ai-preset {
-  color: #4a9eff;
-  font-weight: bold;
-}
-
-.info-value.ai-untrained {
-  color: #cc8844;
 }
 
 .empty-bg {
