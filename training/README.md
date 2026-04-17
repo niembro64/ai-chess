@@ -58,13 +58,21 @@ cd training && pytest
 # 3. Train (on your CUDA box). Run inside tmux so the session survives
 #    disconnections; the dashboard repaints the moment you re-attach.
 tmux new -s train
+
+# --- Multiprocessing mode (recommended on any >4-core CUDA box) ---
+# Spawns N CPU self-play workers + one GPU inference server that
+# batches all their eval requests. This is what keeps the 3090 fed.
 python scripts/train.py \
     --num-res-blocks 10 --num-filters 128 \
-    --concurrent-games 64 --mcts-sims 50 \
-    --batch-size 256 --replay-buffer 100000 \
+    --num-workers 8 --games-per-worker 16 --mcts-sims 40 \
+    --batch-size 256 --min-buffer 2000 --replay-buffer 200000 \
     --lr 1e-3 \
     --device cuda \
     --checkpoint-dir runs/v1
+
+# --- Single-process mode (legacy; Python caps GPU at ~0% util) ---
+# python scripts/train.py --concurrent-games 64 --mcts-sims 50 \
+#     --device cuda --checkpoint-dir runs/v1
 # Detach with Ctrl-b d; re-attach with `tmux a -t train`.
 # Add --no-dashboard if you're redirecting stdout to a log file.
 

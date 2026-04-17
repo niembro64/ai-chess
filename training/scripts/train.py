@@ -46,8 +46,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--value-head-size", type=int, default=64)
     p.add_argument("--se-reduction", type=int, default=8)
     # Self-play
-    p.add_argument("--concurrent-games", type=int, default=32)
+    p.add_argument("--concurrent-games", type=int, default=32,
+                   help="Single-process only: games advanced per step.")
     p.add_argument("--mcts-sims", type=int, default=25)
+    # Multi-process self-play. Enabling --num-workers spawns that many CPU
+    # worker processes + one GPU inference server that batches their eval
+    # requests. Each worker runs --games-per-worker concurrent games.
+    p.add_argument("--num-workers", type=int, default=0,
+                   help="0 = single-process (legacy). >=1 enables MP mode.")
+    p.add_argument("--games-per-worker", type=int, default=16,
+                   help="MP mode: concurrent games per worker process.")
+    p.add_argument("--mp-batch-wait-ms", type=float, default=5.0,
+                   help="MP mode: how long the inference server waits for more "
+                        "requests before dispatching a batch.")
+    p.add_argument("--weight-broadcast-every", type=int, default=50,
+                   help="MP mode: gradient steps between pushing fresh weights "
+                        "to the inference server.")
     # Training
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--grad-steps-per-step", type=int, default=1)
@@ -104,6 +118,10 @@ def main() -> None:
     config = TrainConfig(
         num_concurrent_games=args.concurrent_games,
         mcts_simulations=args.mcts_sims,
+        num_workers=args.num_workers,
+        games_per_worker=args.games_per_worker,
+        mp_batch_wait_ms=args.mp_batch_wait_ms,
+        weight_broadcast_every=args.weight_broadcast_every,
         batch_size=args.batch_size,
         gradient_steps_per_selfplay_step=args.grad_steps_per_step,
         learning_rate=args.lr,

@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 from .model import NUM_PLANES, WDL_SIZE, ChessNet, encoded_to_nchw
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
-from .selfplay import ReplayBuffer, SelfPlayConfig, SelfPlayEngine
+from .selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine
 from .weight_io import export_weights
 
 
@@ -35,6 +35,13 @@ class TrainConfig:
     # Self-play
     num_concurrent_games: int = 32
     mcts_simulations: int = 25
+    # Multi-process self-play. num_workers=0 → single-process (legacy path).
+    # num_workers>=1 → spawn that many CPU workers + one GPU inference server.
+    # Each worker runs `games_per_worker` self-play games in parallel.
+    num_workers: int = 0
+    games_per_worker: int = 16
+    mp_batch_wait_ms: float = 5.0
+    weight_broadcast_every: int = 50   # gradient steps between inference-server weight refreshes
     # Training
     batch_size: int = 256
     gradient_steps_per_selfplay_step: int = 1
@@ -96,17 +103,45 @@ class Trainer:
         )
         self.rng = rng or random.Random()
         self.buffer = ReplayBuffer(capacity=self.config.replay_buffer_capacity)
-        self.engine = SelfPlayEngine(
-            model=self.model,
-            device=device,
-            replay_buffer=self.buffer,
-            config=SelfPlayConfig(
-                num_concurrent_games=self.config.num_concurrent_games,
+
+        self._mp_self_play = None
+        self.engine = None
+
+        if self.config.num_workers > 0:
+            # Multiprocessing mode: spawn workers + inference server. The
+            # trainer no longer runs self-play inline; examples flow from
+            # workers into the buffer via `mp_self_play.drain_examples`.
+            from .mpselfplay import (
+                ModelArch,
+                MultiprocessingConfig,
+                MultiprocessingSelfPlay,
+            )
+            mp_cfg = MultiprocessingConfig(
+                num_workers=self.config.num_workers,
+                games_per_worker=self.config.games_per_worker,
                 mcts_simulations=self.config.mcts_simulations,
+                batch_wait_ms=self.config.mp_batch_wait_ms,
                 rewards=self.config.rewards,
-            ),
-            rng=self.rng,
-        )
+            )
+            self._mp_self_play = MultiprocessingSelfPlay(
+                arch=ModelArch.from_model(self.model),
+                initial_state_dict={k: v.detach().cpu() for k, v in self.model.state_dict().items()},
+                device=self.device,
+                config=mp_cfg,
+            )
+        else:
+            self.engine = make_local_selfplay_engine(
+                model=self.model,
+                device=device,
+                replay_buffer=self.buffer,
+                config=SelfPlayConfig(
+                    num_concurrent_games=self.config.num_concurrent_games,
+                    mcts_simulations=self.config.mcts_simulations,
+                    rewards=self.config.rewards,
+                ),
+                rng=self.rng,
+            )
+
         self.stats = TrainStats()
         self._start_time = time.time()
         self._last_checkpoint_time = 0.0
@@ -139,7 +174,13 @@ class Trainer:
         }
 
     def selfplay_step(self) -> None:
-        """Advance all self-play games by one move. Accumulates finished-game stats."""
+        """Advance all self-play games by one move (single-process mode only).
+
+        Note: games_completed / W/B/D counters are tracked by the engine, not
+        here. In MP mode self-play happens in worker processes and we can't
+        sample per-step GameResults cheaply; instead the trainer counts
+        examples received via the example queue.
+        """
         self.model.eval()
         finished = self.engine.step()
         for r in finished:
@@ -161,6 +202,10 @@ class Trainer:
         ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
         if ckpt_dir is not None:
             ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        if self._mp_self_play is not None:
+            self._run_mp(num_steps, ckpt_dir, on_step)
+            return
 
         step = 0
         while True:
@@ -191,6 +236,72 @@ class Trainer:
             if ckpt_dir is not None and (time.time() - self._last_checkpoint_time) >= self.config.checkpoint_every_seconds:
                 self.save_checkpoint(ckpt_dir)
                 self._last_checkpoint_time = time.time()
+
+    def _run_mp(
+        self,
+        num_steps: int | None,
+        ckpt_dir: Path | None,
+        on_step: Callable[[TrainStats], None] | None,
+    ) -> None:
+        """Trainer main loop when workers run in separate processes.
+
+        Responsibilities (this process only):
+          * drain completed training examples into the replay buffer
+          * run gradient updates once the buffer has enough data
+          * periodically broadcast fresh weights to the inference server
+          * checkpoint
+        """
+        assert self._mp_self_play is not None
+        self._mp_self_play.start()
+
+        step = 0
+        examples_seen = 0
+        try:
+            while True:
+                if num_steps is not None and step >= num_steps:
+                    break
+                step += 1
+
+                # Drain as many training examples as are available right now.
+                drained = self._mp_self_play.drain_examples(self.buffer)
+                examples_seen += drained
+
+                # Gradient updates run as fast as the buffer allows.
+                if len(self.buffer) >= self.config.min_buffer_for_training:
+                    last_losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
+                    for _ in range(self.config.gradient_steps_per_selfplay_step):
+                        last_losses = self.train_step()
+                        self.stats.generation += 1
+                        # Push fresh weights on a cadence.
+                        if self.stats.generation % self.config.weight_broadcast_every == 0:
+                            self._mp_self_play.broadcast_weights(self.model.state_dict())
+                    self.stats.policy_loss = last_losses["policy_loss"]
+                    self.stats.value_loss = last_losses["value_loss"]
+                    self.stats.total_loss = last_losses["total_loss"]
+                else:
+                    # Nothing to train on yet: yield so we don't hot-loop the
+                    # queue drain.
+                    time.sleep(0.05)
+
+                # Stats (no per-step game counts available in MP mode;
+                # examples-seen is the closest proxy).
+                self.stats.step = step
+                self.stats.replay_size = len(self.buffer)
+                elapsed_min = (time.time() - self._start_time) / 60.0
+                # Approximate games/min from examples at ~50 moves/game.
+                approx_games = examples_seen / 50.0
+                self.stats.games_completed = int(approx_games)
+                self.stats.games_per_min = approx_games / elapsed_min if elapsed_min > 0 else 0.0
+
+                if on_step is not None:
+                    on_step(self.stats)
+
+                # Checkpoint
+                if ckpt_dir is not None and (time.time() - self._last_checkpoint_time) >= self.config.checkpoint_every_seconds:
+                    self.save_checkpoint(ckpt_dir)
+                    self._last_checkpoint_time = time.time()
+        finally:
+            self._mp_self_play.stop()
 
         # Final save on clean exit
         if ckpt_dir is not None:

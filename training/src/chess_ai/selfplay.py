@@ -171,6 +171,20 @@ def make_pytorch_evaluator(model: ChessNet, device: torch.device) -> PytorchEval
     return evaluate
 
 
+def make_local_selfplay_engine(
+    model: ChessNet,
+    device: torch.device,
+    replay_buffer: ReplayBuffer,
+    config: SelfPlayConfig | None = None,
+    rng: random.Random | None = None,
+) -> SelfPlayEngine:
+    """Single-process convenience: build an engine that evaluates with the given
+    model on the given device and drops completed examples into `replay_buffer`.
+    """
+    evaluator = make_pytorch_evaluator(model, device)
+    return SelfPlayEngine(evaluator, replay_buffer.add, config, rng)
+
+
 @dataclass
 class SelfPlayConfig:
     num_concurrent_games: int = 32
@@ -178,18 +192,22 @@ class SelfPlayConfig:
     rewards: RewardWeights = field(default_factory=lambda: RewardWeights(**DEFAULT_REWARD_WEIGHTS.__dict__))
 
 
+# A "sink" accepts completed training examples one at a time. The single-process
+# path plugs in `ReplayBuffer.add`; the multiprocessing worker plugs in a
+# queue.put so examples flow out of the worker process to the trainer.
+ExampleSink = Callable[["TrainingExample"], None]
+
+
 class SelfPlayEngine:
     def __init__(
         self,
-        model: ChessNet,
-        device: torch.device,
-        replay_buffer: ReplayBuffer,
+        evaluator: PytorchEvaluator,
+        example_sink: ExampleSink,
         config: SelfPlayConfig | None = None,
         rng: random.Random | None = None,
     ):
-        self.model = model
-        self.device = device
-        self.replay = replay_buffer
+        self.evaluator = evaluator
+        self.example_sink = example_sink
         self.config = config or SelfPlayConfig()
         self.rng = rng or random.Random()
 
@@ -205,10 +223,9 @@ class SelfPlayEngine:
 
     def step(self) -> list[GameResult]:
         """Advance every active game by one move. Returns results for games that ended this step."""
-        evaluator = make_pytorch_evaluator(self.model, self.device)
         states = [g.state for g in self.games]
         mcts_results = run_batched_mcts(
-            states, evaluator, self.config.mcts_simulations, self.rng
+            states, self.evaluator, self.config.mcts_simulations, self.rng
         )
 
         finished: list[GameResult] = []
@@ -291,7 +308,7 @@ class SelfPlayEngine:
             outcome_from_persp = white_outcome if ex.turn_color == "white" else -white_outcome
             value = outcome_from_persp * win_weight + ex.position_score
             value = max(-1.0, min(1.0, value))
-            self.replay.add(TrainingExample(board=ex.board, policy=ex.policy, value=value))
+            self.example_sink(TrainingExample(board=ex.board, policy=ex.policy, value=value))
 
         self.games_completed += 1
         self.recent_game_lengths.append(slot.move_count)

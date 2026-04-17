@@ -22,7 +22,7 @@ import torch
 from chess_ai.encoding import encode_board
 from chess_ai.engine import apply_move, create_initial_game_state, get_legal_moves
 from chess_ai.model import ChessNet
-from chess_ai.selfplay import ReplayBuffer, SelfPlayConfig, SelfPlayEngine
+from chess_ai.selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine
 
 
 def bench_get_legal_moves(n: int = 1000) -> float:
@@ -98,7 +98,7 @@ def bench_selfplay_step(
     model.eval()
 
     buf = ReplayBuffer(capacity=10_000)
-    engine = SelfPlayEngine(
+    engine = make_local_selfplay_engine(
         model=model, device=dev, replay_buffer=buf,
         config=SelfPlayConfig(num_concurrent_games=concurrent_games, mcts_simulations=mcts_sims),
         rng=random.Random(42),

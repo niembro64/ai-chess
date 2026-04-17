@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from chess_ai.model import ChessNet
-from chess_ai.selfplay import ReplayBuffer, SelfPlayConfig, SelfPlayEngine
+from chess_ai.selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine
 
 
 @pytest.fixture(scope="module")
@@ -33,7 +33,7 @@ def tiny_model() -> ChessNet:
 
 def test_selfplay_produces_examples(tiny_model: ChessNet):
     buffer = ReplayBuffer(capacity=500)
-    engine = SelfPlayEngine(
+    engine = make_local_selfplay_engine(
         model=tiny_model,
         device=torch.device("cpu"),
         replay_buffer=buffer,
