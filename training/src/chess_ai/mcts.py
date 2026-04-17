@@ -19,7 +19,7 @@ from typing import Callable
 import numpy as np
 
 from .encoding import POLICY_SIZE, encode_board, move_to_index
-from .engine import ChessGameState, Move, apply_move, get_legal_moves
+from .engine import ChessGameState, Move, apply_move, expand_children, get_legal_moves
 
 C_PUCT = 1.5
 DIRICHLET_ALPHA = 0.3
@@ -156,30 +156,36 @@ class MCTSSearch:
                 node.terminal_value = 0.0
 
     def _expand_with_policy(self, node: MCTSNode, policy: np.ndarray) -> None:
-        legal = get_legal_moves(node.state)
-        if not legal:
+        # `expand_children` bundles get_legal_moves + one apply_move per child
+        # into a single Rust call (or a Python fallback loop). Replacing the
+        # old "loop-of-apply_move" pattern is the main FFI-cost reduction in
+        # the MCTS hot path — ~30 Python/Rust crossings per expansion → 1.
+        children = expand_children(node.state)
+        if not children:
             node.is_terminal = True
             node.is_expanded = True
             node.terminal_value = 0.0
             return
 
         is_white = node.state.currentTurn == "white"
+
+        # Accumulate prior mass for just the moves we'll actually keep (one
+        # MCTS child per unique policy-index — underpromotions collapse).
         seen: set[int] = set()
         prior_sum = 0.0
-        for m in legal:
-            mi = move_to_index(m, is_white)
+        for move, _child_state in children:
+            mi = move_to_index(move, is_white)
             if mi not in seen:
                 seen.add(mi)
                 prior_sum += float(policy[mi])
 
         seen.clear()
-        for m in legal:
-            mi = move_to_index(m, is_white)
+        for move, child_state in children:
+            mi = move_to_index(move, is_white)
             if mi in seen:
                 continue
             seen.add(mi)
-            child_state = apply_move(node.state, m)
-            child = MCTSNode(child_state, parent=node, move=m)
+            child = MCTSNode(child_state, parent=node, move=move)
             child.prior = float(policy[mi]) / prior_sum if prior_sum > 0 else 1.0 / len(seen)
             self._check_terminal(child)
             node.children[mi] = child

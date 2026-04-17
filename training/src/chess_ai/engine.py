@@ -624,6 +624,82 @@ def get_legal_moves(state: ChessGameState) -> list[Move]:
     return _get_legal_moves_python(state)
 
 
+def _rust_expand_children(state: ChessGameState) -> list[tuple["Move", ChessGameState]]:
+    """One-call bundled legal-move enumeration + apply_move for all children.
+
+    The MCTS tree expansion used to make N (~30) separate round-trips to
+    Rust — one `apply_move_full` per legal move — each paying board-packing
+    and state-dict construction at the FFI boundary. `generate_children`
+    replaces all of that with a single round-trip, which is the biggest
+    single marshalling win available in the hot path.
+    """
+    cr = state.castlingRights
+    castling = {
+        "whiteKingside": cr.whiteKingside,
+        "whiteQueenside": cr.whiteQueenside,
+        "blackKingside": cr.blackKingside,
+        "blackQueenside": cr.blackQueenside,
+    }
+    ep = None if state.enPassantTarget is None else {
+        "rank": state.enPassantTarget.rank,
+        "file": state.enPassantTarget.file,
+    }
+    raw_children = _rust.generate_children(
+        _serialize_board_for_rust(state.board),
+        state.currentTurn,
+        castling,
+        ep,
+        state.halfMoveClock,
+        state.fullMoveNumber,
+    )
+
+    result: list[tuple[Move, ChessGameState]] = []
+    for d in raw_children:
+        move = Move(
+            from_pos=Position(d["move_from_r"], d["move_from_f"]),
+            to_pos=Position(d["move_to_r"], d["move_to_f"]),
+            promotion=d["move_promotion"],
+        )
+        board_flat: list[int] = d["board"]
+        child_board: Board = [
+            [_PIECE_BY_INT[board_flat[r * 8 + f]] for f in range(8)]
+            for r in range(8)
+        ]
+        cr_d = d["castlingRights"]
+        child_cr = CastlingRights(
+            whiteKingside=cr_d["whiteKingside"],
+            whiteQueenside=cr_d["whiteQueenside"],
+            blackKingside=cr_d["blackKingside"],
+            blackQueenside=cr_d["blackQueenside"],
+        )
+        ep_d = d["enPassantTarget"]
+        child_ep = None if ep_d is None else Position(rank=ep_d["rank"], file=ep_d["file"])
+        child_state = ChessGameState(
+            board=child_board,
+            currentTurn=d["currentTurn"],
+            castlingRights=child_cr,
+            enPassantTarget=child_ep,
+            halfMoveClock=d["halfMoveClock"],
+            fullMoveNumber=d["fullMoveNumber"],
+            status=d["status"],
+        )
+        result.append((move, child_state))
+    return result
+
+
+def expand_children(state: ChessGameState) -> list[tuple["Move", ChessGameState]]:
+    """Enumerate legal moves and compute all child states in one shot.
+
+    Semantically equivalent to `[(m, apply_move(state, m)) for m in get_legal_moves(state)]`
+    — just much cheaper at runtime because the Rust path crosses the FFI
+    boundary once instead of once per child.
+    """
+    if _HAVE_RUST:
+        return _rust_expand_children(state)
+    moves = _get_legal_moves_python(state)
+    return [(m, _apply_move_python(state, m)) for m in moves]
+
+
 def _get_legal_moves_python(state: ChessGameState) -> list[Move]:
     """Pure-Python implementation of `get_legal_moves`.
 

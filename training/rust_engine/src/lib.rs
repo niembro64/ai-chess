@@ -740,11 +740,148 @@ fn is_square_attacked_by_py(
 // Module
 // ------------------------------------------------------------
 
+/// Generate every `(move, child_state)` pair from the given position in a
+/// single FFI call.
+///
+/// MCTS tree expansion used to make one `get_legal_moves` call + N
+/// (~30 avg) separate `apply_move` calls per leaf, each paying ~20 µs
+/// of board-packing and state-dict construction to cross the Python/Rust
+/// boundary. This function collapses all of that into one round-trip: we
+/// pack the parent board once, enumerate legal moves, apply each in a
+/// cloned scratch board, compute the full child state (including status),
+/// and return a list of `(move_tuple, child_state_dict)` pairs.
+///
+/// Parity with composition of get_legal_moves + apply_move_full is
+/// transitive (both already parity-tested against the pure-Python engine
+/// and the TS fixture) but a dedicated test covers the combined path.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn generate_children(
+    py: Python<'_>,
+    board_list: Bound<'_, PyList>,
+    current_turn: &str,
+    castling: Bound<'_, PyDict>,
+    en_passant: Bound<'_, PyAny>,
+    half_move_clock: i32,
+    full_move_number: i32,
+) -> PyResult<Py<PyList>> {
+    let mut board = pack_board(&board_list)?;
+    let mut cr = pack_castling(&castling)?;
+    let ep = pack_en_passant(&en_passant)?;
+    let white_to_move = current_turn == "white";
+
+    let legal_moves = legal_moves_impl(&mut board, white_to_move, &mut cr, ep);
+
+    let new_white_to_move = !white_to_move;
+    let new_fmn = if !white_to_move {
+        full_move_number + 1
+    } else {
+        full_move_number
+    };
+
+    let out = PyList::empty_bound(py);
+
+    for m in &legal_moves {
+        // Each child starts from a pristine copy of the parent board + castling.
+        let mut child_board = board;
+        let mut child_cr = cr;
+
+        let piece_before = child_board[m.from_r as usize][m.from_f as usize];
+        let is_pawn = piece_before.abs() == PAWN;
+        let was_capture = child_board[m.to_r as usize][m.to_f as usize] != 0;
+
+        let (_, is_en_passant, _) = apply_move_to_board(&mut child_board, m, &mut child_cr);
+
+        let new_ep: Option<(u8, u8)> =
+            if is_pawn && (m.to_r as i32 - m.from_r as i32).abs() == 2 {
+                Some(((m.from_r + m.to_r) / 2, m.from_f))
+            } else {
+                None
+            };
+
+        let new_hmc = if is_pawn || was_capture || is_en_passant {
+            0
+        } else {
+            half_move_clock + 1
+        };
+
+        // Status: run a legal-moves check on the child.
+        let mut test_board = child_board;
+        let mut test_cr = child_cr;
+        let next_legal =
+            legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep);
+        let in_check = is_in_check(&child_board, new_white_to_move);
+        let status: &str = if next_legal.is_empty() {
+            if in_check { "checkmate" } else { "stalemate" }
+        } else if in_check {
+            "check"
+        } else if new_hmc >= 100 {
+            "draw"
+        } else {
+            "active"
+        };
+
+        // Flat child dict: move fields (move_*) + state fields (board, currentTurn, ...).
+        // Flat rather than nested so we don't fight the PyO3 0.22 boxed-object
+        // conversion helpers when zipping two objects into a single result item.
+        let child = PyDict::new_bound(py);
+
+        child.set_item("move_from_r", m.from_r as i32)?;
+        child.set_item("move_from_f", m.from_f as i32)?;
+        child.set_item("move_to_r", m.to_r as i32)?;
+        child.set_item("move_to_f", m.to_f as i32)?;
+        if m.promotion == 0 {
+            child.set_item("move_promotion", py.None())?;
+        } else {
+            child.set_item("move_promotion", piece_type_to_str(m.promotion))?;
+        }
+
+        let board_flat = PyList::empty_bound(py);
+        for r in 0..8 {
+            for f in 0..8 {
+                board_flat.append(child_board[r][f] as i32)?;
+            }
+        }
+        child.set_item("board", board_flat)?;
+        child.set_item(
+            "currentTurn",
+            if new_white_to_move { "white" } else { "black" },
+        )?;
+
+        let cr_dict = PyDict::new_bound(py);
+        cr_dict.set_item("whiteKingside", child_cr.wk)?;
+        cr_dict.set_item("whiteQueenside", child_cr.wq)?;
+        cr_dict.set_item("blackKingside", child_cr.bk)?;
+        cr_dict.set_item("blackQueenside", child_cr.bq)?;
+        child.set_item("castlingRights", cr_dict)?;
+
+        match new_ep {
+            Some((r, f)) => {
+                let ep_d = PyDict::new_bound(py);
+                ep_d.set_item("rank", r as i32)?;
+                ep_d.set_item("file", f as i32)?;
+                child.set_item("enPassantTarget", ep_d)?;
+            }
+            None => {
+                child.set_item("enPassantTarget", py.None())?;
+            }
+        }
+        child.set_item("halfMoveClock", new_hmc)?;
+        child.set_item("fullMoveNumber", new_fmn)?;
+        child.set_item("status", status)?;
+
+        out.append(child)?;
+    }
+
+    Ok(out.unbind())
+}
+
 #[pymodule]
 fn chess_ai_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_legal_moves, m)?)?;
     m.add_function(wrap_pyfunction!(is_in_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(is_square_attacked_by_py, m)?)?;
     m.add_function(wrap_pyfunction!(apply_move_full, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_children, m)?)?;
     Ok(())
 }
