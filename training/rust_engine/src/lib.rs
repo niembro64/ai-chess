@@ -592,6 +592,11 @@ fn is_in_check_py(board_list: Bound<'_, PyList>, color: &str) -> PyResult<bool> 
 /// dict-of-dicts.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    board_list, current_turn, castling, en_passant,
+    half_move_clock, full_move_number,
+    from_r, from_f, to_r, to_f, promotion=None,
+))]
 fn apply_move_full(
     py: Python<'_>,
     board_list: Bound<'_, PyList>,
@@ -608,7 +613,11 @@ fn apply_move_full(
 ) -> PyResult<Py<PyDict>> {
     let mut board = pack_board(&board_list)?;
     let mut cr = pack_castling(&castling)?;
-    let ep = pack_en_passant(&en_passant)?;
+    // pack_en_passant is still called so we surface any parse error from
+    // malformed input; the actual en-passant-capture handling inside
+    // apply_move_to_board runs off the pawn-diagonal-to-empty heuristic,
+    // which doesn't need the ep target at apply time.
+    let _ep = pack_en_passant(&en_passant)?;
     let white_to_move = current_turn == "white";
 
     let promo: i8 = match promotion.as_deref() {
