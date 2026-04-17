@@ -42,9 +42,23 @@ training/
 cd training
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
+pip install maturin
 # Then install PyTorch for your accelerator (CUDA / MPS / CPU):
 # https://pytorch.org/get-started/locally/
 ```
+
+**Build the Rust engine extension** (required for fast self-play — ~10× speedup
+on the MCTS hot path). Needs a Rust toolchain (`curl https://sh.rustup.rs -sSf | sh`):
+
+```bash
+cd rust_engine
+maturin develop --release
+cd ..
+```
+
+`get_legal_moves` auto-detects the Rust module and dispatches to it. If the
+build isn't done, Python falls back to the pure-Python engine silently (much
+slower, but fully functional).
 
 ## Workflow: from scratch → browser-playable model
 

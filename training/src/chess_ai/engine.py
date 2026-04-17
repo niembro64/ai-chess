@@ -16,6 +16,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+# Optional Rust acceleration. When the `chess_ai_rust` extension is built
+# (see training/rust_engine/), `get_legal_moves` dispatches to it for a
+# ~10-30× speedup on the MCTS hot path. Falls back silently to the pure
+# Python implementation if the extension isn't installed.
+try:
+    import chess_ai_rust as _rust  # type: ignore[import-not-found]
+    _HAVE_RUST = True
+except ImportError:
+    _rust = None  # type: ignore[assignment]
+    _HAVE_RUST = False
+
 PieceColor = Literal["white", "black"]
 PieceType = Literal["king", "queen", "rook", "bishop", "knight", "pawn"]
 GameStatus = Literal["waiting", "active", "check", "checkmate", "stalemate", "draw"]
@@ -559,8 +570,62 @@ def _clone_board(board: Board) -> Board:
     return [row[:] for row in board]
 
 
+def _serialize_board_for_rust(board: Board) -> list[list[dict | None]]:
+    """Convert our list-of-Piece board into the dict format the Rust FFI expects."""
+    return [
+        [({"color": p.color, "type": p.type} if p else None) for p in row]
+        for row in board
+    ]
+
+
+def _rust_get_legal_moves(state: ChessGameState) -> list[Move]:
+    """Dispatch get_legal_moves to the Rust extension.
+
+    Packs the Python state into the dict/primitive formats the Rust FFI accepts,
+    calls the Rust implementation, and unpacks the result into Python Move
+    dataclasses. Parity with the pure-Python path is asserted by
+    tests/test_rust_engine_parity.py on 5000 positions.
+    """
+    cr = state.castlingRights
+    castling = {
+        "whiteKingside": cr.whiteKingside,
+        "whiteQueenside": cr.whiteQueenside,
+        "blackKingside": cr.blackKingside,
+        "blackQueenside": cr.blackQueenside,
+    }
+    ep = None if state.enPassantTarget is None else {
+        "rank": state.enPassantTarget.rank,
+        "file": state.enPassantTarget.file,
+    }
+    tuples = _rust.get_legal_moves(
+        _serialize_board_for_rust(state.board),
+        state.currentTurn,
+        castling,
+        ep,
+    )
+    return [
+        Move(
+            from_pos=Position(t[0], t[1]),
+            to_pos=Position(t[2], t[3]),
+            promotion=t[4],
+        )
+        for t in tuples
+    ]
+
+
 def get_legal_moves(state: ChessGameState) -> list[Move]:
-    """Compute legal moves via in-place apply + undo on state.board.
+    """Compute all legal moves for the side to move.
+
+    Uses the Rust extension when it's built; otherwise falls back to the
+    pure-Python implementation below.
+    """
+    if _HAVE_RUST:
+        return _rust_get_legal_moves(state)
+    return _get_legal_moves_python(state)
+
+
+def _get_legal_moves_python(state: ChessGameState) -> list[Move]:
+    """Pure-Python implementation of `get_legal_moves`.
 
     Previously we cloned the entire board for every pseudo-legal move (~30 per
     call). Now we save only the 2–4 squares that each pseudo-move touches,

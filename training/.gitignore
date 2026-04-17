@@ -14,3 +14,7 @@ runs/
 
 # Parity fixture is regenerated deterministically via `npm run dump-parity`
 tests/fixtures/*.json
+
+# Rust build artefacts
+rust_engine/target/
+rust_engine/Cargo.lock
