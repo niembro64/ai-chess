@@ -73,25 +73,19 @@ cd training && pytest
 #    disconnections; the dashboard repaints the moment you re-attach.
 tmux new -s train
 
-# --- Multiprocessing mode (recommended on any >4-core CUDA box) ---
-# Spawns N CPU self-play workers + one GPU inference server that
-# batches all their eval requests. This is what keeps the 3090 fed.
+# Checkpoints land in runs/latest/ (single fixed spot — re-running
+# overwrites the previous checkpoint; there is no v1/v2 scheme).
 python scripts/train.py \
     --num-res-blocks 10 --num-filters 128 \
     --num-workers 8 --games-per-worker 16 --mcts-sims 40 \
     --batch-size 256 --min-buffer 2000 --replay-buffer 200000 \
     --lr 1e-3 \
-    --device cuda \
-    --checkpoint-dir runs/v1
-
-# --- Single-process mode (legacy; Python caps GPU at ~0% util) ---
-# python scripts/train.py --concurrent-games 64 --mcts-sims 50 \
-#     --device cuda --checkpoint-dir runs/v1
+    --device cuda
 # Detach with Ctrl-b d; re-attach with `tmux a -t train`.
 # Add --no-dashboard if you're redirecting stdout to a log file.
 
 # 4. Ship the weights to the browser preset slot
-python scripts/deploy_to_browser.py runs/v1/latest.json
+python scripts/deploy_to_browser.py runs/latest/latest.json
 
 # 5. Rebuild the browser app (project root)
 cd .. && npm run build
@@ -113,7 +107,7 @@ The same data streams into `<checkpoint_dir>/stats.csv` for offline analysis:
 
 ```python
 import pandas as pd
-df = pd.read_csv("runs/v1/stats.csv")
+df = pd.read_csv("runs/latest/stats.csv")
 df.plot(x="step", y=["policy_loss", "value_loss"])
 ```
 

@@ -3,18 +3,22 @@
 Intended runtime: a CUDA box (like the 3090 target). Will also run on MPS
 for local dev or CPU for debugging, just slower.
 
-Example:
+Checkpoints always live in a single directory (default: `runs/latest/`).
+Rerunning the command overwrites `latest.pt` + `latest.json` in that
+directory — there is no "v1"/"v2" scheme. If you want to experiment with
+a different config in parallel, point `--checkpoint-dir` somewhere else
+for that single run; the default stays `runs/latest`.
+
+Example (defaults shown):
 
     python training/scripts/train.py \\
         --num-res-blocks 10 --num-filters 128 \\
-        --concurrent-games 64 --mcts-sims 50 \\
-        --batch-size 256 --replay-buffer 100000 \\
-        --lr 1e-3 \\
-        --device cuda \\
-        --checkpoint-dir runs/initial_10x128
+        --num-workers 3 --games-per-worker 24 --mcts-sims 30 \\
+        --device cuda
 
-After training, the browser can consume the latest weights by copying
-    runs/initial_10x128/latest.json  →  src/game/ai/presetWeights.txt
+After training, deploy the latest weights to the browser:
+
+    python training/scripts/deploy_to_browser.py training/runs/latest/latest.json
 """
 
 from __future__ import annotations
@@ -86,7 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     # Runtime
     p.add_argument("--device", choices=["auto", "cuda", "mps", "cpu"], default="auto")
     p.add_argument("--num-steps", type=int, default=None, help="Self-play steps (None = run forever).")
-    p.add_argument("--checkpoint-dir", type=str, default="runs/latest")
+    p.add_argument("--checkpoint-dir", type=str, default="runs/latest",
+                   help="Where to write latest.pt + latest.json + stats.csv. "
+                        "Default is the single canonical spot (runs/latest/). "
+                        "Override only for side-by-side experiments.")
     p.add_argument("--checkpoint-every", type=float, default=60.0, help="Seconds between checkpoints.")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
