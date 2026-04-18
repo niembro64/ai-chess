@@ -8,6 +8,12 @@ dependencies = [
     "torch>=2.2",
     "rich>=13",
     "plotext>=5.2",
+    # python-chess: used by the Syzygy tablebase integration to adjudicate
+    # cap-timeout games when total pieces <= the tablebase's max piece count.
+    # Optional at runtime (gracefully degrades to 0-scored caps if no
+    # tablebase files are installed), but pinned here so env setup installs
+    # the library unconditionally.
+    "chess>=1.10",
 ]
 
 [project.optional-dependencies]

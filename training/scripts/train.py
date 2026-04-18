@@ -124,6 +124,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "KataGo-style multi-task training: dense gradient "
                         "signal on the trunk without polluting value/policy. "
                         "0 disables the aux head entirely.")
+    p.add_argument("--syzygy-path", type=str, default=None,
+                   help="Directory containing Syzygy tablebase files (.rtbw/"
+                        ".rtbz). When set, cap-timeout games with few enough "
+                        "pieces are adjudicated by the tablebase instead of "
+                        "being scored 0. Safe to omit — falls back silently.")
+    p.add_argument("--syzygy-max-pieces", type=int, default=5,
+                   help="Upper piece-count bound for tablebase probes. "
+                        "Matches the tables you have installed (3-4-5 piece "
+                        "tables => 5).")
     # Replay
     p.add_argument("--replay-buffer", type=int, default=100_000)
     p.add_argument("--min-buffer", type=int, default=2_000)
@@ -162,6 +171,17 @@ def main() -> None:
     device = pick_device(args.device)
     log.info("Using device: %s", device)
 
+    # Configure Syzygy tablebase (silently skipped if --syzygy-path wasn't
+    # set or the files are missing). Must happen BEFORE workers fork since
+    # each worker inherits the module globals.
+    from chess_ai import tablebase
+    if tablebase.open_tablebase(args.syzygy_path, args.syzygy_max_pieces):
+        log.info("Syzygy tablebase: %s (max %d pieces)", args.syzygy_path, args.syzygy_max_pieces)
+    elif args.syzygy_path:
+        log.warning(
+            "Syzygy tablebase NOT opened (path missing or unreadable): %s", args.syzygy_path
+        )
+
     model = ChessNet(
         num_res_blocks=args.num_res_blocks,
         num_filters=args.num_filters,
@@ -196,6 +216,8 @@ def main() -> None:
         use_amp=args.use_amp,
         policy_label_smoothing=args.policy_label_smoothing,
         aux_material_weight=args.aux_material_weight,
+        syzygy_path=args.syzygy_path,
+        syzygy_max_pieces=args.syzygy_max_pieces,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         replay_buffer_capacity=args.replay_buffer,

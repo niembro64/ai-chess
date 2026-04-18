@@ -91,6 +91,11 @@ class TrainConfig:
     # training gives the trunk dense gradient signal on a quantity the
     # main heads also need. 0 disables the aux head + loss entirely.
     aux_material_weight: float = 0.1
+    # Syzygy tablebase directory (None disables). When set and a cap game
+    # has few enough pieces, we adjudicate the outcome via the tablebase
+    # instead of scoring it 0.
+    syzygy_path: str | None = None
+    syzygy_max_pieces: int = 5
     # Replay
     replay_buffer_capacity: int = 100_000
     min_buffer_for_training: int = 2_000
@@ -219,6 +224,8 @@ class Trainer:
                 c_puct=self.config.c_puct,
                 dirichlet_alpha=self.config.dirichlet_alpha,
                 dirichlet_epsilon=self.config.dirichlet_epsilon,
+                syzygy_path=self.config.syzygy_path,
+                syzygy_max_pieces=self.config.syzygy_max_pieces,
                 rewards=self.config.rewards,
             )
             self._mp_self_play = MultiprocessingSelfPlay(

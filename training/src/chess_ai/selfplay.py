@@ -14,6 +14,7 @@ from typing import Callable
 import numpy as np
 import torch
 
+from . import tablebase
 from .encoding import POLICY_SIZE, encode_board, move_to_index
 from .engine import (
     CastlingRights,
@@ -485,12 +486,22 @@ class SelfPlayEngine:
                 self.black_wins += 1
         elif hit_cap:
             # Cap timeout: neither side found a forced win in the allotted
-            # plies. Label as a true draw (0.0) rather than a material-based
-            # pseudo-outcome — that old behavior taught the model to stall
-            # out games while up material rather than convert to mate.
-            white_outcome = 0.0
-            outcome = "cap"
-            label = "cap"
+            # plies. If a Syzygy tablebase is configured AND the remaining
+            # piece count is within its range, we can score the position by
+            # its theoretical result under optimal play — a much cleaner
+            # training signal than calling it 0.
+            tb_result = tablebase.probe_outcome(slot.state)
+            if tb_result is not None:
+                stm = slot.state.currentTurn
+                # tb_result is from the side-to-move's perspective. Convert to
+                # white's perspective for the outcome convention used here.
+                white_outcome = float(tb_result if stm == "white" else -tb_result)
+                outcome = "cap"
+                label = f"cap-tb ({'W' if white_outcome > 0 else 'B' if white_outcome < 0 else 'D'})"
+            else:
+                white_outcome = 0.0
+                outcome = "cap"
+                label = "cap"
             self.caps += 1
         else:
             white_outcome = 0.0

@@ -74,6 +74,11 @@ class MultiprocessingConfig:
     c_puct: float | None = None
     dirichlet_alpha: float | None = None
     dirichlet_epsilon: float | None = None
+    # Syzygy tablebase directory (passed to every worker since worker
+    # processes don't inherit parent globals under "spawn" start method).
+    # None = disabled.
+    syzygy_path: str | None = None
+    syzygy_max_pieces: int = 5
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -223,6 +228,10 @@ def _worker_main(
         dirichlet_alpha=config.dirichlet_alpha,
         dirichlet_epsilon=config.dirichlet_epsilon,
     )
+    # Same reason for the Syzygy tablebase: each worker must open it itself.
+    if config.syzygy_path:
+        from . import tablebase
+        tablebase.open_tablebase(config.syzygy_path, config.syzygy_max_pieces)
 
     def remote_evaluator(boards: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         request_q.put((worker_id, boards))
