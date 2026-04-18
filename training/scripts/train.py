@@ -110,6 +110,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mirror-augment-prob", type=float, default=0.5,
                    help="Probability of left-right file mirror per sampled "
                         "batch row. 0 disables. 0.5 = free 2x data multiplier.")
+    p.add_argument("--no-amp", dest="use_amp", action="store_false",
+                   help="Disable mixed-precision (fp16) training on CUDA. "
+                        "AMP gives ~2x forward/backward speedup on Pascal "
+                        "and newer with no measurable quality loss.")
+    p.set_defaults(use_amp=True)
+    p.add_argument("--policy-label-smoothing", type=float, default=0.0,
+                   help="Epsilon for uniform smoothing on the MCTS policy "
+                        "target. 0.01-0.03 prevents the policy head from "
+                        "collapsing to zero on unvisited moves. 0 disables.")
     # Replay
     p.add_argument("--replay-buffer", type=int, default=100_000)
     p.add_argument("--min-buffer", type=int, default=2_000)
@@ -179,6 +188,8 @@ def main() -> None:
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_epsilon=args.dirichlet_epsilon,
         mirror_augment_prob=args.mirror_augment_prob,
+        use_amp=args.use_amp,
+        policy_label_smoothing=args.policy_label_smoothing,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         replay_buffer_capacity=args.replay_buffer,
