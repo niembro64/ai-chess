@@ -18,7 +18,7 @@ from .encoding import POLICY_SIZE, encode_board, move_to_index
 from .engine import ChessGameState, Move, apply_move, create_initial_game_state, get_legal_moves
 from .mcts import run_batched_mcts
 from .model import NUM_PLANES, ChessNet, encoded_to_nchw
-from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights, evaluate_position
+from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
 
 
 # --- Data ---
@@ -124,33 +124,15 @@ def _make_game_slot(rng: random.Random, random_start_prob: float = 0.3) -> GameS
     With probability `random_start_prob`, the slot starts from a randomized
     mid-/end-game position with a short move cap (coverage). Otherwise it
     starts from the standard opening with a long cap (tactical depth).
+
+    Caps are in plies. Standard games get 200-400 plies (100-200 full moves)
+    so real terminal outcomes dominate the value signal rather than cap
+    timeouts. Random mid/endgame starts keep shorter caps for coverage.
     """
     is_random = rng.random() < random_start_prob
     state = _random_start(rng) if is_random else _normal_start()
-    base_cap = rng.randint(5, 30)
-    move_cap = base_cap if is_random else base_cap * 10
+    move_cap = rng.randint(5, 30) if is_random else rng.randint(200, 400)
     return GameSlot(state=state, move_cap=move_cap, is_standard_start=not is_random)
-
-
-# --- Material advantage helper (for capped-game scoring) ---
-
-_PIECE_POINTS = {"pawn": 1, "knight": 3, "bishop": 3, "rook": 5, "queen": 9, "king": 0}
-
-
-def _material_advantage_white(state: ChessGameState) -> float:
-    own = 0
-    opp = 0
-    for r in range(8):
-        for f in range(8):
-            piece = state.board[r][f]
-            if piece is None:
-                continue
-            val = _PIECE_POINTS.get(piece.type, 0)
-            if piece.color == "white":
-                own += val
-            else:
-                opp += val
-    return (own - opp) / 39.0
 
 
 # --- Self-play engine ---
@@ -235,6 +217,7 @@ class SelfPlayEngine:
         self.white_wins = 0
         self.black_wins = 0
         self.draws = 0
+        self.caps = 0
         self.recent_game_lengths: list[int] = []
 
     def step(self) -> list[GameResult]:
@@ -266,15 +249,17 @@ class SelfPlayEngine:
                     seen.add(mi)
                     canon_policy[mi] = policy[mi]
 
-            pos_score = evaluate_position(
-                slot.state, slot.state.currentTurn, self.config.rewards, len(legal)
-            )
+            # Phase 1 of the reward refactor: pure-outcome value target, so we
+            # no longer compute the hand-crafted positional score here.
+            # `position_score` is kept on the dataclass for now (set to 0) so
+            # external tests and fixtures that build examples directly keep
+            # type-compatible. Will be repurposed when aux heads land.
             slot.examples.append(
                 GameSlotExample(
                     board=board,
                     policy=canon_policy,
                     turn_color=slot.state.currentTurn,
-                    position_score=pos_score,
+                    position_score=0.0,
                 )
             )
 
@@ -311,11 +296,14 @@ class SelfPlayEngine:
             else:
                 self.black_wins += 1
         elif hit_cap:
-            mat_adv = _material_advantage_white(slot.state)
-            white_outcome = max(-1.0, min(1.0, mat_adv * 3.0))
+            # Cap timeout: neither side found a forced win in the allotted
+            # plies. Label as a true draw (0.0) rather than a material-based
+            # pseudo-outcome — that old behavior taught the model to stall
+            # out games while up material rather than convert to mate.
+            white_outcome = 0.0
             outcome = "cap"
-            label = f"cap ({mat_adv * 39:+.0f})"
-            self.draws += 1
+            label = "cap"
+            self.caps += 1
         else:
             white_outcome = 0.0
             outcome = "draw"
@@ -326,7 +314,7 @@ class SelfPlayEngine:
 
         for ex in slot.examples:
             outcome_from_persp = white_outcome if ex.turn_color == "white" else -white_outcome
-            value = outcome_from_persp * win_weight + ex.position_score
+            value = outcome_from_persp * win_weight
             value = max(-1.0, min(1.0, value))
             self.example_sink(TrainingExample(board=ex.board, policy=ex.policy, value=value))
 
