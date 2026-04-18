@@ -109,6 +109,13 @@ class TrainConfig:
     rate_window_seconds: float = 120.0
     # Checkpointing
     checkpoint_every_seconds: float = 60.0
+    # Periodically copy `latest.pt` off to `archive/gen-<N>.pt` so we have a
+    # trail of snapshots for compare_checkpoints + plateau detection. 0
+    # disables archival entirely.
+    archive_every_gens: int = 0
+    # Cap on retained archives (oldest are deleted as new ones are written).
+    # 0 = unlimited.
+    keep_archives: int = 20
     # Logging
     log_every_steps: int = 10
     # Reward shaping
@@ -253,6 +260,7 @@ class Trainer:
         self.stats = TrainStats(target_gens=self.config.target_gens)
         self._start_time = time.time()
         self._last_checkpoint_time = 0.0
+        self._last_archive_gen = 0
         # (timestamp, generation, games_completed) samples used for windowed rates.
         self._rate_samples: deque[tuple[float, int, int]] = deque()
         # EMA smoothing factor for per-phase timings.
@@ -459,6 +467,8 @@ class Trainer:
             if ckpt_dir is not None and (time.time() - self._last_checkpoint_time) >= self.config.checkpoint_every_seconds:
                 self.save_checkpoint(ckpt_dir)
                 self._last_checkpoint_time = time.time()
+            if ckpt_dir is not None:
+                self.maybe_archive_checkpoint(ckpt_dir)
 
     def _run_mp(
         self,
@@ -537,6 +547,8 @@ class Trainer:
                 if ckpt_dir is not None and (time.time() - self._last_checkpoint_time) >= self.config.checkpoint_every_seconds:
                     self.save_checkpoint(ckpt_dir)
                     self._last_checkpoint_time = time.time()
+                if ckpt_dir is not None:
+                    self.maybe_archive_checkpoint(ckpt_dir)
         finally:
             self._mp_self_play.stop()
 
@@ -578,6 +590,67 @@ class Trainer:
             json.dump(weights, f)
 
         return {"pt": pt_path, "json": json_path}
+
+    def maybe_archive_checkpoint(self, ckpt_dir: Path) -> Path | None:
+        """Write `archive/gen-<N>.pt` when the generation cadence says it's time.
+
+        Returns the archive path on success, None if nothing was written.
+        Retention is applied after each write: oldest archives beyond
+        `keep_archives` are deleted.
+        """
+        if self.config.archive_every_gens <= 0:
+            return None
+        gen = self.stats.generation
+        if gen - self._last_archive_gen < self.config.archive_every_gens:
+            return None
+        if gen == 0:
+            return None
+
+        archive_dir = ckpt_dir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"gen-{gen}.pt"
+
+        # Reuse save_checkpoint by writing to a temp dir then moving the .pt.
+        # Simpler: just replicate the save payload here (cheap vs train_step).
+        payload = {
+            "model_state_dict": self.model.state_dict(),
+            "stats": self.stats.__dict__,
+            "config": self.config.__dict__,
+            "model_arch": {
+                "num_res_blocks": self.model.num_res_blocks,
+                "num_filters": self.model.num_filters,
+                "kernel_size": self.model.kernel_size,
+                "value_head_size": self.model.value_head_size,
+                "se_reduction": self.model.se_reduction,
+            },
+        }
+        if self.aux_material is not None:
+            payload["aux_material_state_dict"] = self.aux_material.state_dict()
+        # Archives intentionally exclude optimizer state — they're for eval /
+        # comparison, not for resuming training. Saves disk at scale.
+        torch.save(payload, archive_path)
+
+        self._last_archive_gen = gen
+        self._enforce_archive_retention(archive_dir)
+        return archive_path
+
+    def _enforce_archive_retention(self, archive_dir: Path) -> None:
+        if self.config.keep_archives <= 0:
+            return
+        # Sort archives by the generation embedded in the filename.
+        def _gen_of(p: Path) -> int:
+            try:
+                return int(p.stem.removeprefix("gen-"))
+            except ValueError:
+                return -1
+
+        archives = sorted(archive_dir.glob("gen-*.pt"), key=_gen_of)
+        excess = len(archives) - self.config.keep_archives
+        for p in archives[:max(0, excess)]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     def load_checkpoint(self, path: str | Path) -> None:
         state = torch.load(Path(path), map_location=self.device)

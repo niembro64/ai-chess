@@ -144,6 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "Default is the single canonical spot (runs/latest/). "
                         "Override only for side-by-side experiments.")
     p.add_argument("--checkpoint-every", type=float, default=60.0, help="Seconds between checkpoints.")
+    p.add_argument("--archive-every-gens", type=int, default=0,
+                   help="Write an immutable snapshot to runs/<name>/archive/"
+                        "gen-<N>.pt every N gradient updates. 0 disables.")
+    p.add_argument("--keep-archives", type=int, default=20,
+                   help="Max retained archive snapshots; oldest are deleted "
+                        "as new ones are written. 0 = unlimited.")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", type=str, default=None, help="Path to a .pt checkpoint to resume from.")
@@ -223,6 +229,8 @@ def main() -> None:
         replay_buffer_capacity=args.replay_buffer,
         min_buffer_for_training=args.min_buffer,
         checkpoint_every_seconds=args.checkpoint_every,
+        archive_every_gens=args.archive_every_gens,
+        keep_archives=args.keep_archives,
         log_every_steps=args.log_every,
     )
     trainer = Trainer(model=model, device=device, config=config, rng=random.Random(args.seed))
