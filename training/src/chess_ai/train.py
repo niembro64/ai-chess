@@ -477,6 +477,16 @@ class Trainer:
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "stats": self.stats.__dict__,
                 "config": self.config.__dict__,
+                # Model architecture, so the checkpoint is self-describing for
+                # downstream tools (compare_checkpoints, deploy_to_browser) and
+                # we don't need to re-pass --num-filters etc. on the CLI.
+                "model_arch": {
+                    "num_res_blocks": self.model.num_res_blocks,
+                    "num_filters": self.model.num_filters,
+                    "kernel_size": self.model.kernel_size,
+                    "value_head_size": self.model.value_head_size,
+                    "se_reduction": self.model.se_reduction,
+                },
             },
             pt_path,
         )
