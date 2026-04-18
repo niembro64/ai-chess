@@ -80,10 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     # Self-play scheduling
+    p.add_argument("--endgame-start-prob", type=float, default=0.0,
+                   help="Fraction of new episodes seeded from a theoretical "
+                        "endgame (KQvK, KRvK, KPvK, ...). Curriculum tool: set "
+                        "higher early in training to get dense terminal "
+                        "outcomes, drop to 0 once the network can force mates "
+                        "from the opening.")
     p.add_argument("--random-start-prob", type=float, default=0.3,
-                   help="Fraction of new episodes that start from a random "
-                        "mid-/end-game position with a short move cap. "
-                        "The rest start from the standard opening.")
+                   help="Fraction of the REMAINING episodes (after endgame "
+                        "starts) that start from a random mid-/end-game "
+                        "position with a short move cap. The rest start from "
+                        "the standard opening.")
     p.add_argument("--temperature-threshold-plies", type=int, default=15,
                    help="Plies from episode start during which move selection "
                         "samples proportional to MCTS visits (τ=1). After this, "
@@ -150,6 +157,7 @@ def main() -> None:
         gradient_steps_per_selfplay_step=args.grad_steps_per_step,
         min_examples_between_grad_steps=args.min_examples_between_grad_steps,
         target_gens=args.target_gens,
+        endgame_start_prob=args.endgame_start_prob,
         random_start_prob=args.random_start_prob,
         temperature_threshold_plies=args.temperature_threshold_plies,
         learning_rate=args.lr,

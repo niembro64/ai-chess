@@ -15,7 +15,18 @@ import numpy as np
 import torch
 
 from .encoding import POLICY_SIZE, encode_board, move_to_index
-from .engine import ChessGameState, Move, apply_move, create_initial_game_state, get_legal_moves
+from .engine import (
+    CastlingRights,
+    ChessGameState,
+    Move,
+    Piece,
+    PieceColor,
+    PieceType,
+    apply_move,
+    create_initial_game_state,
+    get_legal_moves,
+    is_in_check,
+)
 from .mcts import run_batched_mcts
 from .model import NUM_PLANES, ChessNet, encoded_to_nchw
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
@@ -118,17 +129,115 @@ def _random_start(rng: random.Random) -> ChessGameState:
     return state
 
 
-def _make_game_slot(rng: random.Random, random_start_prob: float = 0.3) -> GameSlot:
+# Endgame material configs for the curriculum starts. Each tuple is
+# (strong_side_non_king_pieces, weak_side_non_king_pieces). Kings are added
+# automatically. Chosen to be familiar theoretical endgames that resolve
+# quickly enough to give the net dense terminal outcomes early in training.
+_ENDGAME_CONFIGS: tuple[tuple[tuple[PieceType, ...], tuple[PieceType, ...]], ...] = (
+    (("queen",), ()),               # KQvK  — textbook mate in ~10
+    (("rook",), ()),                # KRvK  — mate in ~15
+    (("rook", "rook"), ()),         # KRRvK — easier than KRvK
+    (("queen",), ("rook",)),        # KQvKR — queen usually wins
+    (("pawn",), ()),                # KPvK  — teaches promotion + king opposition
+    (("pawn", "pawn"), ()),         # KPPvK — multiple promotion paths
+    (("queen", "rook"), ()),        # KQRvK — crushing, quick mate
+)
+
+
+def _endgame_start(rng: random.Random) -> ChessGameState:
+    """Random simple-endgame starting position drawn from `_ENDGAME_CONFIGS`.
+
+    Retries until we produce a legal, non-terminal position (kings not
+    adjacent, opposing king not already in check, side-to-move has a legal
+    move). Falls back to the standard opening if we can't after several
+    attempts (which in practice never happens on an 8×8 board with ≤5
+    pieces).
+    """
+    strong_pieces, weak_pieces = rng.choice(_ENDGAME_CONFIGS)
+    strong_color: PieceColor = "white" if rng.random() < 0.5 else "black"
+    weak_color: PieceColor = "black" if strong_color == "white" else "white"
+
+    for _ in range(30):
+        board: list[list[Piece | None]] = [[None] * 8 for _ in range(8)]
+        squares = [(r, f) for r in range(8) for f in range(8)]
+        rng.shuffle(squares)
+        sq_iter = iter(squares)
+
+        try:
+            sk_r, sk_f = next(sq_iter)
+            wk_r, wk_f = next(sq_iter)
+        except StopIteration:
+            continue
+        # Kings can't be adjacent (illegal position).
+        if abs(sk_r - wk_r) <= 1 and abs(sk_f - wk_f) <= 1:
+            continue
+        board[sk_r][sk_f] = Piece(strong_color, "king")
+        board[wk_r][wk_f] = Piece(weak_color, "king")
+
+        placed_ok = True
+        for color, pieces in ((strong_color, strong_pieces), (weak_color, weak_pieces)):
+            for pt in pieces:
+                try:
+                    r, f = next(sq_iter)
+                except StopIteration:
+                    placed_ok = False
+                    break
+                # Pawns can't sit on the promotion ranks.
+                if pt == "pawn" and (r == 0 or r == 7):
+                    placed_ok = False
+                    break
+                board[r][f] = Piece(color, pt)
+            if not placed_ok:
+                break
+        if not placed_ok:
+            continue
+
+        side_to_move: PieceColor = "white" if rng.random() < 0.5 else "black"
+        state = ChessGameState(
+            board=board,
+            currentTurn=side_to_move,
+            castlingRights=CastlingRights(False, False, False, False),
+            enPassantTarget=None,
+            halfMoveClock=0,
+            fullMoveNumber=1,
+            status="active",
+        )
+        # Reject illegal setups (opponent in check means they'd have had to
+        # move — the position is unreachable) and already-terminal positions.
+        opp: PieceColor = "black" if side_to_move == "white" else "white"
+        if is_in_check(state.board, opp):
+            continue
+        if not get_legal_moves(state):
+            continue
+        return state
+
+    return _normal_start()
+
+
+def _make_game_slot(
+    rng: random.Random,
+    random_start_prob: float = 0.3,
+    endgame_start_prob: float = 0.0,
+) -> GameSlot:
     """Create a fresh game slot.
 
-    With probability `random_start_prob`, the slot starts from a randomized
-    mid-/end-game position with a short move cap (coverage). Otherwise it
-    starts from the standard opening with a long cap (tactical depth).
+    Selection is a three-way mix:
+      * `endgame_start_prob` → simple-endgame curriculum position (KQvK,
+        KRvK, KPvK, ...) with a medium-short cap. Gives dense terminal
+        outcomes early in training.
+      * `random_start_prob` of the remainder → randomized mid-/end-game
+        position via a random walk (coverage of uncommon states).
+      * the rest → standard opening with a long cap (tactical depth).
 
-    Caps are in plies. Standard games get 200-400 plies (100-200 full moves)
-    so real terminal outcomes dominate the value signal rather than cap
-    timeouts. Random mid/endgame starts keep shorter caps for coverage.
+    Caps are in plies. Standard games get 200-400 plies (100-200 full
+    moves) so real terminal outcomes dominate the value signal rather than
+    cap timeouts.
     """
+    roll = rng.random()
+    if roll < endgame_start_prob:
+        state = _endgame_start(rng)
+        move_cap = rng.randint(40, 120)
+        return GameSlot(state=state, move_cap=move_cap, is_standard_start=False)
     is_random = rng.random() < random_start_prob
     state = _random_start(rng) if is_random else _normal_start()
     move_cap = rng.randint(5, 30) if is_random else rng.randint(200, 400)
@@ -177,6 +286,11 @@ def make_local_selfplay_engine(
 class SelfPlayConfig:
     num_concurrent_games: int = 32
     mcts_simulations: int = 25
+    # Probability that a fresh game slot is seeded from a simple theoretical
+    # endgame (KQvK, KRvK, KPvK, ...). Curriculum learning: these resolve
+    # in few plies and produce dense terminal outcomes early in training,
+    # before the network is strong enough to force mates from the opening.
+    endgame_start_prob: float = 0.0
     # Probability that a fresh game slot starts from a randomized mid-/end-game
     # position (with a short move cap). The rest start from the standard
     # opening with a long cap. Higher = more coverage, lower = more tactical
@@ -210,7 +324,7 @@ class SelfPlayEngine:
         self.rng = rng or random.Random()
 
         self.games: list[GameSlot] = [
-            _make_game_slot(self.rng, self.config.random_start_prob)
+            _make_game_slot(self.rng, self.config.random_start_prob, self.config.endgame_start_prob)
             for _ in range(self.config.num_concurrent_games)
         ]
         self.games_completed = 0
@@ -273,7 +387,7 @@ class SelfPlayEngine:
             )
             if is_over:
                 finished.append(self._finish_game(slot))
-                self.games[i] = _make_game_slot(self.rng, self.config.random_start_prob)
+                self.games[i] = _make_game_slot(self.rng, self.config.random_start_prob, self.config.endgame_start_prob)
 
         return finished
 

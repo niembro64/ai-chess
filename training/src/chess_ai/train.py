@@ -57,6 +57,7 @@ class TrainConfig:
     min_examples_between_grad_steps: int = 32
     # Starting-position mix + move-selection temperature (plumbed from the
     # SelfPlayConfig defaults for CLI convenience).
+    endgame_start_prob: float = 0.0
     random_start_prob: float = 0.3
     temperature_threshold_plies: int = 15
     # Replay
@@ -161,6 +162,7 @@ class Trainer:
                 games_per_worker=self.config.games_per_worker,
                 mcts_simulations=self.config.mcts_simulations,
                 batch_wait_ms=self.config.mp_batch_wait_ms,
+                endgame_start_prob=self.config.endgame_start_prob,
                 random_start_prob=self.config.random_start_prob,
                 temperature_threshold_plies=self.config.temperature_threshold_plies,
                 rewards=self.config.rewards,
@@ -179,6 +181,7 @@ class Trainer:
                 config=SelfPlayConfig(
                     num_concurrent_games=self.config.num_concurrent_games,
                     mcts_simulations=self.config.mcts_simulations,
+                    endgame_start_prob=self.config.endgame_start_prob,
                     random_start_prob=self.config.random_start_prob,
                     temperature_threshold_plies=self.config.temperature_threshold_plies,
                     rewards=self.config.rewards,
