@@ -47,6 +47,8 @@ CSV_FIELDS = (
     "gen_per_min", "games_per_min", "replay_size",
     "eta_seconds",
     "policy_loss", "value_loss", "total_loss",
+    "t_drain_ms", "t_broadcast_ms", "t_sleep_ms", "t_iter_ms",
+    "t_sample_ms", "t_h2d_ms", "t_forward_ms", "t_backward_ms", "t_optim_ms",
 )
 
 
@@ -199,26 +201,30 @@ class DashboardLogger:
 
         if self._csv_writer is not None:
             eta = getattr(stats, "eta_seconds", None)
-            self._csv_writer.writerow(
-                {
-                    "time": datetime.now().isoformat(timespec="seconds"),
-                    "step": stats.step,
-                    "gen": stats.generation,
-                    "target_gens": getattr(stats, "target_gens", 0),
-                    "games": stats.games_completed,
-                    "white_wins": stats.white_wins,
-                    "black_wins": stats.black_wins,
-                    "draws": stats.draws,
-                    "caps": getattr(stats, "caps", 0),
-                    "gen_per_min": round(getattr(stats, "gen_per_min", 0.0), 2),
-                    "games_per_min": round(stats.games_per_min, 2),
-                    "replay_size": stats.replay_size,
-                    "eta_seconds": "" if eta is None else round(eta, 1),
-                    "policy_loss": round(stats.policy_loss, 4),
-                    "value_loss": round(stats.value_loss, 4),
-                    "total_loss": round(stats.total_loss, 4),
-                }
-            )
+            row = {
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "step": stats.step,
+                "gen": stats.generation,
+                "target_gens": getattr(stats, "target_gens", 0),
+                "games": stats.games_completed,
+                "white_wins": stats.white_wins,
+                "black_wins": stats.black_wins,
+                "draws": stats.draws,
+                "caps": getattr(stats, "caps", 0),
+                "gen_per_min": round(getattr(stats, "gen_per_min", 0.0), 2),
+                "games_per_min": round(stats.games_per_min, 2),
+                "replay_size": stats.replay_size,
+                "eta_seconds": "" if eta is None else round(eta, 1),
+                "policy_loss": round(stats.policy_loss, 4),
+                "value_loss": round(stats.value_loss, 4),
+                "total_loss": round(stats.total_loss, 4),
+            }
+            for t_field in (
+                "t_drain_ms", "t_broadcast_ms", "t_sleep_ms", "t_iter_ms",
+                "t_sample_ms", "t_h2d_ms", "t_forward_ms", "t_backward_ms", "t_optim_ms",
+            ):
+                row[t_field] = round(getattr(stats, t_field, 0.0), 2)
+            self._csv_writer.writerow(row)
 
         if self._live is not None:
             self._live.update(self._render(stats))
@@ -231,6 +237,7 @@ class DashboardLogger:
             Layout(name="header", size=3),
             Layout(name="top", size=9),
             Layout(name="outcomes", size=7),
+            Layout(name="timings", size=9),
             Layout(name="loss"),
             Layout(name="events", size=10),
         )
@@ -240,6 +247,7 @@ class DashboardLogger:
         )
         layout["header"].update(self._header_panel())
         layout["outcomes"].update(self._outcomes_panel(stats))
+        layout["timings"].update(self._timings_panel(stats))
         layout["loss"].update(self._loss_panel())
         layout["events"].update(self._events_panel())
         return layout
@@ -349,6 +357,40 @@ class DashboardLogger:
         table.add_row(*row("D", d, "yellow"))
         table.add_row(*row("Cap", c, "cyan"))
         return Panel(table, title=f"outcomes  (n={real_total})", border_style="blue")
+
+    def _timings_panel(self, stats) -> Panel:
+        """EMA-smoothed per-phase durations for bottleneck diagnosis (ms)."""
+        table = Table.grid(padding=(0, 2), expand=True)
+        table.add_column(style="dim", justify="right", width=14)
+        table.add_column(justify="right", width=10)
+        table.add_column(style="dim", justify="right", width=14)
+        table.add_column(justify="right", width=10)
+        table.add_column(style="dim", justify="right", width=14)
+        table.add_column(justify="right", width=10)
+
+        def fmt(name: str) -> str:
+            if stats is None:
+                return "—"
+            v = getattr(stats, name, 0.0)
+            return f"{v:,.2f} ms" if v > 0 else "—"
+
+        # Layout: main-loop phases on top, train_step phases on bottom.
+        table.add_row(
+            "iter (total)", fmt("t_iter_ms"),
+            "drain", fmt("t_drain_ms"),
+            "sleep (starved)", fmt("t_sleep_ms"),
+        )
+        table.add_row(
+            "broadcast", fmt("t_broadcast_ms"),
+            "sample", fmt("t_sample_ms"),
+            "h2d", fmt("t_h2d_ms"),
+        )
+        table.add_row(
+            "forward", fmt("t_forward_ms"),
+            "backward", fmt("t_backward_ms"),
+            "optim", fmt("t_optim_ms"),
+        )
+        return Panel(table, title="timings (EMA, per loop/step)", border_style="yellow")
 
     def _loss_panel(self) -> Panel:
         # plotext renders into a size in cell units. Leave margins for the panel border.

@@ -99,6 +99,18 @@ class TrainStats:
     # Seconds-remaining estimate to reach target_gens at the current rate.
     # None if we haven't completed any gradient updates yet.
     eta_seconds: float | None = None
+    # EMA-smoothed per-phase durations (ms). For bottleneck diagnosis.
+    # Main loop phases:
+    t_drain_ms: float = 0.0          # drain_examples + drain_results from workers
+    t_broadcast_ms: float = 0.0      # broadcast fresh weights to inference server
+    t_sleep_ms: float = 0.0          # yield when buffer is not ready (high = worker-starved)
+    t_iter_ms: float = 0.0           # total wall time per main-loop iteration
+    # train_step phases (CUDA-synchronized so GPU async doesn't lie):
+    t_sample_ms: float = 0.0         # replay buffer sample
+    t_h2d_ms: float = 0.0            # numpy -> tensor -> device transfer
+    t_forward_ms: float = 0.0        # forward pass
+    t_backward_ms: float = 0.0       # backward pass
+    t_optim_ms: float = 0.0          # optimizer step
 
 
 def values_to_wdl_targets(values: np.ndarray) -> np.ndarray:
@@ -179,6 +191,19 @@ class Trainer:
         self._last_checkpoint_time = 0.0
         # (timestamp, generation, games_completed) samples used for windowed rates.
         self._rate_samples: deque[tuple[float, int, int]] = deque()
+        # EMA smoothing factor for per-phase timings.
+        self._timing_alpha = 0.1
+        self._is_cuda = self.device.type == "cuda"
+
+    def _device_sync(self) -> None:
+        """Block until pending GPU work is done. No-op on CPU/MPS."""
+        if self._is_cuda:
+            torch.cuda.synchronize()
+
+    def _ema(self, attr: str, sample_ms: float) -> None:
+        """Exponential moving average update on a TrainStats timing field."""
+        prev = getattr(self.stats, attr)
+        setattr(self.stats, attr, prev + self._timing_alpha * (sample_ms - prev) if prev > 0 else sample_ms)
 
     def _update_rates(self) -> None:
         """Recompute gen/min + games/min over the last `rate_window_seconds`.
@@ -213,12 +238,17 @@ class Trainer:
     def train_step(self) -> dict[str, float]:
         """One gradient step. Samples a batch from the replay buffer and updates weights."""
         self.model.train()
+
+        t0 = time.perf_counter()
         boards_np, policies_np, values_np = self.buffer.sample(self.config.batch_size, self.rng)
+        t1 = time.perf_counter()
 
         x_flat = torch.from_numpy(boards_np).to(self.device)
         x = encoded_to_nchw(x_flat, NUM_PLANES)
         policy_target = torch.from_numpy(policies_np).to(self.device)
         wdl_target = torch.from_numpy(values_to_wdl_targets(values_np)).to(self.device)
+        self._device_sync()
+        t2 = time.perf_counter()
 
         self.optimizer.zero_grad(set_to_none=True)
         pred_policy, pred_wdl = self.model(x)
@@ -226,10 +256,23 @@ class Trainer:
         # Cross-entropy losses (targets sum to 1; pred outputs are softmax-normalized).
         policy_loss = -(policy_target * torch.log(pred_policy.clamp(min=1e-8))).sum(dim=1).mean()
         value_loss = -(wdl_target * torch.log(pred_wdl.clamp(min=1e-8))).sum(dim=1).mean()
-
         total = policy_loss + value_loss
+        self._device_sync()
+        t3 = time.perf_counter()
+
         total.backward()
+        self._device_sync()
+        t4 = time.perf_counter()
+
         self.optimizer.step()
+        self._device_sync()
+        t5 = time.perf_counter()
+
+        self._ema("t_sample_ms", (t1 - t0) * 1000.0)
+        self._ema("t_h2d_ms", (t2 - t1) * 1000.0)
+        self._ema("t_forward_ms", (t3 - t2) * 1000.0)
+        self._ema("t_backward_ms", (t4 - t3) * 1000.0)
+        self._ema("t_optim_ms", (t5 - t4) * 1000.0)
 
         return {
             "policy_loss": policy_loss.item(),
@@ -334,14 +377,18 @@ class Trainer:
                 if num_steps is not None and step >= num_steps:
                     break
                 step += 1
+                iter_start = time.perf_counter()
 
                 # Drain as many training examples as are available right now.
+                t_a = time.perf_counter()
                 drained = self._mp_self_play.drain_examples(self.buffer)
                 examples_since_grad += drained
 
                 # Drain any completed-game outcomes and update the counters.
                 for result in self._mp_self_play.drain_results():
                     self._record_outcome(result.outcome)
+                t_b = time.perf_counter()
+                self._ema("t_drain_ms", (t_b - t_a) * 1000.0)
 
                 # Gradient updates are rate-limited by new-example arrival so
                 # we don't over-train on a thin buffer (classic RL failure
@@ -357,7 +404,9 @@ class Trainer:
                         self.stats.generation += 1
                         # Push fresh weights on a cadence.
                         if self.stats.generation % self.config.weight_broadcast_every == 0:
+                            t_c = time.perf_counter()
                             self._mp_self_play.broadcast_weights(self.model.state_dict())
+                            self._ema("t_broadcast_ms", (time.perf_counter() - t_c) * 1000.0)
                     self.stats.policy_loss = last_losses["policy_loss"]
                     self.stats.value_loss = last_losses["value_loss"]
                     self.stats.total_loss = last_losses["total_loss"]
@@ -365,11 +414,14 @@ class Trainer:
                 else:
                     # Either buffer isn't ready yet, or we're waiting for
                     # fresh examples. Yield so we don't hot-loop.
+                    t_s = time.perf_counter()
                     time.sleep(0.05)
+                    self._ema("t_sleep_ms", (time.perf_counter() - t_s) * 1000.0)
 
                 self.stats.step = step
                 self.stats.replay_size = len(self.buffer)
                 self._update_rates()
+                self._ema("t_iter_ms", (time.perf_counter() - iter_start) * 1000.0)
 
                 if on_step is not None:
                     on_step(self.stats)
