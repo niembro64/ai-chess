@@ -165,6 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-score-threshold", type=float, default=0.54,
                    help="Challenger must exceed this score (wins+0.5*draws "
                         "fraction) to dethrone the champion. 0.54 ≈ +30 Elo.")
+    p.add_argument("--max-plateau-evals", type=int, default=0,
+                   help="Stop training when the challenger has failed to "
+                        "dethrone the champion for this many consecutive "
+                        "evals. 0 disables the plateau detector. Typical: 3.")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", type=str, default=None, help="Path to a .pt checkpoint to resume from.")
@@ -251,6 +255,7 @@ def main() -> None:
         eval_mcts_sims=args.eval_mcts_sims,
         eval_move_cap=args.eval_move_cap,
         eval_score_threshold=args.eval_score_threshold,
+        max_plateau_evals=args.max_plateau_evals,
         log_every_steps=args.log_every,
     )
     trainer = Trainer(model=model, device=device, config=config, rng=random.Random(args.seed))

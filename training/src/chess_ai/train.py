@@ -127,6 +127,11 @@ class TrainConfig:
     # the champion. 0.54 ≈ +30 Elo — enough to be above CI noise with 20-game
     # evals.
     eval_score_threshold: float = 0.54
+    # Stop training after this many consecutive evals where the challenger
+    # failed to dethrone the champion. 0 disables the plateau detector
+    # (training runs indefinitely). Typical: 3 — one bad eval could be
+    # noise, but three in a row is a real plateau.
+    max_plateau_evals: int = 0
     # Logging
     log_every_steps: int = 10
     # Reward shaping
@@ -455,6 +460,8 @@ class Trainer:
         while True:
             if num_steps is not None and step >= num_steps:
                 break
+            if self._stop_requested:
+                break
             step += 1
 
             self.selfplay_step()
@@ -513,6 +520,8 @@ class Trainer:
         try:
             while True:
                 if num_steps is not None and step >= num_steps:
+                    break
+                if self._stop_requested:
                     break
                 step += 1
                 iter_start = time.perf_counter()
@@ -803,6 +812,10 @@ class Trainer:
     def maybe_run_eval(self, ckpt_dir: Path) -> dict | None:
         """Run an eval match if enough generations have passed since the
         previous one. Returns the match summary or None.
+
+        Also consults the plateau stop condition: if max_plateau_evals > 0
+        and the plateau counter reaches that threshold, sets
+        self._stop_requested so the main loop exits cleanly.
         """
         if self.config.eval_every_gens <= 0:
             return None
@@ -812,7 +825,13 @@ class Trainer:
         if gen == 0:
             return None
         self._last_eval_gen = gen
-        return self._run_eval_match(ckpt_dir)
+        result = self._run_eval_match(ckpt_dir)
+        if (
+            self.config.max_plateau_evals > 0
+            and self._plateau_counter >= self.config.max_plateau_evals
+        ):
+            self._stop_requested = True
+        return result
 
     # ------------------------------------------------------------------
     # Checkpointing
