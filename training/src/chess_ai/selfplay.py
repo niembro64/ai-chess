@@ -250,6 +250,74 @@ def _make_game_slot(
     return GameSlot(state=state, move_cap=move_cap, is_standard_start=True)
 
 
+# --- Left-right (file) mirror augmentation ---
+#
+# Chess is symmetric about the file axis, so (board, policy) pairs can be
+# flipped for free. Applied at batch-sample time to avoid storing duplicates.
+
+_MIRROR_POLICY_PERM: np.ndarray | None = None
+
+
+def _compute_mirror_policy_perm() -> np.ndarray:
+    """Precompute the policy-index permutation that maps each move (fr,ff)->(tr,tf)
+    to its file-mirrored counterpart (fr,7-ff)->(tr,7-tf).
+
+    Satisfies: mirrored_policy[i] = original_policy[perm[i]].
+    Because file-mirror is self-inverse, applying `perm` twice yields identity.
+    """
+    perm = np.zeros(POLICY_SIZE, dtype=np.int64)
+    for fr in range(8):
+        for ff in range(8):
+            for tr in range(8):
+                for tf in range(8):
+                    src = (fr * 8 + ff) * 64 + (tr * 8 + tf)
+                    dst = (fr * 8 + (7 - ff)) * 64 + (tr * 8 + (7 - tf))
+                    perm[src] = dst
+    return perm
+
+
+def _get_mirror_policy_perm() -> np.ndarray:
+    global _MIRROR_POLICY_PERM
+    if _MIRROR_POLICY_PERM is None:
+        _MIRROR_POLICY_PERM = _compute_mirror_policy_perm()
+    return _MIRROR_POLICY_PERM
+
+
+def mirror_batch(
+    boards: np.ndarray,
+    policies: np.ndarray,
+    mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (boards, policies) with file-mirror applied to the rows where
+    `mask` is True. Values are unchanged — they're outcome-relative and
+    don't depend on board orientation.
+
+    boards:   [B, 8*8*NUM_PLANES]
+    policies: [B, POLICY_SIZE]
+    mask:     [B] bool
+    """
+    if not mask.any():
+        return boards, policies
+    idx = np.where(mask)[0]
+
+    # Board mirror: flip file axis, then swap the castling-rights plane pairs
+    # (own K-side <-> own Q-side, opp K-side <-> opp Q-side). Piece/EP planes
+    # are spatial so the file flip does the right thing; constant planes
+    # (bias/halfmove/fullmove) are unaffected.
+    b = boards[idx].reshape(-1, 8, 8, NUM_PLANES)
+    b = b[:, :, ::-1, :].copy()
+    b[:, :, :, [15, 16, 17, 18]] = b[:, :, :, [16, 15, 18, 17]]
+    boards = boards.copy()
+    boards[idx] = b.reshape(len(idx), -1)
+
+    # Policy mirror via precomputed permutation.
+    perm = _get_mirror_policy_perm()
+    policies = policies.copy()
+    policies[idx] = policies[idx][:, perm]
+
+    return boards, policies
+
+
 # --- Self-play engine ---
 
 

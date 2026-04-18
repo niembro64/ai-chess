@@ -27,7 +27,7 @@ import torch.nn.functional as F
 
 from .model import NUM_PLANES, WDL_SIZE, ChessNet, encoded_to_nchw
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
-from .selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine
+from .selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine, mirror_batch
 from .weight_io import export_weights
 
 
@@ -60,6 +60,15 @@ class TrainConfig:
     endgame_start_prob: float = 0.0
     random_start_prob: float = 0.3
     temperature_threshold_plies: int = 15
+    # MCTS search hyperparams. Applied via mcts.set_mcts_params() at startup
+    # (and on each MP worker at import time). None = keep module default.
+    c_puct: float | None = None
+    dirichlet_alpha: float | None = None
+    dirichlet_epsilon: float | None = None
+    # Left-right (file) mirror augmentation on sampled batches. Chess is
+    # symmetric about the file axis, so this is a free 2x data multiplier.
+    # 0.0 disables. 0.5 mirrors half the batch each step (standard).
+    mirror_augment_prob: float = 0.5
     # Replay
     replay_buffer_capacity: int = 100_000
     min_buffer_for_training: int = 2_000
@@ -137,6 +146,14 @@ class Trainer:
         self.config = config or TrainConfig()
         self.device = device
         self.model = model.to(device)
+
+        # Apply MCTS hyperparam overrides before self-play starts.
+        from .mcts import set_mcts_params
+        set_mcts_params(
+            c_puct=self.config.c_puct,
+            dirichlet_alpha=self.config.dirichlet_alpha,
+            dirichlet_epsilon=self.config.dirichlet_epsilon,
+        )
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=self.config.learning_rate,
@@ -165,6 +182,9 @@ class Trainer:
                 endgame_start_prob=self.config.endgame_start_prob,
                 random_start_prob=self.config.random_start_prob,
                 temperature_threshold_plies=self.config.temperature_threshold_plies,
+                c_puct=self.config.c_puct,
+                dirichlet_alpha=self.config.dirichlet_alpha,
+                dirichlet_epsilon=self.config.dirichlet_epsilon,
                 rewards=self.config.rewards,
             )
             self._mp_self_play = MultiprocessingSelfPlay(
@@ -244,6 +264,11 @@ class Trainer:
 
         t0 = time.perf_counter()
         boards_np, policies_np, values_np = self.buffer.sample(self.config.batch_size, self.rng)
+        if self.config.mirror_augment_prob > 0:
+            # Use numpy's random state so we don't reseed from a Python
+            # Random; a quick uniform-sample mask is cheap.
+            mask = np.random.random(len(boards_np)) < self.config.mirror_augment_prob
+            boards_np, policies_np = mirror_batch(boards_np, policies_np, mask)
         t1 = time.perf_counter()
 
         x_flat = torch.from_numpy(boards_np).to(self.device)

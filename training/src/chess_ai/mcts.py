@@ -25,6 +25,33 @@ C_PUCT = 1.5
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_EPSILON = 0.25
 
+
+def set_mcts_params(
+    c_puct: float | None = None,
+    dirichlet_alpha: float | None = None,
+    dirichlet_epsilon: float | None = None,
+) -> None:
+    """Override MCTS hyperparams at runtime (before starting self-play).
+
+    Called by Trainer once at startup and by each MP worker at import time
+    so every process uses the same values. Not thread-safe — intended to
+    be called from a single thread before any MCTS search starts.
+
+    c_puct           — PUCT exploration constant in UCB. AlphaZero used 1.0
+                       for Go, ~2 for chess. Higher = more exploration.
+    dirichlet_alpha  — concentration of noise added to the root prior.
+                       ~0.3 for chess (avg ~30 legal moves). Lower = spikier.
+    dirichlet_epsilon — mixing weight: prior = (1-eps)*prior + eps*noise.
+                        0 disables root noise entirely.
+    """
+    global C_PUCT, DIRICHLET_ALPHA, DIRICHLET_EPSILON
+    if c_puct is not None:
+        C_PUCT = c_puct
+    if dirichlet_alpha is not None:
+        DIRICHLET_ALPHA = dirichlet_alpha
+    if dirichlet_epsilon is not None:
+        DIRICHLET_EPSILON = dirichlet_epsilon
+
 # Batched evaluator signature: takes an (B, 8*8*NUM_PLANES) numpy array and
 # returns (policies [B, POLICY_SIZE], values [B] scalar from current-player's
 # perspective). Used by the self-play loop to batch calls to the PyTorch net.

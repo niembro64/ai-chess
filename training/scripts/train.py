@@ -96,6 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Plies from episode start during which move selection "
                         "samples proportional to MCTS visits (τ=1). After this, "
                         "the game commits to argmax (τ→0).")
+    # MCTS hyperparams (optional overrides; None = module default).
+    p.add_argument("--c-puct", type=float, default=None,
+                   help="PUCT exploration constant. Module default: 1.5. "
+                        "Higher = more exploration. AlphaZero chess used ~2.")
+    p.add_argument("--dirichlet-alpha", type=float, default=None,
+                   help="Dirichlet noise concentration at the root. Module "
+                        "default: 0.3. Lower = spikier noise.")
+    p.add_argument("--dirichlet-epsilon", type=float, default=None,
+                   help="Root-noise mixing weight. Module default: 0.25. "
+                        "0 disables Dirichlet noise entirely.")
+    # Data augmentation
+    p.add_argument("--mirror-augment-prob", type=float, default=0.5,
+                   help="Probability of left-right file mirror per sampled "
+                        "batch row. 0 disables. 0.5 = free 2x data multiplier.")
     # Replay
     p.add_argument("--replay-buffer", type=int, default=100_000)
     p.add_argument("--min-buffer", type=int, default=2_000)
@@ -161,6 +175,10 @@ def main() -> None:
         endgame_start_prob=args.endgame_start_prob,
         random_start_prob=args.random_start_prob,
         temperature_threshold_plies=args.temperature_threshold_plies,
+        c_puct=args.c_puct,
+        dirichlet_alpha=args.dirichlet_alpha,
+        dirichlet_epsilon=args.dirichlet_epsilon,
+        mirror_augment_prob=args.mirror_augment_prob,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         replay_buffer_capacity=args.replay_buffer,

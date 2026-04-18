@@ -69,6 +69,11 @@ class MultiprocessingConfig:
     endgame_start_prob: float = 0.0
     random_start_prob: float = 0.3
     temperature_threshold_plies: int = 15
+    # MCTS hyperparams — applied in each worker via set_mcts_params() at
+    # startup. None = use the module defaults in mcts.py.
+    c_puct: float | None = None
+    dirichlet_alpha: float | None = None
+    dirichlet_epsilon: float | None = None
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -209,6 +214,15 @@ def _worker_main(
 ) -> None:
     """Run a self-play loop; NN evals go through the shared inference server."""
     torch.set_num_threads(1)
+
+    # Every worker is its own Python process, so it has its own copy of the
+    # mcts module globals. Re-apply the overrides here.
+    from .mcts import set_mcts_params
+    set_mcts_params(
+        c_puct=config.c_puct,
+        dirichlet_alpha=config.dirichlet_alpha,
+        dirichlet_epsilon=config.dirichlet_epsilon,
+    )
 
     def remote_evaluator(boards: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         request_q.put((worker_id, boards))
