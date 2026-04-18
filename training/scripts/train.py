@@ -82,15 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     # Self-play scheduling
     p.add_argument("--endgame-start-prob", type=float, default=0.0,
                    help="Fraction of new episodes seeded from a theoretical "
-                        "endgame (KQvK, KRvK, KPvK, ...). Curriculum tool: set "
-                        "higher early in training to get dense terminal "
-                        "outcomes, drop to 0 once the network can force mates "
-                        "from the opening.")
+                        "endgame (KQvK, KRvK, KPvK, ...). Curriculum: 0.40 "
+                        "early (bootstrap), 0.15 mid, 0.05 late. Must satisfy "
+                        "endgame_prob + random_prob <= 1.0 (the remainder is "
+                        "standard openings).")
     p.add_argument("--random-start-prob", type=float, default=0.3,
-                   help="Fraction of the REMAINING episodes (after endgame "
-                        "starts) that start from a random mid-/end-game "
-                        "position with a short move cap. The rest start from "
-                        "the standard opening.")
+                   help="Fraction of new episodes that start from a random "
+                        "mid-/end-game position reached by a random walk "
+                        "(short cap). Coverage tool. Single roll with "
+                        "--endgame-start-prob; the remainder is standard "
+                        "openings. Typical: 0.15-0.25.")
     p.add_argument("--temperature-threshold-plies", type=int, default=15,
                    help="Plies from episode start during which move selection "
                         "samples proportional to MCTS visits (τ=1). After this, "

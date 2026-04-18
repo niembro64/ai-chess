@@ -219,29 +219,35 @@ def _make_game_slot(
     random_start_prob: float = 0.3,
     endgame_start_prob: float = 0.0,
 ) -> GameSlot:
-    """Create a fresh game slot.
+    """Create a fresh game slot — single roll over three buckets.
 
-    Selection is a three-way mix:
+    The three init types and their probabilities, each sampled from ONE
+    uniform roll so the fractions sum to 1.0 literally:
+
       * `endgame_start_prob` → simple-endgame curriculum position (KQvK,
-        KRvK, KPvK, ...) with a medium-short cap. Gives dense terminal
-        outcomes early in training.
-      * `random_start_prob` of the remainder → randomized mid-/end-game
-        position via a random walk (coverage of uncommon states).
-      * the rest → standard opening with a long cap (tactical depth).
+        KRvK, KPvK, ...) with a medium-short cap (40-120 plies). Dense
+        terminal outcomes for early training.
+      * `random_start_prob`  → randomized mid-/end-game position via a
+        random walk (coverage of uncommon states), short cap (5-30 plies).
+      * the remainder        → standard opening, long cap (200-400 plies)
+        so real terminal outcomes dominate the value signal.
 
-    Caps are in plies. Standard games get 200-400 plies (100-200 full
-    moves) so real terminal outcomes dominate the value signal rather than
-    cap timeouts.
+    If `endgame_start_prob + random_start_prob > 1.0` the standard bucket
+    is simply empty (the split is clamped by the roll's upper bound, not
+    by renormalization).
     """
     roll = rng.random()
     if roll < endgame_start_prob:
         state = _endgame_start(rng)
         move_cap = rng.randint(40, 120)
         return GameSlot(state=state, move_cap=move_cap, is_standard_start=False)
-    is_random = rng.random() < random_start_prob
-    state = _random_start(rng) if is_random else _normal_start()
-    move_cap = rng.randint(5, 30) if is_random else rng.randint(200, 400)
-    return GameSlot(state=state, move_cap=move_cap, is_standard_start=not is_random)
+    if roll < endgame_start_prob + random_start_prob:
+        state = _random_start(rng)
+        move_cap = rng.randint(5, 30)
+        return GameSlot(state=state, move_cap=move_cap, is_standard_start=False)
+    state = _normal_start()
+    move_cap = rng.randint(200, 400)
+    return GameSlot(state=state, move_cap=move_cap, is_standard_start=True)
 
 
 # --- Self-play engine ---
