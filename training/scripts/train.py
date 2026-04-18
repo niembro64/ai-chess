@@ -150,6 +150,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-archives", type=int, default=20,
                    help="Max retained archive snapshots; oldest are deleted "
                         "as new ones are written. 0 = unlimited.")
+    # Auto-eval
+    p.add_argument("--eval-every-gens", type=int, default=0,
+                   help="Every N gradient updates, pause training and play a "
+                        "tournament vs the reigning champion.pt. 0 disables "
+                        "auto-eval entirely.")
+    p.add_argument("--eval-games", type=int, default=20,
+                   help="Games per eval tournament (alternating colors).")
+    p.add_argument("--eval-mcts-sims", type=int, default=30,
+                   help="MCTS simulations per move during eval (typically "
+                        "lower than training sims to keep eval fast).")
+    p.add_argument("--eval-move-cap", type=int, default=200,
+                   help="Ply cap per eval game before it's called a draw.")
+    p.add_argument("--eval-score-threshold", type=float, default=0.54,
+                   help="Challenger must exceed this score (wins+0.5*draws "
+                        "fraction) to dethrone the champion. 0.54 ≈ +30 Elo.")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", type=str, default=None, help="Path to a .pt checkpoint to resume from.")
@@ -231,6 +246,11 @@ def main() -> None:
         checkpoint_every_seconds=args.checkpoint_every,
         archive_every_gens=args.archive_every_gens,
         keep_archives=args.keep_archives,
+        eval_every_gens=args.eval_every_gens,
+        eval_games=args.eval_games,
+        eval_mcts_sims=args.eval_mcts_sims,
+        eval_move_cap=args.eval_move_cap,
+        eval_score_threshold=args.eval_score_threshold,
         log_every_steps=args.log_every,
     )
     trainer = Trainer(model=model, device=device, config=config, rng=random.Random(args.seed))

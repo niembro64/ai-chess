@@ -116,6 +116,17 @@ class TrainConfig:
     # Cap on retained archives (oldest are deleted as new ones are written).
     # 0 = unlimited.
     keep_archives: int = 20
+    # Auto-eval cadence. Every N gradient updates we pause training and play
+    # a small tournament against the reigning "champion" checkpoint. 0
+    # disables auto-eval.
+    eval_every_gens: int = 0
+    eval_games: int = 20
+    eval_mcts_sims: int = 30
+    eval_move_cap: int = 200
+    # Score (wins + 0.5*draws) / total the challenger must exceed to dethrone
+    # the champion. 0.54 ≈ +30 Elo — enough to be above CI noise with 20-game
+    # evals.
+    eval_score_threshold: float = 0.54
     # Logging
     log_every_steps: int = 10
     # Reward shaping
@@ -261,6 +272,15 @@ class Trainer:
         self._start_time = time.time()
         self._last_checkpoint_time = 0.0
         self._last_archive_gen = 0
+        # Auto-eval state.
+        self._last_eval_gen = 0
+        self._champion_model: ChessNet | None = None
+        self._champion_gen = 0
+        self._plateau_counter = 0
+        self._eval_history: list[dict] = []
+        # Set by the plateau detector (committed separately) to request a
+        # clean shutdown on the next main-loop iteration.
+        self._stop_requested = False
         # (timestamp, generation, games_completed) samples used for windowed rates.
         self._rate_samples: deque[tuple[float, int, int]] = deque()
         # EMA smoothing factor for per-phase timings.
@@ -469,6 +489,7 @@ class Trainer:
                 self._last_checkpoint_time = time.time()
             if ckpt_dir is not None:
                 self.maybe_archive_checkpoint(ckpt_dir)
+                self.maybe_run_eval(ckpt_dir)
 
     def _run_mp(
         self,
@@ -590,6 +611,212 @@ class Trainer:
             json.dump(weights, f)
 
         return {"pt": pt_path, "json": json_path}
+
+    # ------------------------------------------------------------------
+    # Auto-eval vs champion
+    # ------------------------------------------------------------------
+
+    def _save_champion(self, ckpt_dir: Path, gen: int) -> None:
+        """Copy current model weights into `ckpt_dir / champion.pt` and note
+        the generation.
+        """
+        payload = {
+            "model_state_dict": self.model.state_dict(),
+            "model_arch": {
+                "num_res_blocks": self.model.num_res_blocks,
+                "num_filters": self.model.num_filters,
+                "kernel_size": self.model.kernel_size,
+                "value_head_size": self.model.value_head_size,
+                "se_reduction": self.model.se_reduction,
+            },
+            "champion_gen": gen,
+        }
+        torch.save(payload, ckpt_dir / "champion.pt")
+        self._champion_gen = gen
+
+    def _load_champion_model(self, ckpt_dir: Path) -> ChessNet:
+        """Instantiate a ChessNet matching the saved champion and load its
+        weights. Cached on self._champion_model for reuse across evals.
+        """
+        path = ckpt_dir / "champion.pt"
+        state = torch.load(path, map_location=self.device)
+        arch = state["model_arch"]
+        champ = ChessNet(**arch).to(self.device)
+        champ.load_state_dict(state["model_state_dict"])
+        champ.eval()
+        self._champion_gen = int(state.get("champion_gen", 0))
+        return champ
+
+    def _make_model_evaluator(self, m: ChessNet):
+        """Return a batched MCTS-style evaluator bound to the given model."""
+        from .selfplay import make_pytorch_evaluator
+        return make_pytorch_evaluator(m, self.device)
+
+    def _play_eval_game(
+        self,
+        challenger_eval,
+        champion_eval,
+        challenger_plays_white: bool,
+        mcts_sims: int,
+        move_cap: int,
+    ) -> str:
+        """One eval game. Returns "challenger", "champion", or "draw"."""
+        from .engine import apply_move, create_initial_game_state
+        from .mcts import run_batched_mcts
+
+        state = create_initial_game_state()
+        state.status = "active"
+        moves_played = 0
+        while True:
+            if state.status in ("checkmate", "stalemate", "draw"):
+                break
+            if moves_played >= move_cap:
+                return "draw"
+            if state.currentTurn == "white":
+                ev = challenger_eval if challenger_plays_white else champion_eval
+            else:
+                ev = champion_eval if challenger_plays_white else challenger_eval
+            # Greedy play: τ=0 (argmax visits).
+            result = run_batched_mcts([state], ev, mcts_sims, self.rng, temperatures=[0.0])
+            state = apply_move(state, result[0].move)
+            moves_played += 1
+
+        if state.status == "checkmate":
+            loser = state.currentTurn
+            winner_color = "white" if loser == "black" else "black"
+            winner_is_white = winner_color == "white"
+            winner_is_challenger = winner_is_white == challenger_plays_white
+            return "challenger" if winner_is_challenger else "champion"
+        return "draw"
+
+    def _run_eval_match(self, ckpt_dir: Path) -> dict:
+        """Play `eval_games` games vs the champion, alternating colors.
+
+        Updates the champion and resets the plateau counter if the challenger
+        clears `eval_score_threshold`. Returns a summary dict and appends it
+        to self._eval_history + eval.csv.
+        """
+        import csv
+        import math
+
+        gen = self.stats.generation
+        champ_path = ckpt_dir / "champion.pt"
+
+        # Bootstrap: if no champion exists yet, crown the current model and
+        # skip the match (we can't evaluate against ourselves).
+        if not champ_path.exists():
+            self._save_champion(ckpt_dir, gen)
+            result = {
+                "gen": gen,
+                "champion_gen": gen,
+                "games": 0,
+                "wins": 0,
+                "draws": 0,
+                "losses": 0,
+                "score": 0.5,
+                "elo_diff": 0.0,
+                "new_champion": True,
+                "plateau_counter": 0,
+                "note": "bootstrap",
+            }
+            self._eval_history.append(result)
+            return result
+
+        # Load (or reload) champion. Reload whenever it changed.
+        if self._champion_model is None or self._champion_gen_on_disk(ckpt_dir) != self._champion_gen:
+            self._champion_model = self._load_champion_model(ckpt_dir)
+
+        # Flip current model to eval for the match so BN uses running stats.
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            challenger_eval = self._make_model_evaluator(self.model)
+            champion_eval = self._make_model_evaluator(self._champion_model)
+
+            wins = draws = losses = 0
+            for g in range(self.config.eval_games):
+                challenger_white = (g % 2 == 0)
+                outcome = self._play_eval_game(
+                    challenger_eval,
+                    champion_eval,
+                    challenger_white,
+                    self.config.eval_mcts_sims,
+                    self.config.eval_move_cap,
+                )
+                if outcome == "challenger":
+                    wins += 1
+                elif outcome == "champion":
+                    losses += 1
+                else:
+                    draws += 1
+        finally:
+            if was_training:
+                self.model.train()
+
+        total = wins + draws + losses
+        score = (wins + 0.5 * draws) / max(1, total)
+        # Clamp before the logit to avoid infinities at boundaries.
+        s = max(0.01, min(0.99, score))
+        elo_diff = -400.0 * math.log10(1.0 / s - 1.0)
+
+        new_champion = score >= self.config.eval_score_threshold
+        if new_champion:
+            self._save_champion(ckpt_dir, gen)
+            self._champion_model = None  # force reload next eval
+            self._plateau_counter = 0
+        else:
+            self._plateau_counter += 1
+
+        result = {
+            "gen": gen,
+            "champion_gen": self._champion_gen,
+            "games": total,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "score": round(score, 4),
+            "elo_diff": round(elo_diff, 1),
+            "new_champion": new_champion,
+            "plateau_counter": self._plateau_counter,
+        }
+        self._eval_history.append(result)
+
+        # Append to eval.csv.
+        csv_path = ckpt_dir / "eval.csv"
+        write_header = not csv_path.exists()
+        with csv_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(result.keys()))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(result)
+
+        return result
+
+    def _champion_gen_on_disk(self, ckpt_dir: Path) -> int:
+        """Peek at champion.pt's champion_gen without loading weights."""
+        try:
+            state = torch.load(ckpt_dir / "champion.pt", map_location="cpu")
+            return int(state.get("champion_gen", 0))
+        except Exception:
+            return 0
+
+    def maybe_run_eval(self, ckpt_dir: Path) -> dict | None:
+        """Run an eval match if enough generations have passed since the
+        previous one. Returns the match summary or None.
+        """
+        if self.config.eval_every_gens <= 0:
+            return None
+        gen = self.stats.generation
+        if gen - self._last_eval_gen < self.config.eval_every_gens:
+            return None
+        if gen == 0:
+            return None
+        self._last_eval_gen = gen
+        return self._run_eval_match(ckpt_dir)
+
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
 
     def maybe_archive_checkpoint(self, ckpt_dir: Path) -> Path | None:
         """Write `archive/gen-<N>.pt` when the generation cadence says it's time.
