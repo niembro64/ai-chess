@@ -26,7 +26,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .model import NUM_PLANES, WDL_SIZE, ChessNet, encoded_to_nchw
+from .model import (
+    NUM_PLANES,
+    WDL_SIZE,
+    ChessNet,
+    MaterialAuxHead,
+    encoded_to_nchw,
+    material_target_from_board,
+)
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
 from .selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine, mirror_batch
 from .weight_io import export_weights
@@ -79,6 +86,11 @@ class TrainConfig:
     # probability to exactly 0 on moves the current search didn't visit.
     # Typical: 0.0-0.03. 0 disables.
     policy_label_smoothing: float = 0.0
+    # Auxiliary head (KataGo-style): material balance prediction. Lives
+    # outside ChessNet so browser weights are unchanged. Multi-task
+    # training gives the trunk dense gradient signal on a quantity the
+    # main heads also need. 0 disables the aux head + loss entirely.
+    aux_material_weight: float = 0.1
     # Replay
     replay_buffer_capacity: int = 100_000
     min_buffer_for_training: int = 2_000
@@ -131,6 +143,8 @@ class TrainStats:
     t_forward_ms: float = 0.0        # forward pass
     t_backward_ms: float = 0.0       # backward pass
     t_optim_ms: float = 0.0          # optimizer step
+    # Aux head losses (0 when the head isn't active).
+    aux_material_loss: float = 0.0
 
 
 def values_to_wdl_targets(values: np.ndarray) -> np.ndarray:
@@ -164,8 +178,18 @@ class Trainer:
             dirichlet_alpha=self.config.dirichlet_alpha,
             dirichlet_epsilon=self.config.dirichlet_epsilon,
         )
+
+        # Optional material aux head (KataGo-style). Only instantiated when
+        # aux_material_weight > 0 so inference-only setups pay nothing.
+        self.aux_material: MaterialAuxHead | None = None
+        if self.config.aux_material_weight > 0:
+            self.aux_material = MaterialAuxHead(model.num_filters).to(device)
+
+        params_to_optimize = list(model.parameters())
+        if self.aux_material is not None:
+            params_to_optimize += list(self.aux_material.parameters())
         self.optimizer = torch.optim.AdamW(
-            model.parameters(),
+            params_to_optimize,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
@@ -307,11 +331,23 @@ class Trainer:
             else _nullcontext()
         )
         with amp_ctx:
-            pred_policy, pred_wdl = self.model(x)
+            h = self.model.trunk_features(x)
+            pred_policy, pred_wdl = self.model.heads(h)
             # Cross-entropy losses (targets sum to 1; pred outputs are softmax-normalized).
             policy_loss = -(policy_target * torch.log(pred_policy.clamp(min=1e-8))).sum(dim=1).mean()
             value_loss = -(wdl_target * torch.log(pred_wdl.clamp(min=1e-8))).sum(dim=1).mean()
             total = policy_loss + value_loss
+
+            # Auxiliary material head: MSE against material balance computed
+            # directly from the input tensor. Shares the trunk; its gradient
+            # flows back through the residual tower.
+            aux_material_loss = torch.tensor(0.0, device=self.device)
+            if self.aux_material is not None and self.config.aux_material_weight > 0:
+                # Target is fp32 regardless of AMP; the head output cast is fine.
+                mat_target = material_target_from_board(x.float())
+                mat_pred = self.aux_material(h)
+                aux_material_loss = F.mse_loss(mat_pred.float(), mat_target)
+                total = total + self.config.aux_material_weight * aux_material_loss
         self._device_sync()
         t3 = time.perf_counter()
 
@@ -340,6 +376,7 @@ class Trainer:
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
             "total_loss": total.item(),
+            "aux_material_loss": float(aux_material_loss.item()) if self.aux_material is not None else 0.0,
         }
 
     def selfplay_step(self) -> None:
@@ -401,6 +438,7 @@ class Trainer:
                 self.stats.policy_loss = last_losses["policy_loss"]
                 self.stats.value_loss = last_losses["value_loss"]
                 self.stats.total_loss = last_losses["total_loss"]
+                self.stats.aux_material_loss = last_losses.get("aux_material_loss", 0.0)
                 examples_since_grad = 0
 
             self.stats.step = step
@@ -505,25 +543,27 @@ class Trainer:
         pt_path = directory / "latest.pt"
         json_path = directory / "latest.json"
 
-        torch.save(
-            {
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "stats": self.stats.__dict__,
-                "config": self.config.__dict__,
-                # Model architecture, so the checkpoint is self-describing for
-                # downstream tools (compare_checkpoints, deploy_to_browser) and
-                # we don't need to re-pass --num-filters etc. on the CLI.
-                "model_arch": {
-                    "num_res_blocks": self.model.num_res_blocks,
-                    "num_filters": self.model.num_filters,
-                    "kernel_size": self.model.kernel_size,
-                    "value_head_size": self.model.value_head_size,
-                    "se_reduction": self.model.se_reduction,
-                },
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "stats": self.stats.__dict__,
+            "config": self.config.__dict__,
+            # Model architecture, so the checkpoint is self-describing for
+            # downstream tools (compare_checkpoints, deploy_to_browser) and
+            # we don't need to re-pass --num-filters etc. on the CLI.
+            "model_arch": {
+                "num_res_blocks": self.model.num_res_blocks,
+                "num_filters": self.model.num_filters,
+                "kernel_size": self.model.kernel_size,
+                "value_head_size": self.model.value_head_size,
+                "se_reduction": self.model.se_reduction,
             },
-            pt_path,
-        )
+        }
+        # Aux heads are saved separately so they can be absent without
+        # breaking ChessNet's own state-dict strictness.
+        if self.aux_material is not None:
+            checkpoint["aux_material_state_dict"] = self.aux_material.state_dict()
+        torch.save(checkpoint, pt_path)
 
         self.model.eval()
         weights = export_weights(self.model, learning_rate=self.config.learning_rate)
@@ -535,6 +575,8 @@ class Trainer:
     def load_checkpoint(self, path: str | Path) -> None:
         state = torch.load(Path(path), map_location=self.device)
         self.model.load_state_dict(state["model_state_dict"])
+        if self.aux_material is not None and "aux_material_state_dict" in state:
+            self.aux_material.load_state_dict(state["aux_material_state_dict"])
         if "optimizer_state_dict" in state:
             self.optimizer.load_state_dict(state["optimizer_state_dict"])
 

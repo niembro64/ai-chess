@@ -119,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Epsilon for uniform smoothing on the MCTS policy "
                         "target. 0.01-0.03 prevents the policy head from "
                         "collapsing to zero on unvisited moves. 0 disables.")
+    p.add_argument("--aux-material-weight", type=float, default=0.1,
+                   help="Weight on the auxiliary material-balance head loss. "
+                        "KataGo-style multi-task training: dense gradient "
+                        "signal on the trunk without polluting value/policy. "
+                        "0 disables the aux head entirely.")
     # Replay
     p.add_argument("--replay-buffer", type=int, default=100_000)
     p.add_argument("--min-buffer", type=int, default=2_000)
@@ -190,6 +195,7 @@ def main() -> None:
         mirror_augment_prob=args.mirror_augment_prob,
         use_amp=args.use_amp,
         policy_label_smoothing=args.policy_label_smoothing,
+        aux_material_weight=args.aux_material_weight,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         replay_buffer_capacity=args.replay_buffer,

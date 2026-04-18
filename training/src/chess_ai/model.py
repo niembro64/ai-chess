@@ -106,12 +106,15 @@ class ChessNet(nn.Module):
         self.value_fc1 = nn.Linear(64, value_head_size)
         self.value_fc2 = nn.Linear(value_head_size, wdl_size)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """x: [B, num_planes, 8, 8]. Returns (policy_probs [B, 4096], wdl_probs [B, 3])."""
+    def trunk_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the shared trunk (init conv + residual tower). [B, num_planes, 8, 8] -> [B, num_filters, 8, 8]."""
         h = F.relu(self.init_bn(self.init_conv(x)), inplace=True)
         for rb in self.res_blocks:
             h = rb(h)
+        return h
 
+    def heads(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute (policy_probs, wdl_probs) from trunk features."""
         # Policy head. Permute to NHWC before flatten so index ordering matches TF.js.
         p = self.policy_conv(h)              # [B, 64, 8, 8]
         p = p.permute(0, 2, 3, 1).contiguous()  # [B, 8, 8, 64]
@@ -127,6 +130,53 @@ class ChessNet(nn.Module):
         wdl = F.softmax(v, dim=1)
 
         return policy, wdl
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """x: [B, num_planes, 8, 8]. Returns (policy_probs [B, 4096], wdl_probs [B, 3])."""
+        return self.heads(self.trunk_features(x))
+
+
+class MaterialAuxHead(nn.Module):
+    """KataGo-style auxiliary head: predicts material balance from trunk features.
+
+    Lives OUTSIDE ChessNet so the browser's SerializedWeights format (which is
+    TF.js-compatible and index-sensitive) stays untouched. The head consumes
+    the shared trunk's output spatial features via global avg pool + linear.
+
+    Material target is computed from the input tensor itself during training
+    — no replay-buffer schema change needed.
+    """
+
+    def __init__(self, num_filters: int):
+        super().__init__()
+        self.fc = nn.Linear(num_filters, 1)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """h: [B, num_filters, 8, 8] -> [B] predicted material balance in [-1, 1]-ish."""
+        pooled = h.mean(dim=(2, 3))           # [B, num_filters]
+        return self.fc(pooled).squeeze(-1)    # [B]
+
+
+# Piece values (K Q R B N P) matching the encoding's own/opp plane order.
+# King = 0 so it cancels in the difference. Queen 9, Rook 5, Bishop 3, Knight 3, Pawn 1.
+# Per-side max = 9 + 10 + 6 + 6 + 8 = 39.
+_PIECE_VALUES = torch.tensor([0.0, 9.0, 5.0, 3.0, 3.0, 1.0], dtype=torch.float32)
+_MAX_MATERIAL = 39.0
+
+
+def material_target_from_board(x: torch.Tensor) -> torch.Tensor:
+    """Compute per-position material balance from the encoded board.
+
+    x: [B, num_planes, 8, 8] in NCHW (what ChessNet expects).
+    Planes 0-5 are own pieces (K Q R B N P), 6-11 are opponent pieces.
+    Returns [B] in approximately [-1, 1].
+    """
+    values = _PIECE_VALUES.to(x.device)
+    own_counts = x[:, 0:6, :, :].sum(dim=(2, 3))    # [B, 6]
+    opp_counts = x[:, 6:12, :, :].sum(dim=(2, 3))   # [B, 6]
+    own_material = (own_counts * values).sum(dim=1)
+    opp_material = (opp_counts * values).sum(dim=1)
+    return (own_material - opp_material) / _MAX_MATERIAL
 
 
 def encoded_to_nchw(encoded: torch.Tensor, num_planes: int = NUM_PLANES) -> torch.Tensor:
