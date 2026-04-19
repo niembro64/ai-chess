@@ -43,7 +43,7 @@ _LOSS_HISTORY_POINTS = 500
 
 CSV_FIELDS = (
     "time", "step", "gen", "target_gens", "games",
-    "white_wins", "black_wins", "draws", "caps",
+    "white_wins", "black_wins", "draws", "caps", "tb_adjudications",
     "gen_per_min", "games_per_min", "replay_size",
     "eta_seconds",
     "policy_loss", "value_loss", "total_loss",
@@ -211,6 +211,7 @@ class DashboardLogger:
                 "black_wins": stats.black_wins,
                 "draws": stats.draws,
                 "caps": getattr(stats, "caps", 0),
+                "tb_adjudications": getattr(stats, "tb_adjudications", 0),
                 "gen_per_min": round(getattr(stats, "gen_per_min", 0.0), 2),
                 "games_per_min": round(stats.games_per_min, 2),
                 "replay_size": stats.replay_size,
@@ -332,6 +333,7 @@ class DashboardLogger:
         b = getattr(stats, "black_wins", 0) if stats else 0
         d = getattr(stats, "draws", 0) if stats else 0
         c = getattr(stats, "caps", 0) if stats else 0
+        tb = getattr(stats, "tb_adjudications", 0) if stats else 0
         real_total = w + b + d + c
         total = max(1, real_total)
 
@@ -350,13 +352,18 @@ class DashboardLogger:
         table.add_column(width=6, justify="right")
         table.add_column(width=8, justify="right")
         table.add_column(ratio=1)
-        # W / B = checkmate. D = true draw (stalemate, 50-move rule).
-        # Cap = hit the move-cap timeout before anything decisive.
+        # W / B include both real checkmates and Syzygy-adjudicated cap outcomes.
+        # The "tb:" counter in the title shows how many of the W/B/D totals
+        # were Syzygy-sourced.
         table.add_row(*row("W", w, "green"))
         table.add_row(*row("B", b, "red"))
         table.add_row(*row("D", d, "yellow"))
         table.add_row(*row("Cap", c, "cyan"))
-        return Panel(table, title=f"outcomes  (n={real_total})", border_style="blue")
+        title = f"outcomes  (n={real_total}"
+        if tb:
+            title += f", tb-adjudicated={tb}"
+        title += ")"
+        return Panel(table, title=title, border_style="blue")
 
     def _timings_panel(self, stats) -> Panel:
         """EMA-smoothed per-phase durations for bottleneck diagnosis (ms)."""

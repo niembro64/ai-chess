@@ -148,6 +148,7 @@ class TrainStats:
     black_wins: int = 0
     draws: int = 0                   # Stalemate / 50-move / actual draw only
     caps: int = 0                    # Hit move-cap before anything decisive
+    tb_adjudications: int = 0        # Of the W/B/D totals above, how many came from Syzygy
     policy_loss: float = 0.0
     value_loss: float = 0.0
     total_loss: float = 0.0
@@ -424,9 +425,9 @@ class Trainer:
         self.model.eval()
         finished = self.engine.step()
         for r in finished:
-            self._record_outcome(r.outcome)
+            self._record_outcome(r.outcome, getattr(r, "tb_adjudicated", False))
 
-    def _record_outcome(self, outcome: str) -> None:
+    def _record_outcome(self, outcome: str, tb_adjudicated: bool = False) -> None:
         if outcome == "white":
             self.stats.white_wins += 1
         elif outcome == "black":
@@ -437,6 +438,8 @@ class Trainer:
             # "draw" or "stalemate" — anything decisive that isn't a
             # checkmate or a move-cap timeout.
             self.stats.draws += 1
+        if tb_adjudicated:
+            self.stats.tb_adjudications += 1
         self.stats.games_completed += 1
 
     def run(
@@ -533,7 +536,7 @@ class Trainer:
 
                 # Drain any completed-game outcomes and update the counters.
                 for result in self._mp_self_play.drain_results():
-                    self._record_outcome(result.outcome)
+                    self._record_outcome(result.outcome, getattr(result, "tb_adjudicated", False))
                 t_b = time.perf_counter()
                 self._ema("t_drain_ms", (t_b - t_a) * 1000.0)
 

@@ -66,6 +66,7 @@ class GameResult:
     outcome: str              # "white", "black", "draw", "cap"
     outcome_label: str        # human string for logging
     white_outcome: float      # [-1, 1]
+    tb_adjudicated: bool = False  # True when the outcome came from Syzygy
 
 
 # --- Replay buffer (ring, fixed capacity) ---
@@ -407,6 +408,10 @@ class SelfPlayEngine:
         self.black_wins = 0
         self.draws = 0
         self.caps = 0
+        # Count of games where Syzygy adjudicated a cap into a real outcome.
+        # Reported separately from W/B/D so you can see how much lift the
+        # tablebase is giving. Included as a tag in GameResult.
+        self.tb_adjudications = 0
         self.recent_game_lengths: list[int] = []
 
     def step(self) -> list[GameResult]:
@@ -472,6 +477,7 @@ class SelfPlayEngine:
             "stalemate",
             "draw",
         )
+        tb_adjudicated = False
 
         if slot.state.status == "checkmate":
             # The CURRENT player (after the winning move was applied) has no moves.
@@ -489,20 +495,35 @@ class SelfPlayEngine:
             # plies. If a Syzygy tablebase is configured AND the remaining
             # piece count is within its range, we can score the position by
             # its theoretical result under optimal play — a much cleaner
-            # training signal than calling it 0.
+            # training signal than calling it 0. Tablebase-adjudicated games
+            # are reclassified into white/black/draw so they show up in the
+            # dashboard W/B/D panels, not lumped under "Cap". (Cap stays
+            # reserved for games we genuinely have no signal on.)
             tb_result = tablebase.probe_outcome(slot.state)
             if tb_result is not None:
                 stm = slot.state.currentTurn
                 # tb_result is from the side-to-move's perspective. Convert to
                 # white's perspective for the outcome convention used here.
                 white_outcome = float(tb_result if stm == "white" else -tb_result)
-                outcome = "cap"
-                label = f"cap-tb ({'W' if white_outcome > 0 else 'B' if white_outcome < 0 else 'D'})"
+                if white_outcome > 0:
+                    outcome = "white"
+                    label = "cap → W (tb)"
+                    self.white_wins += 1
+                elif white_outcome < 0:
+                    outcome = "black"
+                    label = "cap → B (tb)"
+                    self.black_wins += 1
+                else:
+                    outcome = "draw"
+                    label = "cap → D (tb)"
+                    self.draws += 1
+                self.tb_adjudications += 1
+                tb_adjudicated = True
             else:
                 white_outcome = 0.0
                 outcome = "cap"
                 label = "cap"
-            self.caps += 1
+                self.caps += 1
         else:
             white_outcome = 0.0
             outcome = "draw"
@@ -527,4 +548,5 @@ class SelfPlayEngine:
             outcome=outcome,
             outcome_label=label,
             white_outcome=white_outcome,
+            tb_adjudicated=tb_adjudicated,
         )
