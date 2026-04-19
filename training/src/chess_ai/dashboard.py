@@ -330,7 +330,7 @@ class DashboardLogger:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="top", size=9),
-            Layout(name="middle", size=15),
+            Layout(name="middle", size=19),
             Layout(name="timings", size=9),
             Layout(name="loss"),
             Layout(name="events", size=10),
@@ -538,7 +538,60 @@ class DashboardLogger:
         title = (
             f"outcomes  (n={total_actual:,}, decisive={decisive_frac:.1f}%)"
         )
-        return Panel(table, title=title, border_style="blue")
+
+        # Per-origin breakdown. Skipped when the run is single-origin (e.g.
+        # endgame_start_prob=0 and random_start_prob=0) so we don't waste
+        # rows on a redundant view. Rendered as free-form Text lines below
+        # the table (escaping the 4-column grid so the metrics don't wrap).
+        origin_stats = getattr(stats, "origin_outcomes", None) if stats is not None else None
+        nonempty_origins: list[tuple[str, dict[str, int]]] = []
+        if origin_stats:
+            for name in ("standard", "endgame", "random"):
+                d = origin_stats.get(name)
+                if d and sum(d.values()) > 0:
+                    nonempty_origins.append((name, d))
+
+        if len(nonempty_origins) <= 1:
+            return Panel(table, title=title, border_style="blue")
+
+        origin_lines = [
+            Text(
+                "by origin  (natural mate vs tb-adjudicated)",
+                style="dim italic",
+            )
+        ]
+        for name, d in nonempty_origins:
+            o_total = max(1, sum(d.values()))
+            mates = d["mate_w"] + d["mate_b"]
+            tbs = d["tb_w"] + d["tb_b"] + d["tb_d"]
+            mate_pct = mates / o_total * 100
+            tb_pct = tbs / o_total * 100
+            # Conversion ratio: of all decisive games, how many were
+            # natural mates vs tb-adjudicated. High = model converting on
+            # its own; low = value head is freeloading on Syzygy.
+            decisive_o = mates + d["tb_w"] + d["tb_b"]
+            conv = (mates / decisive_o * 100) if decisive_o > 0 else 0.0
+            origin_lines.append(
+                Text.assemble(
+                    (f"  {name:<10}", "bright_white"),
+                    (f"{o_total:>6,}  ", "white"),
+                    ("mate ", "dim"),
+                    (f"{mate_pct:4.1f}%", "bright_green" if mate_pct >= 20 else "yellow"),
+                    ("  tb ", "dim"),
+                    (f"{tb_pct:4.1f}%", "cyan"),
+                    ("  conv ", "dim"),
+                    (
+                        f"{conv:4.1f}%",
+                        "bright_green" if conv >= 50 else "yellow" if conv >= 20 else "red",
+                    ),
+                )
+            )
+
+        return Panel(
+            Group(table, *origin_lines),
+            title=title,
+            border_style="blue",
+        )
 
     def _eval_panel(self) -> Panel:
         """Auto-eval match history + plateau status.

@@ -58,6 +58,11 @@ class GameSlot:
     move_count: int = 0
     move_cap: int = 100
     is_standard_start: bool = False
+    # How the game was initialized. Used to split outcome stats so we can
+    # tell whether the endgame curriculum is producing real play signal
+    # (mate_w/mate_b) vs mostly tablebase-distilled labels (tb_w/tb_b).
+    # One of: "standard" | "endgame" | "random".
+    origin: str = "standard"
 
 
 @dataclass
@@ -77,6 +82,7 @@ class GameResult:
     outcome_label: str        # human string for logging
     white_outcome: float      # [-1, 1]
     tb_adjudicated: bool = False  # True iff outcome came from Syzygy
+    origin: str = "standard"  # propagated from GameSlot; see above
 
 
 # --- Replay buffer (ring, fixed capacity) ---
@@ -252,14 +258,14 @@ def _make_game_slot(
     if roll < endgame_start_prob:
         state = _endgame_start(rng)
         move_cap = rng.randint(40, 120)
-        return GameSlot(state=state, move_cap=move_cap, is_standard_start=False)
+        return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="endgame")
     if roll < endgame_start_prob + random_start_prob:
         state = _random_start(rng)
         move_cap = rng.randint(5, 30)
-        return GameSlot(state=state, move_cap=move_cap, is_standard_start=False)
+        return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="random")
     state = _normal_start()
     move_cap = rng.randint(200, 400)
-    return GameSlot(state=state, move_cap=move_cap, is_standard_start=True)
+    return GameSlot(state=state, move_cap=move_cap, is_standard_start=True, origin="standard")
 
 
 # --- Left-right (file) mirror augmentation ---
@@ -565,4 +571,5 @@ class SelfPlayEngine:
             outcome_label=label,
             white_outcome=white_outcome,
             tb_adjudicated=tb_adjudicated,
+            origin=slot.origin,
         )

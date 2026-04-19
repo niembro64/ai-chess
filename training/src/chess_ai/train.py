@@ -211,6 +211,22 @@ class TrainStats:
         """All cap-timeouts adjudicated via Syzygy (any outcome)."""
         return self.tb_w + self.tb_b + self.tb_d
 
+    # --- Per-origin breakdown -------------------------------------------
+    # Same 8 outcome buckets, split three ways by how the game was
+    # initialized. Useful for answering "are my endgame inits producing
+    # real play signal, or mostly tablebase-distilled labels?" — see
+    # selfplay.GameSlot.origin. The sum across origins equals the global
+    # aggregate for each bucket.
+    origin_outcomes: dict[str, dict[str, int]] = field(default_factory=lambda: {
+        origin: {
+            "mate_w": 0, "mate_b": 0,
+            "stalemate": 0, "draw_50": 0,
+            "tb_w": 0, "tb_b": 0, "tb_d": 0,
+            "cap": 0,
+        }
+        for origin in ("standard", "endgame", "random")
+    })
+
 
 def values_to_wdl_targets(values: np.ndarray) -> np.ndarray:
     """Convert continuous values ∈ [-1, 1] to WDL targets [P(win), P(draw), P(loss)].
@@ -462,14 +478,12 @@ class Trainer:
         self.model.eval()
         finished = self.engine.step()
         for r in finished:
-            self._record_outcome(r.outcome, getattr(r, "tb_adjudicated", False))
+            self._record_outcome(r.outcome, getattr(r, "origin", "standard"))
 
-    def _record_outcome(self, outcome: str, tb_adjudicated: bool = False) -> None:
+    def _record_outcome(self, outcome: str, origin: str = "standard") -> None:
         # Dispatch on the granular outcome label. See selfplay.GameResult for
-        # the full set. `tb_adjudicated` is left on the signature for call
-        # sites that still pass it — it's redundant with outcome now
-        # (tb_w/tb_b/tb_d already imply the Syzygy source) but harmless.
-        _ = tb_adjudicated
+        # the full set. `origin` selects which per-origin sub-bucket to
+        # increment alongside the global counter.
         bucket = getattr(self.stats, outcome, None)
         if isinstance(bucket, int):
             setattr(self.stats, outcome, bucket + 1)
@@ -478,6 +492,12 @@ class Trainer:
             # balance. Should never happen unless someone adds a new outcome
             # in selfplay.py without updating TrainStats.
             self.stats.cap += 1
+            outcome = "cap"
+        # Per-origin bucket. Unknown origins get bundled into "standard" so
+        # per-origin totals stay consistent with the global aggregate.
+        origin_bucket = self.stats.origin_outcomes.get(origin) or self.stats.origin_outcomes["standard"]
+        if outcome in origin_bucket:
+            origin_bucket[outcome] += 1
         self.stats.games_completed += 1
 
     def run(
@@ -582,7 +602,7 @@ class Trainer:
 
                 # Drain any completed-game outcomes and update the counters.
                 for result in self._mp_self_play.drain_results():
-                    self._record_outcome(result.outcome, getattr(result, "tb_adjudicated", False))
+                    self._record_outcome(result.outcome, getattr(result, "origin", "standard"))
                 t_b = time.perf_counter()
                 self._ema("t_drain_ms", (t_b - t_a) * 1000.0)
 
