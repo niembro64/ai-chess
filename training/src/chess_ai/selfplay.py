@@ -268,10 +268,13 @@ def _make_game_slot(
         move_cap = rng.randint(5, 30)
         return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="random")
     state = _normal_start()
-    # Raised from (200, 400). Longer caps let more natural mates happen
-    # before we time-out into the "cap" (zero-signal) bucket — the single
-    # biggest source of wasted games in the early-training outcomes panel.
-    move_cap = rng.randint(400, 600)
+    # Reverted to (200, 400) after the "longer caps" experiment backfired:
+    # lengthening to (400, 600) dropped the `cap` bucket but flooded the
+    # `50-move` bucket (from 12% → 54%) and collapsed the value head. With
+    # tb-on-50-move now in place the 50-move drain is recovered via the
+    # tablebase anyway, so shorter caps are the pragmatic win — more games
+    # per wall-clock minute, same decisive-signal yield.
+    move_cap = rng.randint(200, 400)
     return GameSlot(state=state, move_cap=move_cap, is_standard_start=True, origin="standard")
 
 
@@ -495,16 +498,19 @@ class SelfPlayEngine:
         return finished
 
     def _finish_game(self, slot: GameSlot) -> GameResult:
-        hit_cap = slot.move_count >= slot.move_cap and slot.state.status not in (
+        status = slot.state.status
+        # `hit_cap` means we terminated via our move_cap, not via a natural
+        # terminal state. Distinct from `status == "draw"` which is the
+        # engine's 50-move-rule signal.
+        hit_cap = slot.move_count >= slot.move_cap and status not in (
             "checkmate",
             "stalemate",
             "draw",
         )
         tb_adjudicated = False
 
-        if slot.state.status == "checkmate":
-            # The CURRENT player (after the winning move was applied) has no moves.
-            # winner = player who JUST moved = opposite of currentTurn.
+        if status == "checkmate":
+            # Winner = player who just moved = opposite of currentTurn.
             winner = "white" if slot.state.currentTurn == "black" else "black"
             white_outcome = 1.0 if winner == "white" else -1.0
             if winner == "white":
@@ -515,49 +521,57 @@ class SelfPlayEngine:
                 outcome = "mate_b"
                 label = "black mates"
                 self.black_wins += 1
-        elif hit_cap:
-            # Cap timeout: neither side found a forced win in the allotted
-            # plies. If a Syzygy tablebase is configured AND the remaining
-            # piece count is within its range, we can score the position by
-            # its theoretical result under optimal play — a much cleaner
-            # training signal than calling it 0. The resulting outcomes are
-            # reported as tb_w / tb_b / tb_d so the dashboard can show what
-            # was OTB-discovered vs. oracle-sourced.
-            tb_result = tablebase.probe_outcome(slot.state)
+        else:
+            # Non-mate ending — stalemate, 50-move rule, or our own cap.
+            # Consult the tablebase on cap-timeouts AND 50-move draws:
+            # both are cases where the game drifted to a non-decisive
+            # result despite the position being within tb range. A 50-move
+            # draw in KQvK is a theoretical win for the stronger side, and
+            # overriding the value=0 label with the tb result teaches the
+            # value head "don't settle for shuffling" rather than "draws
+            # are fine here." Stalemate is a forced legal draw (the side
+            # to move genuinely has no moves) and is left alone.
+            want_tb_probe = hit_cap or status == "draw"
+            tb_result = (
+                tablebase.probe_outcome(slot.state) if want_tb_probe else None
+            )
+
             if tb_result is not None:
                 stm = slot.state.currentTurn
-                # tb_result is from the side-to-move's perspective. Convert to
-                # white's perspective for the outcome convention used here.
+                # tb_result is from side-to-move's perspective; convert to
+                # white's perspective for the outcome convention.
                 white_outcome = float(tb_result if stm == "white" else -tb_result)
+                source = "50-move" if status == "draw" else "cap"
                 if white_outcome > 0:
                     outcome = "tb_w"
-                    label = "cap → W (tb)"
+                    label = f"{source} → W (tb)"
                     self.white_wins += 1
                 elif white_outcome < 0:
                     outcome = "tb_b"
-                    label = "cap → B (tb)"
+                    label = f"{source} → B (tb)"
                     self.black_wins += 1
                 else:
                     outcome = "tb_d"
-                    label = "cap → D (tb)"
+                    label = f"{source} → D (tb)"
                     self.draws += 1
                 self.tb_adjudications += 1
                 tb_adjudicated = True
             else:
+                # No tablebase signal (disabled / out of range / stalemate).
                 white_outcome = 0.0
-                outcome = "cap"
-                label = "cap"
-                self.caps += 1
-        else:
-            # Natural draw (status is stalemate or 50-move rule).
-            white_outcome = 0.0
-            if slot.state.status == "stalemate":
-                outcome = "stalemate"
-                label = "stalemate"
-            else:
-                outcome = "draw_50"
-                label = "50-move"
-            self.draws += 1
+                if status == "stalemate":
+                    outcome = "stalemate"
+                    label = "stalemate"
+                    self.draws += 1
+                elif status == "draw":
+                    outcome = "draw_50"
+                    label = "50-move"
+                    self.draws += 1
+                else:
+                    # hit_cap with no tb signal.
+                    outcome = "cap"
+                    label = "cap"
+                    self.caps += 1
 
         win_weight = self.config.rewards.winning
 

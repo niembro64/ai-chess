@@ -79,7 +79,12 @@ def build_config() -> TrainConfig:
         # gen/min stops rising with more workers.
         num_workers=6,
         games_per_worker=32,
-        mcts_simulations=30,
+        # Self-play MCTS depth. 30 was leaving the value head undertrained
+        # because shallow search + weak value head = shuffling policy.
+        # 60 doubles the depth and matches `eval_mcts_sims` — self-play
+        # shouldn't be weaker than eval. Expect gen/min to drop from ~286
+        # to ~150-200 on the 3090.
+        mcts_simulations=60,
         mp_batch_wait_ms=5.0,
         weight_broadcast_every=50,
 
@@ -96,7 +101,10 @@ def build_config() -> TrainConfig:
 
         # ---- Self-play curriculum ----
         endgame_start_prob=0.40,
-        random_start_prob=0.20,
+        # Random-walk starts produced ~0% decisive signal in the last run
+        # (1 mate out of 1,239 games). Cut from 0.20 so more games go to
+        # the standard bucket where the model actually learns to convert.
+        random_start_prob=0.10,
         temperature_threshold_plies=15,
 
         # ---- MCTS (None = module default) ----
@@ -127,7 +135,11 @@ def build_config() -> TrainConfig:
         # `max_plateau_evals` consecutive failed evals.
         eval_every_gens=5_000,
         eval_games=20,
-        eval_mcts_sims=30,
+        # Deeper search for eval than self-play. Weak models can't find
+        # mate in K+Q vs K with only 30 sims; 60 gives them a real chance
+        # to demonstrate capability. Evals are rare, the extra compute is
+        # free (one match ≈ one 5k-gen training cycle anyway).
+        eval_mcts_sims=60,
         # Longer cap (400 plies) lets weak models actually reach mate during
         # eval; otherwise every early match drifts to "draw at cap" and the
         # plateau detector misfires while the model is genuinely learning.
