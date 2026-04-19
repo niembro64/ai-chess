@@ -320,6 +320,7 @@ class Trainer:
         self._champion_gen = 0
         self._plateau_counter = 0
         self._eval_history: list[dict] = []
+        self._on_eval: Callable[[dict], None] | None = None
         # Set by the plateau detector (committed separately) to request a
         # clean shutdown on the next main-loop iteration.
         self._stop_requested = False
@@ -484,11 +485,19 @@ class Trainer:
         num_steps: int | None = None,
         checkpoint_dir: str | Path | None = None,
         on_step: Callable[[TrainStats], None] | None = None,
+        on_eval: Callable[[dict], None] | None = None,
     ) -> None:
-        """Main loop: alternate self-play and gradient updates forever (or num_steps)."""
+        """Main loop: alternate self-play and gradient updates forever (or num_steps).
+
+        `on_eval` fires once per auto-eval match completion with the match
+        summary dict (see `_run_eval_match`). The dashboard uses it to refresh
+        the validation panel; external callers can log / alert on it.
+        """
         ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
         if ckpt_dir is not None:
             ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        self._on_eval = on_eval
 
         if self._mp_self_play is not None:
             self._run_mp(num_steps, ckpt_dir, on_step)
@@ -619,6 +628,7 @@ class Trainer:
                     self._last_checkpoint_time = time.time()
                 if ckpt_dir is not None:
                     self.maybe_archive_checkpoint(ckpt_dir)
+                    self.maybe_run_eval(ckpt_dir)
         finally:
             self._mp_self_play.stop()
 
@@ -866,6 +876,11 @@ class Trainer:
             return None
         self._last_eval_gen = gen
         result = self._run_eval_match(ckpt_dir)
+        if self._on_eval is not None:
+            try:
+                self._on_eval(result)
+            except Exception:
+                pass
         if (
             self.config.max_plateau_evals > 0
             and self._plateau_counter >= self.config.max_plateau_evals

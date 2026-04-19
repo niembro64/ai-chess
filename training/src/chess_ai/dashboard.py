@@ -179,6 +179,15 @@ class DashboardLogger:
         self._loss_history = _LossHistory()
         self._events: deque[tuple[float, str]] = deque(maxlen=8)
         self._on_log = on_log
+        # Rolling window of recent auto-eval match results (the raw dicts
+        # `Trainer._run_eval_match` returns). Newest last. Sized to fit the
+        # validation panel's history table.
+        self._eval_history: deque[dict] = deque(maxlen=10)
+        # Score threshold the trainer is applying. Set from on_eval's first
+        # match result so the panel can draw a clear "pass/fail" line.
+        self._eval_threshold: float = 0.54
+        # Max plateau budget, same mechanism as above.
+        self._plateau_max: int = 0
 
         # Rich setup. When stdout isn't a TTY we disable the live dashboard
         # and just print log lines + write CSV. This keeps `train.py > log.txt`
@@ -234,6 +243,39 @@ class DashboardLogger:
         if self._on_log is not None:
             self._on_log(message)
 
+    def on_eval(
+        self,
+        result: dict,
+        *,
+        threshold: float | None = None,
+        plateau_max: int | None = None,
+    ) -> None:
+        """Trainer callback: record an auto-eval match and log a summary line.
+
+        `result` matches what `Trainer._run_eval_match` returns:
+            {gen, champion_gen, games, wins, draws, losses, score, elo_diff,
+             new_champion, plateau_counter, [note]}
+        """
+        self._eval_history.append(result)
+        if threshold is not None:
+            self._eval_threshold = float(threshold)
+        if plateau_max is not None:
+            self._plateau_max = int(plateau_max)
+
+        # Events pane gets a one-line summary. Bootstrap matches (no games
+        # played yet) get a briefer line.
+        if result.get("note") == "bootstrap":
+            self.log(
+                f"eval: champion bootstrapped at gen {result['gen']:,}"
+            )
+            return
+        tag = "★ NEW CHAMPION" if result.get("new_champion") else "no change"
+        self.log(
+            f"eval gen {result['gen']:,}: "
+            f"{result['wins']}-{result['draws']}-{result['losses']} "
+            f"score={result['score']:.3f} Δelo={result['elo_diff']:+.0f}  {tag}"
+        )
+
     def on_step(self, stats) -> None:
         """Trainer callback: update loss history, refresh TUI, append CSV row."""
         self._loss_history.append(
@@ -288,7 +330,7 @@ class DashboardLogger:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="top", size=9),
-            Layout(name="outcomes", size=15),
+            Layout(name="middle", size=15),
             Layout(name="timings", size=9),
             Layout(name="loss"),
             Layout(name="events", size=10),
@@ -297,8 +339,11 @@ class DashboardLogger:
             Layout(self._progress_panel(stats), name="progress"),
             Layout(self._model_panel(), name="model"),
         )
+        layout["middle"].split_row(
+            Layout(self._outcomes_panel(stats), name="outcomes"),
+            Layout(self._eval_panel(), name="eval"),
+        )
         layout["header"].update(self._header_panel())
-        layout["outcomes"].update(self._outcomes_panel(stats))
         layout["timings"].update(self._timings_panel(stats))
         layout["loss"].update(self._loss_panel())
         layout["events"].update(self._events_panel())
@@ -413,7 +458,9 @@ class DashboardLogger:
 
         # Bar width scales with the terminal; keep it bounded on either end
         # so it doesn't collapse in narrow panes or overflow in wide ones.
-        bar_w = max(16, min(34, self._console.size.width // 4))
+        # Outcomes is in a half-row split with the eval panel, so we base off
+        # half the terminal width.
+        bar_w = max(12, min(26, self._console.size.width // 8))
 
         total_actual = sum(buckets.values())
         total = max(1, total_actual)
@@ -492,6 +539,106 @@ class DashboardLogger:
             f"outcomes  (n={total_actual:,}, decisive={decisive_frac:.1f}%)"
         )
         return Panel(table, title=title, border_style="blue")
+
+    def _eval_panel(self) -> Panel:
+        """Auto-eval match history + plateau status.
+
+        Split into three stacked blocks:
+            1. header line: current champion gen + plateau streak / cap
+            2. score sparkline across recent matches, with a threshold line
+            3. small history table (5-6 rows): gen, W-D-L, score, Δelo, status
+        """
+        hist = list(self._eval_history)
+
+        body = Table.grid(padding=(0, 1), expand=True)
+        body.add_column(style="dim", justify="right", width=10)
+        body.add_column(ratio=1)
+
+        # --- Header block: champion + plateau
+        if not hist:
+            body.add_row("status", Text("waiting for first eval match…", style="dim italic"))
+            title = "validation"
+            return Panel(body, title=title, border_style="magenta")
+
+        latest = hist[-1]
+        champ_gen = latest.get("champion_gen", 0) or 0
+        streak = int(latest.get("plateau_counter", 0) or 0)
+        body.add_row("champion", Text(f"gen {champ_gen:,}", style="bright_white"))
+
+        if self._plateau_max > 0:
+            full = "▓" * streak
+            rest = "░" * max(0, self._plateau_max - streak)
+            plateau_style = "red" if streak >= self._plateau_max else "yellow" if streak > 0 else "green"
+            plateau_text = Text.assemble(
+                (full, plateau_style),
+                (rest, "grey27"),
+                (f"  {streak} / {self._plateau_max}", plateau_style),
+            )
+            body.add_row("plateau", plateau_text)
+        else:
+            body.add_row("plateau", Text("(disabled)", style="dim"))
+
+        # --- Sparkline of scores across recent matches
+        # Map each score into one of eight sparkline bars using a fixed
+        # [0.25, 0.75] window so the threshold line is always in the middle.
+        bars = "▁▂▃▄▅▆▇█"
+        def to_bar(s: float) -> str:
+            lo, hi = 0.25, 0.75
+            frac = max(0.0, min(1.0, (s - lo) / (hi - lo)))
+            return bars[min(len(bars) - 1, int(frac * len(bars)))]
+        spark = "".join(to_bar(float(h.get("score", 0.5))) for h in hist if h.get("games", 0) > 0)
+        if spark:
+            body.add_row(
+                "scores",
+                Text.assemble(
+                    (spark, "cyan"),
+                    (f"   threshold {self._eval_threshold:.2f}", "dim"),
+                ),
+            )
+
+        body.add_row("", Text(""))  # spacer
+
+        # --- History table (most recent first, up to what fits)
+        head = Text.assemble(
+            ("gen        ", "dim bold"),
+            ("W-D-L     ", "dim bold"),
+            ("score  ", "dim bold"),
+            ("Δelo  ", "dim bold"),
+        )
+        body.add_row("", head)
+
+        # Show up to 5 rows newest-first. Anything older falls off. We
+        # budget 5 data rows + 4 header rows + 1 spacer = 10, fits 15-row panel.
+        for h in reversed(hist[-5:]):
+            gen_str = f"{h.get('gen', 0):>6,}"
+            if h.get("note") == "bootstrap":
+                row_text = Text.assemble(
+                    (f"{gen_str}  ", "dim"),
+                    ("bootstrap champion", "dim italic"),
+                )
+                body.add_row("", row_text)
+                continue
+            w, d, l = h.get("wins", 0), h.get("draws", 0), h.get("losses", 0)
+            score = float(h.get("score", 0.5))
+            elo = float(h.get("elo_diff", 0.0))
+            score_style = "bright_green" if score >= self._eval_threshold else "yellow"
+            elo_style = "bright_green" if elo >= 0 else "red"
+            star = " ★" if h.get("new_champion") else "  "
+            row_text = Text.assemble(
+                (f"{gen_str}  ", "white"),
+                (f"{w:>2}-{d:>2}-{l:>2}    ", "dim"),
+                (f"{score:>5.3f}  ", score_style),
+                (f"{elo:+5.1f}", elo_style),
+                (star, "bright_yellow bold"),
+            )
+            body.add_row("", row_text)
+
+        title = "validation"
+        border = "magenta"
+        if self._plateau_max > 0 and streak >= self._plateau_max:
+            title += "  — PLATEAU STOP"
+            border = "red"
+        return Panel(body, title=title, border_style=border)
 
     def _timings_panel(self, stats) -> Panel:
         """EMA-smoothed per-phase durations for bottleneck diagnosis (ms)."""
