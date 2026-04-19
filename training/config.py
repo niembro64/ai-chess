@@ -29,12 +29,21 @@ ROOT = Path(__file__).resolve().parent
 # v1/v2/latest_new nonsense.
 CHECKPOINT_DIR = ROOT / "runs" / "latest"
 
-# Syzygy tablebases, if present. Silently disabled when missing. Override by
-# setting the CHESS_AI_SYZYGY env var (useful on the training server where
-# the tables live outside the repo).
-SYZYGY_PATH: Path | None = Path(
-    os.environ.get("CHESS_AI_SYZYGY", ROOT / "syzygy")
-)
+# Syzygy tablebases. We probe a few conventional locations and use the first
+# one that exists; set the CHESS_AI_SYZYGY env var to override. Silently
+# disabled when none of the candidates are present.
+def _find_syzygy() -> Path | None:
+    override = os.environ.get("CHESS_AI_SYZYGY")
+    candidates = [Path(override)] if override else [
+        Path.home() / "syzygy",    # where the server keeps them
+        ROOT / "syzygy",           # conventional in-repo location
+    ]
+    for p in candidates:
+        if p.exists() and p.is_dir():
+            return p
+    return None
+
+SYZYGY_PATH: Path | None = _find_syzygy()
 SYZYGY_MAX_PIECES = 5  # matches 3-4-5 piece tables (.rtbw)
 
 # ---------------------------------------------------------------------------
@@ -64,13 +73,13 @@ def build_config() -> TrainConfig:
     return TrainConfig(
         # ---- Self-play, multiprocess (4 workers + 1 inference server) ----
         num_workers=4,
-        games_per_worker=16,
-        mcts_simulations=25,
+        games_per_worker=32,
+        mcts_simulations=40,
         mp_batch_wait_ms=5.0,
         weight_broadcast_every=50,
 
         # ---- Training hyperparams ----
-        batch_size=256,
+        batch_size=512,
         gradient_steps_per_selfplay_step=1,
         min_examples_between_grad_steps=32,
         learning_rate=1e-3,
@@ -81,8 +90,8 @@ def build_config() -> TrainConfig:
         mirror_augment_prob=0.5,
 
         # ---- Self-play curriculum ----
-        endgame_start_prob=0.0,
-        random_start_prob=0.3,
+        endgame_start_prob=0.40,
+        random_start_prob=0.20,
         temperature_threshold_plies=15,
 
         # ---- MCTS (None = module default) ----
@@ -91,7 +100,7 @@ def build_config() -> TrainConfig:
         dirichlet_epsilon=None,
 
         # ---- Replay buffer ----
-        replay_buffer_capacity=100_000,
+        replay_buffer_capacity=200_000,
         min_buffer_for_training=2_000,
 
         # ---- Target (for progress bar + ETA; not a hard stop) ----
@@ -103,7 +112,7 @@ def build_config() -> TrainConfig:
 
         # ---- Checkpointing ----
         checkpoint_every_seconds=60.0,
-        archive_every_gens=5_000,   # snapshot every 5k gens → runs/latest/archive/
+        archive_every_gens=1_000,   # snapshot every 1k gens → runs/latest/archive/
         keep_archives=20,
 
         # ---- Auto-eval (ALWAYS ON) ----
