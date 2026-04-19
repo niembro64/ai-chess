@@ -125,7 +125,7 @@ def build_config() -> TrainConfig:
         # reigning champion. Challenger promotes to champion if it scores
         # above `eval_score_threshold`. Training stops after
         # `max_plateau_evals` consecutive failed evals.
-        eval_every_gens=1_000,
+        eval_every_gens=5_000,
         eval_games=20,
         eval_mcts_sims=30,
         # Longer cap (400 plies) lets weak models actually reach mate during
