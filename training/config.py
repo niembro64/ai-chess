@@ -57,9 +57,15 @@ ENABLE_DASHBOARD = True
 # ---------------------------------------------------------------------------
 # Model architecture (must match for resume)
 # ---------------------------------------------------------------------------
+#
+# Sized for browser deployment: ~5.7M params, ~60MB JSON after weight
+# quantization. Big enough to meaningfully encode chess knowledge
+# (the previous 10×128 / 3M model was on the low end), small enough to
+# fit under GitHub's 100MB hard limit and run in-browser without misery.
+# AlphaZero used 20×256 (~46M) but they had 1000× the compute.
 
-NUM_RES_BLOCKS = 10
-NUM_FILTERS = 128
+NUM_RES_BLOCKS = 12
+NUM_FILTERS = 160
 KERNEL_SIZE = 3
 VALUE_HEAD_SIZE = 64
 SE_REDUCTION = 8
@@ -94,18 +100,31 @@ def build_config() -> TrainConfig:
         min_examples_between_grad_steps=8,
         learning_rate=1e-3,
         weight_decay=1e-4,
+        # Step-decay schedule — rough AlphaZero-style. Steps are gentler
+        # (3× per step) than AZ's 10× because our total gen budget is
+        # smaller; sharper steps would destabilize mid-training.
+        lr_schedule=(
+            (0,       1e-3),
+            (30_000,  3e-4),
+            (60_000,  1e-4),
+            (85_000,  3e-5),
+        ),
         use_amp=True,
         policy_label_smoothing=0.03,
         aux_material_weight=0.1,
         mirror_augment_prob=0.5,
 
         # ---- Self-play curriculum ----
+        # Temperature window: first N plies sample moves proportionally to
+        # MCTS visit counts (τ=1); after that it switches to argmax (τ→0).
+        # Longer window = more opening variety in self-play. AlphaZero
+        # used 30 plies; we were at 15. Bumped for coverage.
+        temperature_threshold_plies=30,
         endgame_start_prob=0.40,
         # Random-walk starts produced ~0% decisive signal in the last run
         # (1 mate out of 1,239 games). Cut from 0.20 so more games go to
         # the standard bucket where the model actually learns to convert.
         random_start_prob=0.10,
-        temperature_threshold_plies=15,
 
         # ---- MCTS (None = module default) ----
         c_puct=None,

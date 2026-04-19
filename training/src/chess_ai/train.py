@@ -56,6 +56,13 @@ class TrainConfig:
     gradient_steps_per_selfplay_step: int = 1
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
+    # Optional step-decay schedule. Each entry is (min_gen, lr). The
+    # Trainer picks the highest-threshold entry whose `min_gen <=
+    # stats.generation` and applies that lr to the optimizer. Must be
+    # sorted ascending by `min_gen`. None keeps `learning_rate` flat.
+    # AlphaZero used stepped decay (0.2 → 0.02 → 0.002 → 0.0002); a
+    # gentler version helps late-stage polishing without destabilizing.
+    lr_schedule: tuple[tuple[int, float], ...] | None = None
     # Rate-limit gradient steps: require at least this many *new* training
     # examples to have arrived since the last update before taking another
     # gradient step. Prevents overtraining on tiny buffers in MP mode where
@@ -355,6 +362,30 @@ class Trainer:
         if self._is_cuda:
             torch.cuda.synchronize()
 
+    def _maybe_update_lr(self) -> None:
+        """Apply the step-decay schedule if one is configured.
+
+        Picks the highest-threshold entry `(min_gen, lr)` where
+        `min_gen <= self.stats.generation` and sets that lr on every
+        optimizer param group. No-op when `lr_schedule` is None.
+        """
+        schedule = self.config.lr_schedule
+        if not schedule:
+            return
+        gen = self.stats.generation
+        target_lr = schedule[0][1]
+        for threshold, lr in schedule:
+            if gen >= threshold:
+                target_lr = lr
+            else:
+                break
+        # Skip the param_group write when the value hasn't changed — avoids
+        # a per-step Python-side tensor dict mutation for no reason.
+        if self.optimizer.param_groups[0].get("lr") == target_lr:
+            return
+        for g in self.optimizer.param_groups:
+            g["lr"] = target_lr
+
     def _ema(self, attr: str, sample_ms: float) -> None:
         """Exponential moving average update on a TrainStats timing field."""
         prev = getattr(self.stats, attr)
@@ -546,6 +577,7 @@ class Trainer:
                 for _ in range(self.config.gradient_steps_per_selfplay_step):
                     last_losses = self.train_step()
                     self.stats.generation += 1
+                    self._maybe_update_lr()
                 self.stats.policy_loss = last_losses["policy_loss"]
                 self.stats.value_loss = last_losses["value_loss"]
                 self.stats.total_loss = last_losses["total_loss"]

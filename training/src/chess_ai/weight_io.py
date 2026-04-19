@@ -69,7 +69,18 @@ def _linear_weight_ts(linear: torch.nn.Linear) -> torch.Tensor:
 
 def _append(shapes: list[list[int]], data: list[list[float]], tensor: torch.Tensor) -> None:
     shapes.append(list(tensor.shape))
-    data.append(tensor.detach().cpu().float().contiguous().view(-1).tolist())
+    # Round each weight to 5 decimal places before JSON serialization.
+    # Python's native round() on Python floats (via tolist()) rounds to
+    # the closest representable fp64, and json.dumps uses shortest-
+    # round-trip repr, so "0.12346" stays 7 chars on disk instead of
+    # blowing out to 17. Don't use numpy.round on float32 — that
+    # reintroduces fp32 representation noise that re-expands the JSON.
+    #
+    # For post-BN weights (almost all in [-1, 1]) this gives 5-6 sig
+    # figs, well below any measurable impact on inference (relative
+    # error ~1e-5 vs BN / activation noise floors ~1e-3).
+    flat = tensor.detach().cpu().float().contiguous().view(-1).tolist()
+    data.append([round(x, 5) for x in flat])
 
 
 def export_weights(model: ChessNet, learning_rate: float = 1e-3) -> dict[str, Any]:
