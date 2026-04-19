@@ -71,17 +71,22 @@ SE_REDUCTION = 8
 def build_config() -> TrainConfig:
     """Build the canonical TrainConfig. Edit values in-place."""
     return TrainConfig(
-        # ---- Self-play, multiprocess (4 workers + 1 inference server) ----
-        num_workers=4,
+        # ---- Self-play, multiprocess (6 workers + 1 inference server) ----
+        # Early runs showed the GPU idling ~95% of wall time waiting for
+        # examples (`sleep_starved` dominated iter time). Three-part fix
+        # tuned on a 3090: more workers, shallower MCTS for early gens,
+        # and more frequent grad steps on thinner batches. Revisit once
+        # gen/min stops rising with more workers.
+        num_workers=6,
         games_per_worker=32,
-        mcts_simulations=40,
+        mcts_simulations=30,
         mp_batch_wait_ms=5.0,
         weight_broadcast_every=50,
 
         # ---- Training hyperparams ----
         batch_size=512,
         gradient_steps_per_selfplay_step=1,
-        min_examples_between_grad_steps=32,
+        min_examples_between_grad_steps=8,
         learning_rate=1e-3,
         weight_decay=1e-4,
         use_amp=True,

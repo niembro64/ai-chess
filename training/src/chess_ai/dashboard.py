@@ -568,9 +568,20 @@ class DashboardLogger:
             tb_pct = tbs / o_total * 100
             # Conversion ratio: of all decisive games, how many were
             # natural mates vs tb-adjudicated. High = model converting on
-            # its own; low = value head is freeloading on Syzygy.
+            # its own; low = value head is freeloading on Syzygy. We only
+            # display it once the decisive-game denominator is large
+            # enough to be signal rather than noise — otherwise a single
+            # lucky mate reads as "100%" which is actively misleading.
             decisive_o = mates + d["tb_w"] + d["tb_b"]
-            conv = (mates / decisive_o * 100) if decisive_o > 0 else 0.0
+            MIN_CONV_DENOM = 10
+            if decisive_o >= MIN_CONV_DENOM:
+                conv = mates / decisive_o * 100
+                conv_text: tuple[str, str] = (
+                    f"{conv:4.1f}%",
+                    "bright_green" if conv >= 50 else "yellow" if conv >= 20 else "red",
+                )
+            else:
+                conv_text = (f"  —  (n={decisive_o})", "dim")
             origin_lines.append(
                 Text.assemble(
                     (f"  {name:<10}", "bright_white"),
@@ -580,10 +591,7 @@ class DashboardLogger:
                     ("  tb ", "dim"),
                     (f"{tb_pct:4.1f}%", "cyan"),
                     ("  conv ", "dim"),
-                    (
-                        f"{conv:4.1f}%",
-                        "bright_green" if conv >= 50 else "yellow" if conv >= 20 else "red",
-                    ),
+                    conv_text,
                 )
             )
 
