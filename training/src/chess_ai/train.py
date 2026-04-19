@@ -738,13 +738,25 @@ class Trainer:
         challenger_plays_white: bool,
         mcts_sims: int,
         move_cap: int,
+        starting_state: "ChessGameState | None" = None,
     ) -> str:
-        """One eval game. Returns "challenger", "champion", or "draw"."""
+        """One eval game. Returns "challenger", "champion", or "draw".
+
+        `starting_state`, if given, is deep-copied so repeated matches from
+        the same curated position don't share mutable state. Falls back to
+        the standard initial position when None (legacy behavior).
+        """
+        import copy
+
         from .engine import apply_move, create_initial_game_state
         from .mcts import run_batched_mcts
 
-        state = create_initial_game_state()
-        state.status = "active"
+        if starting_state is None:
+            state = create_initial_game_state()
+            state.status = "active"
+        else:
+            state = copy.deepcopy(starting_state)
+            state.status = "active"
         moves_played = 0
         while True:
             if state.status in ("checkmate", "stalemate", "draw"):
@@ -812,8 +824,18 @@ class Trainer:
             challenger_eval = self._make_model_evaluator(self.model)
             champion_eval = self._make_model_evaluator(self._champion_model)
 
+            # Pull the curated position set. Built once per trainer and
+            # cached; building plays a few moves per opening through our
+            # own engine so every position is guaranteed legal.
+            from .eval_positions import build_eval_positions
+            positions = build_eval_positions()
+
             wins = draws = losses = 0
+            # Each position plays twice — once with challenger as white,
+            # once as black — so any intrinsic imbalance in asymmetric
+            # positions (K+Q vs K, etc.) averages across the pair.
             for g in range(self.config.eval_games):
+                position = positions[(g // 2) % len(positions)]
                 challenger_white = (g % 2 == 0)
                 outcome = self._play_eval_game(
                     challenger_eval,
@@ -821,6 +843,7 @@ class Trainer:
                     challenger_white,
                     self.config.eval_mcts_sims,
                     self.config.eval_move_cap,
+                    starting_state=position.state,
                 )
                 if outcome == "challenger":
                     wins += 1
