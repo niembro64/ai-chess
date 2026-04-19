@@ -85,14 +85,18 @@ def test_train_loop_runs_and_checkpoints(tmp_path: Path):
     import_weights(fresh, serialized)
 
     # Forward pass on a fixed input should match between the two models
+    # within fp16 round-trip precision. Weights are serialized as fp16
+    # in the SerializedWeights JSON to keep the browser preset under
+    # GitHub's size limits; fp16 has ~3 decimal digits of precision,
+    # which propagates through the network to ~1e-3 output error.
     fresh.eval()
     model.eval()
     x = torch.randn(2, 20, 8, 8)
     with torch.no_grad():
         p1, w1 = model(x)
         p2, w2 = fresh(x)
-    assert torch.allclose(p1, p2, atol=1e-5)
-    assert torch.allclose(w1, w2, atol=1e-5)
+    assert torch.allclose(p1, p2, atol=2e-3)
+    assert torch.allclose(w1, w2, atol=2e-3)
 
     # Stats have sensible values
     assert trainer.stats.step == 40

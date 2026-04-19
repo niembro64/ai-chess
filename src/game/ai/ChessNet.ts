@@ -129,9 +129,44 @@ export const WDL_SIZE = 3;
 
 export type SerializedWeights = {
   config?: NetConfig;   // Optional explicit config; if absent, detected from shapes
+  // dtype tag for the `data` entries. When "float16", each entry is a
+  // base64-encoded little-endian fp16 blob (produced by the Python
+  // exporter). Absent / "float32" means each entry is a legacy number[].
+  dtype?: 'float16' | 'float32';
   shapes: number[][];
-  data: number[][];
+  // Heterogeneous for back-compat: fp32 fixtures are number[], fp16
+  // exports are base64 strings. importWeights() detects per entry.
+  data: (number[] | string)[];
 };
+
+/**
+ * Decode a single IEEE 754 half-precision float (16 bits) to a number.
+ * Standard conversion — handles subnormals, Inf, NaN, ±0. Used to read
+ * fp16 weights serialized by the Python trainer.
+ */
+function fp16ToFp32(h: number): number {
+  const s = (h & 0x8000) >> 15;
+  const e = (h & 0x7C00) >> 10;
+  const f = h & 0x03FF;
+  if (e === 0) {
+    if (f === 0) return s ? -0 : 0;
+    return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  }
+  if (e === 0x1F) {
+    return f === 0 ? (s ? -Infinity : Infinity) : NaN;
+  }
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
+function decodeFp16Base64(b64: string): Float32Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const u16 = new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  const out = new Float32Array(u16.length);
+  for (let i = 0; i < u16.length; i++) out[i] = fp16ToFp32(u16[i]);
+  return out;
+}
 
 export class ChessNet {
   model: tf.LayersModel;
@@ -164,7 +199,12 @@ export class ChessNet {
   importWeights(weights: SerializedWeights): void {
     const tensors: tf.Tensor[] = [];
     for (let i = 0; i < weights.shapes.length; i++) {
-      tensors.push(tf.tensor(weights.data[i], weights.shapes[i]));
+      const entry = weights.data[i];
+      // String = base64 fp16 (new format). Array = legacy fp32 list.
+      // tf.tensor accepts Float32Array or number[], so no further
+      // dtype massaging needed.
+      const values = typeof entry === 'string' ? decodeFp16Base64(entry) : entry;
+      tensors.push(tf.tensor(values, weights.shapes[i]));
     }
     this.model.setWeights(tensors);
     for (const t of tensors) t.dispose();

@@ -50,8 +50,10 @@ Layout conversions handled on export:
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
+import numpy as np
 import torch
 
 from .model import ChessNet
@@ -67,26 +69,30 @@ def _linear_weight_ts(linear: torch.nn.Linear) -> torch.Tensor:
     return linear.weight.detach().t().contiguous()
 
 
-def _append(shapes: list[list[int]], data: list[list[float]], tensor: torch.Tensor) -> None:
+def _append(shapes: list[list[int]], data: list[Any], tensor: torch.Tensor) -> None:
+    """Serialize a tensor as fp16 little-endian bytes, base64-encoded.
+
+    5.66M params × 2 bytes × 4/3 (base64 expansion) ≈ 15 MB on disk,
+    vs 50 MB for the previous JSON-array-with-5-decimals format and 120 MB
+    for full-precision floats. Fp16 has ~3 decimal digits of precision,
+    which is well below BN / activation noise floors (~1e-3) for chess.
+    Import accepts both this format and the legacy list[float] format
+    so old fixtures (test_weight_roundtrip) keep loading.
+    """
     shapes.append(list(tensor.shape))
-    # Round each weight to 5 decimal places before JSON serialization.
-    # Python's native round() on Python floats (via tolist()) rounds to
-    # the closest representable fp64, and json.dumps uses shortest-
-    # round-trip repr, so "0.12346" stays 7 chars on disk instead of
-    # blowing out to 17. Don't use numpy.round on float32 — that
-    # reintroduces fp32 representation noise that re-expands the JSON.
-    #
-    # For post-BN weights (almost all in [-1, 1]) this gives 5-6 sig
-    # figs, well below any measurable impact on inference (relative
-    # error ~1e-5 vs BN / activation noise floors ~1e-3).
-    flat = tensor.detach().cpu().float().contiguous().view(-1).tolist()
-    data.append([round(x, 5) for x in flat])
+    arr = tensor.detach().cpu().float().contiguous().view(-1).numpy().astype(np.float16)
+    # numpy defaults to native byte order; force little-endian here so the
+    # browser's Uint16Array read (also LE on all common platforms) is
+    # guaranteed to agree even in the unlikely event this runs on a BE host.
+    if arr.dtype.byteorder == ">":
+        arr = arr.byteswap().view(arr.dtype.newbyteorder("<"))
+    data.append(base64.b64encode(arr.tobytes()).decode("ascii"))
 
 
 def export_weights(model: ChessNet, learning_rate: float = 1e-3) -> dict[str, Any]:
     """Serialize a PyTorch ChessNet into the browser's SerializedWeights JSON shape."""
     shapes: list[list[int]] = []
-    data: list[list[float]] = []
+    data: list[Any] = []   # base64-encoded fp16 strings (see _append)
 
     # ------------------------------------------------------------------
     # TRAINABLE WEIGHTS (γ, β but NOT μ/σ² — those go at the end)
@@ -151,6 +157,10 @@ def export_weights(model: ChessNet, learning_rate: float = 1e-3) -> dict[str, An
             "seReduction": model.se_reduction,
             "learningRate": learning_rate,
         },
+        # Explicit dtype tag. Browsers / future loaders check this and
+        # decode `data` accordingly; legacy fixtures (no dtype) are
+        # treated as fp32 list[float].
+        "dtype": "float16",
         "shapes": shapes,
         "data": data,
     }
@@ -169,29 +179,43 @@ def _linear_weight_from_ts(flat: list[float], shape: list[int]) -> torch.Tensor:
 
 
 def import_weights(model: ChessNet, serialized: dict[str, Any]) -> None:
-    """Load TS SerializedWeights back into a PyTorch ChessNet (inverse of export_weights)."""
+    """Load TS SerializedWeights back into a PyTorch ChessNet (inverse of export_weights).
+
+    Accepts both the current fp16-base64 format and the legacy
+    list[float] format, auto-detecting per entry. Legacy fixtures
+    (test_weight_roundtrip parity JSON) keep working.
+    """
     shapes = serialized["shapes"]
     data = serialized["data"]
     idx = 0
 
+    def _flat(i: int) -> list[float]:
+        entry = data[i]
+        if isinstance(entry, str):
+            # Base64 fp16. Little-endian frombuffer; promote to fp32 for
+            # the downstream torch.tensor so subsequent math is fp32.
+            raw = base64.b64decode(entry)
+            return np.frombuffer(raw, dtype="<f2").astype(np.float32).tolist()
+        return entry
+
     def next_1d() -> torch.Tensor:
         nonlocal idx
         shape = shapes[idx]
-        flat = data[idx]
+        flat = _flat(idx)
         idx += 1
         return torch.tensor(flat, dtype=torch.float32).view(*shape)
 
     def next_conv() -> torch.Tensor:
         nonlocal idx
         shape = shapes[idx]
-        flat = data[idx]
+        flat = _flat(idx)
         idx += 1
         return _conv_weight_from_ts(flat, shape)
 
     def next_linear() -> torch.Tensor:
         nonlocal idx
         shape = shapes[idx]
-        flat = data[idx]
+        flat = _flat(idx)
         idx += 1
         return _linear_weight_from_ts(flat, shape)
 
