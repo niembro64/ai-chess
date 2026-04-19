@@ -24,6 +24,7 @@ directly comparable gen-to-gen.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Callable, Literal
 
@@ -36,9 +37,10 @@ from .engine import (
     apply_move,
     create_initial_game_state,
     get_legal_moves,
+    is_in_check,
 )
 
-Difficulty = Literal["trivial", "clear", "balanced"]
+Difficulty = Literal["mate-in-1", "trivial", "clear", "balanced"]
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,213 @@ def _build_up_a_knight_middlegame() -> ChessGameState:
     return state
 
 
+# --- Mate-in-1 positions ---------------------------------------------------
+#
+# Simplest possible test of value-head sanity: the side to move has a
+# single-move checkmate available. If a trained model can't find these,
+# something is deeply wrong — the position evaluation is broken. These
+# are much more direct than "K+Q vs K" (which also requires endgame
+# technique). A random model gets some of them purely by luck; a weak
+# but functional model should solve them consistently.
+#
+# Each is verified by `tests/test_eval_positions.py` — the test walks
+# every legal move and asserts at least one leads to checkmate, so any
+# design error here fails fast instead of producing a silent bogus
+# "eval" result.
+
+
+def _build_mate_rook_back_rank() -> ChessGameState:
+    """Classic back-rank rook mate: W plays Re1-e8#.
+    Black king trapped on g8 by own pawns f7/g7/h7; e-file is clean."""
+    b = _empty_board()
+    _place(b, "white", "king", "g1")
+    _place(b, "white", "rook", "e1")
+    _place(b, "black", "king", "g8")
+    _place(b, "black", "pawn", "f7")
+    _place(b, "black", "pawn", "g7")
+    _place(b, "black", "pawn", "h7")
+    return _state_from_board(b, "white")
+
+
+def _build_mate_ladder_two_rooks() -> ChessGameState:
+    """Ladder mate with two rooks. W plays Rb1-b8#.
+    Ra7 cuts off the 7th rank so black king on h8 has no escape."""
+    b = _empty_board()
+    _place(b, "white", "king", "a1")
+    _place(b, "white", "rook", "a7")
+    _place(b, "white", "rook", "b1")
+    _place(b, "black", "king", "h8")
+    return _state_from_board(b, "white")
+
+
+def _build_mate_queen_8th_rank() -> ChessGameState:
+    """Queen to 8th rank with king support. W plays Qa1-a8#.
+    White king on f6 covers f7, g7; queen from a8 covers rank."""
+    b = _empty_board()
+    _place(b, "white", "king", "f6")
+    _place(b, "white", "queen", "a1")
+    _place(b, "black", "king", "g8")
+    _place(b, "black", "pawn", "h7")
+    return _state_from_board(b, "white")
+
+
+def _build_mate_queen_on_h_file() -> ChessGameState:
+    """King-supported queen mate. W plays Qxh7#.
+    The h7 pawn blocks the queen's h-file check in the start position
+    (otherwise black would already be in check — illegal). White captures
+    the pawn with Qxh7#; queen defended by K@g6 covers every escape."""
+    b = _empty_board()
+    _place(b, "white", "king", "g6")
+    _place(b, "white", "queen", "h1")
+    _place(b, "black", "king", "h8")
+    _place(b, "black", "pawn", "h7")
+    return _state_from_board(b, "white")
+
+
+def _build_mate_ladder_with_7th_cover() -> ChessGameState:
+    """Rook ladder mate with king support. W plays Rb1-b8#.
+    Ra7 closes 7th rank; K on f6 covers g7 escape; Rb8 delivers check."""
+    b = _empty_board()
+    _place(b, "white", "king", "f6")
+    _place(b, "white", "rook", "a7")
+    _place(b, "white", "rook", "b1")
+    _place(b, "black", "king", "h8")
+    return _state_from_board(b, "white")
+
+
+# Each entry: (name, builder, difficulty).
+_HAND_MATE_IN_1_POSITIONS: tuple[tuple[str, Callable[[], ChessGameState], Difficulty], ...] = (
+    ("Mate-in-1: back rank (rook)",   _build_mate_rook_back_rank,      "mate-in-1"),
+    ("Mate-in-1: two rook ladder",    _build_mate_ladder_two_rooks,    "mate-in-1"),
+    ("Mate-in-1: queen on 8th rank",  _build_mate_queen_8th_rank,      "mate-in-1"),
+    ("Mate-in-1: queen on h-file",    _build_mate_queen_on_h_file,     "mate-in-1"),
+    ("Mate-in-1: rook ladder + king", _build_mate_ladder_with_7th_cover,"mate-in-1"),
+)
+
+
+# --- Procedural mate-in-1 generation ---------------------------------------
+#
+# Hand-designed mate-in-1 positions are error-prone (easy to build an
+# illegal position where the defender is already in check) and don't
+# scale. Instead we generate many candidates randomly, filter to legal
+# positions where the side-to-move has at least one mating move, and
+# keep the first N that pass. The RNG seed is fixed so the same
+# positions are produced on every run, giving the same deterministic
+# eval behavior as hand-crafted positions.
+
+_RANDOM_SEED = 4242           # fixed for determinism across runs
+_RANDOM_MATE_TARGET = 45      # +5 hand-crafted = 50 mate-in-1 positions total
+_RANDOM_MATE_MAX_TRIES = 20_000  # ceiling on retries; generation aborts if hit
+
+
+def _sq(rank: int, file: int) -> str:
+    """Board-index (rank 0 = 8th rank, file 0 = a) → chess notation ('e4')."""
+    return f"{chr(ord('a') + file)}{8 - rank}"
+
+
+def _random_mate_candidate(rng: random.Random) -> ChessGameState | None:
+    """Build a random sparse position; return it if side-to-move has
+    mate-in-1 AND the position is legal (opponent not already in check).
+    Returns None to signal "try again" on any inconsistency.
+    """
+    board = _empty_board()
+    squares = [(r, f) for r in range(8) for f in range(8)]
+    rng.shuffle(squares)
+    sq_iter = iter(squares)
+
+    try:
+        stm_color = rng.choice(["white", "black"])
+        other_color = "black" if stm_color == "white" else "white"
+
+        # Place attacker king.
+        ar, af = next(sq_iter)
+        _place(board, stm_color, "king", _sq(ar, af))
+
+        # Place defender king at Chebyshev distance > 1 from attacker.
+        placed_defender = False
+        for _ in range(40):
+            try:
+                dr, df = next(sq_iter)
+            except StopIteration:
+                return None
+            if max(abs(ar - dr), abs(af - df)) > 1:
+                _place(board, other_color, "king", _sq(dr, df))
+                placed_defender = True
+                break
+        if not placed_defender:
+            return None
+
+        # Place 1-3 attacker pieces. Bias toward queens/rooks (the
+        # classic mating agents) over minor pieces.
+        piece_pool = ["queen", "rook", "rook", "rook", "bishop", "knight"]
+        for _ in range(rng.randint(1, 3)):
+            try:
+                pr, pf = next(sq_iter)
+            except StopIteration:
+                break
+            pt = rng.choice(piece_pool)
+            if pt == "pawn" and (pr == 0 or pr == 7):
+                continue
+            _place(board, stm_color, pt, _sq(pr, pf))
+
+        # Optionally add a few defender pieces (pawns/knights/bishops)
+        # to block escape squares or force specific mating nets.
+        if rng.random() < 0.5:
+            def_pool = ["pawn", "pawn", "knight", "bishop"]
+            for _ in range(rng.randint(1, 3)):
+                try:
+                    pr, pf = next(sq_iter)
+                except StopIteration:
+                    break
+                pt = rng.choice(def_pool)
+                if pt == "pawn" and (pr == 0 or pr == 7):
+                    continue
+                _place(board, other_color, pt, _sq(pr, pf))
+    except (StopIteration, KeyError):
+        return None
+
+    state = _state_from_board(board, stm_color)
+
+    # Legality check: defender must not already be in check (would imply
+    # the defender's last move was illegal). Attacker must not be in a
+    # self-check either — we want a "make your move" starting state.
+    if is_in_check(board, other_color):
+        return None
+    if is_in_check(board, stm_color):
+        # Being in check is a legal state, but for mate-in-1 tests we
+        # want clean "you have mate available" positions, not "you're in
+        # check and happen to have a counter-mate available."
+        return None
+
+    legal = get_legal_moves(state)
+    if not legal:
+        return None
+
+    # Does any legal move deliver checkmate?
+    for m in legal:
+        after = apply_move(state, m)
+        if after.status == "checkmate":
+            return state
+    return None
+
+
+def _generate_random_mate_in_1_positions(count: int, seed: int) -> list[ChessGameState]:
+    rng = random.Random(seed)
+    results: list[ChessGameState] = []
+    tries = 0
+    while len(results) < count and tries < _RANDOM_MATE_MAX_TRIES:
+        tries += 1
+        cand = _random_mate_candidate(rng)
+        if cand is not None:
+            results.append(cand)
+    if len(results) < count:
+        raise RuntimeError(
+            f"Mate-in-1 generator exhausted: wanted {count}, got {len(results)} "
+            f"in {tries} tries. Bump _RANDOM_MATE_MAX_TRIES or loosen filter."
+        )
+    return results
+
+
 # Each entry: (name, builder, difficulty). Order is stable — the trainer
 # iterates this list and pairs each entry with two color assignments.
 _ASYMMETRIC_POSITIONS: tuple[tuple[str, Callable[[], ChessGameState], Difficulty], ...] = (
@@ -219,17 +428,31 @@ _CACHE: list[EvalPosition] | None = None
 def build_eval_positions() -> list[EvalPosition]:
     """Return all curated eval positions. Cached after first call.
 
-    Order: trivial / clear positions first, then balanced openings. The
-    eval loop iterates this list and pairs each position with two color
-    assignments (so each position yields exactly two games).
+    Order: mate-in-1 positions first (fastest failure signal if the value
+    head is broken), then asymmetric-material endgames, then balanced
+    openings. The eval loop iterates this list and pairs each position
+    with two color assignments, so each entry yields exactly two games.
     """
     global _CACHE
     if _CACHE is not None:
         return _CACHE
 
     positions: list[EvalPosition] = []
+    # Hand-crafted mate-in-1 patterns first.
+    for name, builder, difficulty in _HAND_MATE_IN_1_POSITIONS:
+        positions.append(EvalPosition(name=name, state=builder(), difficulty=difficulty))
+    # Then procedurally generated random mate-in-1 positions.
+    random_states = _generate_random_mate_in_1_positions(_RANDOM_MATE_TARGET, _RANDOM_SEED)
+    for i, state in enumerate(random_states, start=1):
+        positions.append(EvalPosition(
+            name=f"Mate-in-1: random #{i:02d}",
+            state=state,
+            difficulty="mate-in-1",
+        ))
+    # Asymmetric-material endgames.
     for name, builder, difficulty in _ASYMMETRIC_POSITIONS:
         positions.append(EvalPosition(name=name, state=builder(), difficulty=difficulty))
+    # Mainline openings.
     for name, seq in _OPENING_SEQUENCES:
         positions.append(EvalPosition(name=name, state=_play_sequence(seq), difficulty="balanced"))
 

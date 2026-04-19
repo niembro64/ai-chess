@@ -8,17 +8,25 @@ match.
 
 from __future__ import annotations
 
-from chess_ai.engine import get_legal_moves
+from chess_ai.engine import apply_move, get_legal_moves
 from chess_ai.eval_positions import build_eval_positions
 
 
 def test_all_eval_positions_build():
     positions = build_eval_positions()
-    # Must be exactly 10 so eval_games=20 cycles cleanly (each position
-    # played twice — once per color).
-    assert len(positions) == 10
+    # 50 mate-in-1 (5 hand + 45 random) + 5 asymmetric + 5 balanced = 60.
+    # eval_games must be 120 to play each position once per color.
+    assert len(positions) == 60
     names = [p.name for p in positions]
     assert len(names) == len(set(names)), f"duplicate names: {names}"
+
+
+def test_mate_in_1_count_is_50():
+    """10× the original 5 hand-crafted positions — stress-tests pattern
+    recognition across many positions, not just a handful."""
+    positions = build_eval_positions()
+    mate_in_1 = [p for p in positions if p.difficulty == "mate-in-1"]
+    assert len(mate_in_1) == 50, f"expected 50 mate-in-1, got {len(mate_in_1)}"
 
 
 def test_eval_positions_are_non_terminal():
@@ -73,3 +81,24 @@ def test_build_is_cached():
     """Repeated calls return the same object — expensive opening-sequence
     replay should only happen once."""
     assert build_eval_positions() is build_eval_positions()
+
+
+def test_mate_in_1_positions_actually_have_mate_in_1():
+    """Every position tagged 'mate-in-1' must have at least one legal
+    move that immediately results in checkmate. Catches design errors
+    in hand-crafted positions before they silently produce bogus eval
+    data (a 'draw' in a position that was supposed to be mate).
+    """
+    for p in build_eval_positions():
+        if p.difficulty != "mate-in-1":
+            continue
+        legal = get_legal_moves(p.state)
+        mating_moves = []
+        for m in legal:
+            after = apply_move(p.state, m)
+            if after.status == "checkmate":
+                mating_moves.append(m)
+        assert len(mating_moves) >= 1, (
+            f"Position {p.name!r} is tagged 'mate-in-1' but no legal "
+            f"move produces checkmate. Tried {len(legal)} legal moves."
+        )
