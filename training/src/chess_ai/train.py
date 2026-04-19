@@ -84,6 +84,14 @@ class TrainConfig:
     # symmetric about the file axis, so this is a free 2x data multiplier.
     # 0.0 disables. 0.5 mirrors half the batch each step (standard).
     mirror_augment_prob: float = 0.5
+    # Per-sample multiplier on the value-head loss for samples whose
+    # target is "draw" (WDL = [0, 1, 0]). When < 1.0 the gradient
+    # descent pays less attention to drawn examples relative to decisive
+    # ones (win/loss), which directly counteracts value-head collapse in
+    # training distributions where draws dominate (our self-play runs
+    # see ~80% draw labels). 1.0 preserves the unweighted cross-entropy.
+    # Starting point: 0.3 under-weights draws ~3× without ignoring them.
+    value_draw_weight: float = 1.0
     # Mixed-precision training on CUDA: forward/backward in fp16 with a
     # GradScaler. 2-3x speedup on Pascal (1080 Ti) with no measurable
     # quality loss. No-op on CPU/MPS.
@@ -460,7 +468,25 @@ class Trainer:
             pred_policy, pred_wdl = self.model.heads(h)
             # Cross-entropy losses (targets sum to 1; pred outputs are softmax-normalized).
             policy_loss = -(policy_target * torch.log(pred_policy.clamp(min=1e-8))).sum(dim=1).mean()
-            value_loss = -(wdl_target * torch.log(pred_wdl.clamp(min=1e-8))).sum(dim=1).mean()
+
+            per_sample_value = -(wdl_target * torch.log(pred_wdl.clamp(min=1e-8))).sum(dim=1)
+            draw_w = self.config.value_draw_weight
+            if draw_w != 1.0:
+                # Draw samples have wdl_target = [0, 1, 0] exactly (values from
+                # selfplay are strictly -1 / 0 / +1, so the middle column of
+                # the WDL target is 1 for every drawn sample). This detects
+                # them and down-weights their contribution to the batch mean.
+                is_draw = wdl_target[:, 1] > 0.5
+                sample_w = torch.where(
+                    is_draw,
+                    torch.full_like(per_sample_value, draw_w),
+                    torch.ones_like(per_sample_value),
+                )
+                # Weighted mean. Matches unweighted .mean() scale when draw_w=1.
+                value_loss = (per_sample_value * sample_w).sum() / sample_w.sum().clamp_min(1e-8)
+            else:
+                value_loss = per_sample_value.mean()
+
             total = policy_loss + value_loss
 
             # Auxiliary material head: MSE against material balance computed

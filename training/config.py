@@ -111,6 +111,14 @@ def build_config() -> TrainConfig:
         ),
         use_amp=True,
         policy_label_smoothing=0.03,
+        # Value-head class balancing. Self-play has ~80% draw-labeled
+        # samples (cap + tb_d + stalemate + 50-move, see outcomes panel).
+        # Without down-weighting, the value head collapses to "predict
+        # draw with high confidence" because that minimizes 80% of the
+        # loss — classic class-imbalance failure. 0.3 down-weights draws
+        # ~3×, pushing gradient attention toward decisive samples so the
+        # value head actually differentiates win/draw/loss.
+        value_draw_weight=0.3,
         aux_material_weight=0.1,
         mirror_augment_prob=0.5,
 
