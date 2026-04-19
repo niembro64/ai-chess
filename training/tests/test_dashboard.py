@@ -18,13 +18,15 @@ from chess_ai.train import TrainStats
 
 
 def _stats(step: int, gen: int, **overrides) -> TrainStats:
+    # white_wins/black_wins/draws are computed properties now — populate the
+    # underlying granular buckets so the aggregates resolve correctly.
     s = TrainStats(
         step=step,
         generation=gen,
         games_completed=step // 5,
-        white_wins=step // 15,
-        black_wins=step // 17,
-        draws=step // 13,
+        mate_w=step // 15,
+        mate_b=step // 17,
+        stalemate=step // 13,
         policy_loss=10.0 / (1 + gen * 0.1),
         value_loss=2.0 / (1 + gen * 0.2),
         total_loss=12.0 / (1 + gen * 0.15),

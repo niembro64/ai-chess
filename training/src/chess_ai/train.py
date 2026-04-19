@@ -144,11 +144,18 @@ class TrainStats:
     generation: int = 0              # Count of gradient steps taken so far
     target_gens: int = 0             # Goal for "well trained" (for progress bar / ETA)
     games_completed: int = 0
-    white_wins: int = 0
-    black_wins: int = 0
-    draws: int = 0                   # Stalemate / 50-move / actual draw only
-    caps: int = 0                    # Hit move-cap before anything decisive
-    tb_adjudications: int = 0        # Of the W/B/D totals above, how many came from Syzygy
+    # Granular end-state counters. Every finished game increments exactly one.
+    # See selfplay.GameResult for the meaning of each bucket.
+    mate_w: int = 0                  # over-the-board white checkmate
+    mate_b: int = 0                  # over-the-board black checkmate
+    stalemate: int = 0               # no legal moves, not in check
+    draw_50: int = 0                 # 50-move rule
+    tb_w: int = 0                    # cap-timeout → Syzygy says white wins
+    tb_b: int = 0                    # cap-timeout → Syzygy says black wins
+    tb_d: int = 0                    # cap-timeout → Syzygy says draw
+    cap: int = 0                     # cap-timeout, no tablebase signal
+    # Aggregates (computed on the fly via properties) are exposed below for
+    # backward compat with existing callers/CSV readers.
     policy_loss: float = 0.0
     value_loss: float = 0.0
     total_loss: float = 0.0
@@ -174,6 +181,35 @@ class TrainStats:
     t_optim_ms: float = 0.0          # optimizer step
     # Aux head losses (0 when the head isn't active).
     aux_material_loss: float = 0.0
+
+    # --- Aggregate views over the granular counters ---------------------
+    # These exist so CSV readers / old callers / the dashboard footer can
+    # still say "total W" without knowing about the mate_w/tb_w split.
+
+    @property
+    def white_wins(self) -> int:
+        """All games won by white, OTB mate + tablebase-adjudicated."""
+        return self.mate_w + self.tb_w
+
+    @property
+    def black_wins(self) -> int:
+        """All games won by black, OTB mate + tablebase-adjudicated."""
+        return self.mate_b + self.tb_b
+
+    @property
+    def draws(self) -> int:
+        """All drawn games: stalemate + 50-move + tablebase-adjudicated."""
+        return self.stalemate + self.draw_50 + self.tb_d
+
+    @property
+    def caps(self) -> int:
+        """Cap-timeouts WITHOUT tablebase adjudication (pure unresolved)."""
+        return self.cap
+
+    @property
+    def tb_adjudications(self) -> int:
+        """All cap-timeouts adjudicated via Syzygy (any outcome)."""
+        return self.tb_w + self.tb_b + self.tb_d
 
 
 def values_to_wdl_targets(values: np.ndarray) -> np.ndarray:
@@ -428,18 +464,19 @@ class Trainer:
             self._record_outcome(r.outcome, getattr(r, "tb_adjudicated", False))
 
     def _record_outcome(self, outcome: str, tb_adjudicated: bool = False) -> None:
-        if outcome == "white":
-            self.stats.white_wins += 1
-        elif outcome == "black":
-            self.stats.black_wins += 1
-        elif outcome == "cap":
-            self.stats.caps += 1
+        # Dispatch on the granular outcome label. See selfplay.GameResult for
+        # the full set. `tb_adjudicated` is left on the signature for call
+        # sites that still pass it — it's redundant with outcome now
+        # (tb_w/tb_b/tb_d already imply the Syzygy source) but harmless.
+        _ = tb_adjudicated
+        bucket = getattr(self.stats, outcome, None)
+        if isinstance(bucket, int):
+            setattr(self.stats, outcome, bucket + 1)
         else:
-            # "draw" or "stalemate" — anything decisive that isn't a
-            # checkmate or a move-cap timeout.
-            self.stats.draws += 1
-        if tb_adjudicated:
-            self.stats.tb_adjudications += 1
+            # Unknown outcome string — fall through to "cap" so totals still
+            # balance. Should never happen unless someone adds a new outcome
+            # in selfplay.py without updating TrainStats.
+            self.stats.cap += 1
         self.stats.games_completed += 1
 
     def run(

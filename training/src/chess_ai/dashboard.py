@@ -43,7 +43,13 @@ _LOSS_HISTORY_POINTS = 500
 
 CSV_FIELDS = (
     "time", "step", "gen", "target_gens", "games",
+    # Aggregates (kept in the CSV for back-compat with older plotting scripts
+    # that read the pre-split schema). These are computed on the fly from the
+    # granular buckets below.
     "white_wins", "black_wins", "draws", "caps", "tb_adjudications",
+    # Granular end-state buckets — canonical source of truth.
+    "mate_w", "mate_b", "stalemate", "draw_50",
+    "tb_w", "tb_b", "tb_d", "cap",
     "gen_per_min", "games_per_min", "replay_size",
     "eta_seconds",
     "policy_loss", "value_loss", "total_loss",
@@ -59,6 +65,41 @@ def _format_duration(seconds: float) -> str:
     if h:
         return f"{h}h{m:02d}m"
     return f"{m}m{s:02d}s"
+
+
+def _fractional_bar(pct: float, width: int, fg: str) -> Text:
+    """Horizontal bar with 1/8-character resolution.
+
+    Unlike rich's ProgressBar this (a) uses unicode partial blocks so tiny
+    percentages still show a sliver instead of rounding to empty, and (b)
+    fills against a visible track so categorical breakdowns don't all look
+    80% empty when one bucket dominates.
+
+    Character ladder (1/8 increments): ▏ ▎ ▍ ▌ ▋ ▊ ▉ █.
+    """
+    pct = max(0.0, min(100.0, pct))
+    cells = pct * width / 100.0
+    full = int(cells)
+    frac = cells - full
+
+    partials = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+    p_idx = int(round(frac * 8))
+    if p_idx == 8:
+        full += 1
+        p_idx = 0
+    partial_char = partials[p_idx]
+
+    rest = width - full - (1 if partial_char else 0)
+    rest = max(0, rest)
+
+    t = Text()
+    if full > 0:
+        t.append("█" * full, style=fg)
+    if partial_char:
+        t.append(partial_char, style=fg)
+    if rest > 0:
+        t.append("░" * rest, style="grey27")
+    return t
 
 
 def _format_eta(seconds: float | None) -> str:
@@ -207,11 +248,21 @@ class DashboardLogger:
                 "gen": stats.generation,
                 "target_gens": getattr(stats, "target_gens", 0),
                 "games": stats.games_completed,
+                # Aggregates (computed from granular buckets).
                 "white_wins": stats.white_wins,
                 "black_wins": stats.black_wins,
                 "draws": stats.draws,
                 "caps": getattr(stats, "caps", 0),
                 "tb_adjudications": getattr(stats, "tb_adjudications", 0),
+                # Granular buckets.
+                "mate_w": getattr(stats, "mate_w", 0),
+                "mate_b": getattr(stats, "mate_b", 0),
+                "stalemate": getattr(stats, "stalemate", 0),
+                "draw_50": getattr(stats, "draw_50", 0),
+                "tb_w": getattr(stats, "tb_w", 0),
+                "tb_b": getattr(stats, "tb_b", 0),
+                "tb_d": getattr(stats, "tb_d", 0),
+                "cap": getattr(stats, "cap", 0),
                 "gen_per_min": round(getattr(stats, "gen_per_min", 0.0), 2),
                 "games_per_min": round(stats.games_per_min, 2),
                 "replay_size": stats.replay_size,
@@ -329,40 +380,117 @@ class DashboardLogger:
         return Panel(t, title="model", border_style="blue")
 
     def _outcomes_panel(self, stats) -> Panel:
-        w = getattr(stats, "white_wins", 0) if stats else 0
-        b = getattr(stats, "black_wins", 0) if stats else 0
-        d = getattr(stats, "draws", 0) if stats else 0
-        c = getattr(stats, "caps", 0) if stats else 0
-        tb = getattr(stats, "tb_adjudications", 0) if stats else 0
-        real_total = w + b + d + c
-        total = max(1, real_total)
+        """Granular end-state breakdown.
 
-        def row(label: str, count: int, style: str) -> tuple:
+        Eight buckets grouped into four sections. Over-the-board checkmates
+        and natural draws are the model's own play; the tablebase section
+        is what Syzygy told us about cap-timeouts; unresolved is the
+        remaining "we have no signal" residue.
+        """
+        buckets: dict[str, int] = {
+            "mate_w": 0, "mate_b": 0,
+            "stalemate": 0, "draw_50": 0,
+            "tb_w": 0, "tb_b": 0, "tb_d": 0,
+            "cap": 0,
+        }
+        if stats is not None:
+            for k in buckets:
+                buckets[k] = getattr(stats, k, 0)
+            # Back-compat: if we're fed an older stats object that still has
+            # the pre-split aggregates, fall back to those. (No granular data
+            # available — we'll just show W/B/D/Cap totals with zeroed splits.)
+            legacy_mode = (
+                all(v == 0 for v in buckets.values())
+                and (
+                    getattr(stats, "white_wins", 0)
+                    + getattr(stats, "black_wins", 0)
+                    + getattr(stats, "draws", 0)
+                    + getattr(stats, "caps", 0)
+                ) > 0
+            )
+        else:
+            legacy_mode = False
+
+        # Bar width scales with the terminal; keep it bounded on either end
+        # so it doesn't collapse in narrow panes or overflow in wide ones.
+        bar_w = max(16, min(34, self._console.size.width // 4))
+
+        total_actual = sum(buckets.values())
+        total = max(1, total_actual)
+
+        def row(label: str, count: int, fg: str, indent: bool = True) -> tuple:
             pct = count / total * 100
-            bar = ProgressBar(total=100, completed=pct, width=30, style=style, complete_style=style)
+            bar = _fractional_bar(pct, width=bar_w, fg=fg)
+            lbl = Text(("  " + label) if indent else label, style=fg)
             return (
-                Text(label, style=f"bold {style}"),
-                Text(f"{count:>5}", style=style),
+                lbl,
+                Text(f"{count:>6,}", style=fg),
                 Text(f"{pct:5.1f}%", style="dim"),
                 bar,
             )
 
+        def section(title: str) -> tuple:
+            return (
+                Text(title, style="dim italic"),
+                Text("", style="dim"),
+                Text("", style="dim"),
+                Text("", style="dim"),
+            )
+
         table = Table.grid(padding=(0, 1), expand=True)
-        table.add_column(width=3)
-        table.add_column(width=6, justify="right")
-        table.add_column(width=8, justify="right")
-        table.add_column(ratio=1)
-        # W / B include both real checkmates and Syzygy-adjudicated cap outcomes.
-        # The "tb:" counter in the title shows how many of the W/B/D totals
-        # were Syzygy-sourced.
-        table.add_row(*row("W", w, "green"))
-        table.add_row(*row("B", b, "red"))
-        table.add_row(*row("D", d, "yellow"))
-        table.add_row(*row("Cap", c, "cyan"))
-        title = f"outcomes  (n={real_total}"
-        if tb:
-            title += f", tb-adjudicated={tb}"
-        title += ")"
+        table.add_column(width=13)       # label (indented within sections)
+        table.add_column(width=8, justify="right")   # count
+        table.add_column(width=7, justify="right")   # percent
+        table.add_column(ratio=1)        # bar
+
+        if legacy_mode:
+            # Old-format stats — fall back to the 4-bucket view the previous
+            # version of the dashboard showed.
+            w = getattr(stats, "white_wins", 0)
+            b = getattr(stats, "black_wins", 0)
+            d = getattr(stats, "draws", 0)
+            c = getattr(stats, "caps", 0)
+            legacy_total = max(1, w + b + d + c)
+
+            def legacy_row(lbl: str, count: int, fg: str) -> tuple:
+                pct = count / legacy_total * 100
+                return (
+                    Text(lbl, style=fg),
+                    Text(f"{count:>6,}", style=fg),
+                    Text(f"{pct:5.1f}%", style="dim"),
+                    _fractional_bar(pct, width=bar_w, fg=fg),
+                )
+            table.add_row(*legacy_row("W", w, "green"))
+            table.add_row(*legacy_row("B", b, "red"))
+            table.add_row(*legacy_row("D", d, "yellow"))
+            table.add_row(*legacy_row("Cap", c, "cyan"))
+            return Panel(
+                table,
+                title=f"outcomes  (n={w+b+d+c:,})",
+                border_style="blue",
+            )
+
+        table.add_row(*section("checkmate"))
+        table.add_row(*row("W mate", buckets["mate_w"], "bright_green"))
+        table.add_row(*row("B mate", buckets["mate_b"], "bright_red"))
+
+        table.add_row(*section("drawn"))
+        table.add_row(*row("stalemate", buckets["stalemate"], "yellow"))
+        table.add_row(*row("50-move", buckets["draw_50"], "yellow"))
+
+        table.add_row(*section("tablebase"))
+        table.add_row(*row("TB → W", buckets["tb_w"], "green"))
+        table.add_row(*row("TB → B", buckets["tb_b"], "red"))
+        table.add_row(*row("TB → D", buckets["tb_d"], "bright_yellow"))
+
+        table.add_row(*section("unresolved"))
+        table.add_row(*row("cap", buckets["cap"], "magenta"))
+
+        decisive = buckets["mate_w"] + buckets["mate_b"] + buckets["tb_w"] + buckets["tb_b"]
+        decisive_frac = decisive / total * 100
+        title = (
+            f"outcomes  (n={total_actual:,}, decisive={decisive_frac:.1f}%)"
+        )
         return Panel(table, title=title, border_style="blue")
 
     def _timings_panel(self, stats) -> Panel:

@@ -63,10 +63,20 @@ class GameSlot:
 @dataclass
 class GameResult:
     move_count: int
-    outcome: str              # "white", "black", "draw", "cap"
+    # Granular end-state label. The trainer's _record_outcome dispatches
+    # on this to increment the right bucket in TrainStats:
+    #   mate_w    — over-the-board checkmate, white won
+    #   mate_b    — over-the-board checkmate, black won
+    #   stalemate — no legal moves, not in check
+    #   draw_50   — 50-move rule
+    #   tb_w      — cap-timeout, Syzygy adjudicated as white win
+    #   tb_b      — cap-timeout, Syzygy adjudicated as black win
+    #   tb_d      — cap-timeout, Syzygy adjudicated as draw
+    #   cap       — cap-timeout, no tablebase signal (scored 0)
+    outcome: str
     outcome_label: str        # human string for logging
     white_outcome: float      # [-1, 1]
-    tb_adjudicated: bool = False  # True when the outcome came from Syzygy
+    tb_adjudicated: bool = False  # True iff outcome came from Syzygy
 
 
 # --- Replay buffer (ring, fixed capacity) ---
@@ -484,21 +494,22 @@ class SelfPlayEngine:
             # winner = player who JUST moved = opposite of currentTurn.
             winner = "white" if slot.state.currentTurn == "black" else "black"
             white_outcome = 1.0 if winner == "white" else -1.0
-            outcome = winner
-            label = f"{winner} wins"
             if winner == "white":
+                outcome = "mate_w"
+                label = "white mates"
                 self.white_wins += 1
             else:
+                outcome = "mate_b"
+                label = "black mates"
                 self.black_wins += 1
         elif hit_cap:
             # Cap timeout: neither side found a forced win in the allotted
             # plies. If a Syzygy tablebase is configured AND the remaining
             # piece count is within its range, we can score the position by
             # its theoretical result under optimal play — a much cleaner
-            # training signal than calling it 0. Tablebase-adjudicated games
-            # are reclassified into white/black/draw so they show up in the
-            # dashboard W/B/D panels, not lumped under "Cap". (Cap stays
-            # reserved for games we genuinely have no signal on.)
+            # training signal than calling it 0. The resulting outcomes are
+            # reported as tb_w / tb_b / tb_d so the dashboard can show what
+            # was OTB-discovered vs. oracle-sourced.
             tb_result = tablebase.probe_outcome(slot.state)
             if tb_result is not None:
                 stm = slot.state.currentTurn
@@ -506,15 +517,15 @@ class SelfPlayEngine:
                 # white's perspective for the outcome convention used here.
                 white_outcome = float(tb_result if stm == "white" else -tb_result)
                 if white_outcome > 0:
-                    outcome = "white"
+                    outcome = "tb_w"
                     label = "cap → W (tb)"
                     self.white_wins += 1
                 elif white_outcome < 0:
-                    outcome = "black"
+                    outcome = "tb_b"
                     label = "cap → B (tb)"
                     self.black_wins += 1
                 else:
-                    outcome = "draw"
+                    outcome = "tb_d"
                     label = "cap → D (tb)"
                     self.draws += 1
                 self.tb_adjudications += 1
@@ -525,9 +536,14 @@ class SelfPlayEngine:
                 label = "cap"
                 self.caps += 1
         else:
+            # Natural draw (status is stalemate or 50-move rule).
             white_outcome = 0.0
-            outcome = "draw"
-            label = "stalemate" if slot.state.status == "stalemate" else "draw"
+            if slot.state.status == "stalemate":
+                outcome = "stalemate"
+                label = "stalemate"
+            else:
+                outcome = "draw_50"
+                label = "50-move"
             self.draws += 1
 
         win_weight = self.config.rewards.winning

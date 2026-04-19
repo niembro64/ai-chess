@@ -91,7 +91,7 @@ def test_outcome_when_black_is_mated_is_white():
         is_standard_start=True,
     )
     result = engine._finish_game(slot)
-    assert result.outcome == "white"
+    assert result.outcome == "mate_w"
 
 
 def test_outcome_when_white_is_mated_is_black():
@@ -104,7 +104,7 @@ def test_outcome_when_white_is_mated_is_black():
         is_standard_start=True,
     )
     result = engine._finish_game(slot)
-    assert result.outcome == "black", (
+    assert result.outcome == "mate_b", (
         f"Expected black wins when white was mated, got {result.outcome!r}. "
         f"This is the bias I'd most want to rule out if W/B counts are skewed."
     )
