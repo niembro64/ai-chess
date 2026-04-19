@@ -288,7 +288,7 @@ class DashboardLogger:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="top", size=9),
-            Layout(name="outcomes", size=7),
+            Layout(name="outcomes", size=15),
             Layout(name="timings", size=9),
             Layout(name="loss"),
             Layout(name="events", size=10),
