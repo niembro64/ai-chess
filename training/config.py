@@ -90,7 +90,7 @@ def build_config() -> TrainConfig:
         learning_rate=1e-3,
         weight_decay=1e-4,
         use_amp=True,
-        policy_label_smoothing=0.0,
+        policy_label_smoothing=0.03,
         aux_material_weight=0.1,
         mirror_augment_prob=0.5,
 
@@ -128,9 +128,15 @@ def build_config() -> TrainConfig:
         eval_every_gens=1_000,
         eval_games=20,
         eval_mcts_sims=30,
-        eval_move_cap=200,
+        # Longer cap (400 plies) lets weak models actually reach mate during
+        # eval; otherwise every early match drifts to "draw at cap" and the
+        # plateau detector misfires while the model is genuinely learning.
+        eval_move_cap=400,
         eval_score_threshold=0.54,   # ≈ +30 Elo
-        max_plateau_evals=3,         # stop after 3 consecutive failed evals
+        # Plateau grace period. Early evals are mostly draws (noise, not
+        # signal) so we need a long buffer before stop-training fires.
+        # ~10 failed evals × 1000 gens ≈ 10k gens of headroom.
+        max_plateau_evals=10,
 
         # ---- Logging ----
         log_every_steps=10,

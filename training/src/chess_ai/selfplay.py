@@ -257,14 +257,21 @@ def _make_game_slot(
     roll = rng.random()
     if roll < endgame_start_prob:
         state = _endgame_start(rng)
-        move_cap = rng.randint(40, 120)
+        # Raised from (40, 120): KPvK, KRvK and KQvKR routinely need more
+        # than 120 plies with a weak model. Too-short caps were driving
+        # almost all endgame inits into tablebase adjudication and
+        # starving the value head of "real mate" signal.
+        move_cap = rng.randint(80, 200)
         return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="endgame")
     if roll < endgame_start_prob + random_start_prob:
         state = _random_start(rng)
         move_cap = rng.randint(5, 30)
         return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="random")
     state = _normal_start()
-    move_cap = rng.randint(200, 400)
+    # Raised from (200, 400). Longer caps let more natural mates happen
+    # before we time-out into the "cap" (zero-signal) bucket — the single
+    # biggest source of wasted games in the early-training outcomes panel.
+    move_cap = rng.randint(400, 600)
     return GameSlot(state=state, move_cap=move_cap, is_standard_start=True, origin="standard")
 
 
