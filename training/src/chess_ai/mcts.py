@@ -224,11 +224,25 @@ class MCTSSearch:
 
 
 def _select_child(node: MCTSNode) -> MCTSNode:
+    # AlphaZero PUCT sign convention: `child.total_value` is stored in the
+    # CHILD's perspective (_backpropagate flips sign as it walks up). At
+    # select time we view it from the PARENT's perspective, so negate:
+    # a child whose Q is -1 (child is losing) is a GREAT move for the
+    # parent and should score +1 here.
+    #
+    # Historical bug note: this used to read `q = child.total_value / …`
+    # (no negation), which inverted PUCT — MCTS systematically avoided
+    # moves leading to terminal mates, because a mating move produced a
+    # child node with total_value=-1 (from the child's perspective), and
+    # without negation that -1 sank the move's score. The symptom was a
+    # visit fraction of exactly 1/N on every mate-in-1 position across
+    # tens of thousands of training gens, with the model never finding
+    # checkmate despite any amount of further training.
     best_score = -math.inf
     best_child: MCTSNode | None = None
     sqrt_parent = math.sqrt(max(node.visit_count, 1))
     for child in node.children.values():
-        q = child.total_value / child.visit_count if child.visit_count > 0 else 0.0
+        q = -child.total_value / child.visit_count if child.visit_count > 0 else 0.0
         u = C_PUCT * child.prior * sqrt_parent / (1 + child.visit_count)
         score = q + u
         if score > best_score:
