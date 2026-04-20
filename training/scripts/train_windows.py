@@ -21,7 +21,7 @@ import train  # noqa: E402
 if __name__ == "__main__":
     parser = train.build_parser()
     parser.set_defaults(
-        num_workers=8,
+        num_workers=16,
         games_per_worker=16,
         batch_size=256,
     )
