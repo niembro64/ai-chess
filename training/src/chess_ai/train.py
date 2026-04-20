@@ -14,6 +14,7 @@ Two checkpoint artifacts on every save:
 from __future__ import annotations
 
 import json
+import logging
 import random
 import time
 from collections import deque
@@ -25,6 +26,8 @@ from typing import Any, Callable
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+log = logging.getLogger("chess_ai.train")
 
 from .model import (
     NUM_PLANES,
@@ -1107,11 +1110,31 @@ class Trainer:
 
 
 def pick_device(preferred: str = "auto") -> torch.device:
-    """Pick the best available device (CUDA > MPS > CPU)."""
+    """Pick the best available device (CUDA > MPS > CPU).
+
+    With multiple CUDA GPUs, rank them by (compute capability, total memory)
+    and pick the best — so a 3090 beats a 1080 Ti beats a 1070. Logs all
+    visible GPUs and which one was chosen.
+    """
     if preferred == "cpu":
         return torch.device("cpu")
     if preferred in ("cuda", "auto") and torch.cuda.is_available():
-        return torch.device("cuda")
+        count = torch.cuda.device_count()
+        scored = []
+        for i in range(count):
+            p = torch.cuda.get_device_properties(i)
+            # Sort key: higher compute capability first, then more memory.
+            scored.append(((p.major, p.minor, p.total_memory), i, p))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for (cc, mem), idx, props in (((s[0][:2], s[0][2]), s[1], s[2]) for s in scored):
+            log.info(
+                "CUDA:%d %s sm_%d%d mem=%.1fGiB",
+                idx, props.name, cc[0], cc[1], mem / (1024 ** 3),
+            )
+        best_idx = scored[0][1]
+        best_props = scored[0][2]
+        log.info("Picked CUDA:%d (%s)", best_idx, best_props.name)
+        return torch.device(f"cuda:{best_idx}")
     if preferred in ("mps", "auto") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
