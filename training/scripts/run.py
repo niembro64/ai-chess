@@ -83,6 +83,19 @@ def main() -> None:
     if args.resume:
         log.info("Resuming from %s", args.resume)
         trainer.load_checkpoint(args.resume)
+    else:
+        # Fresh run — nuke any stale champion.pt left over from a
+        # previous training session. A leftover champion acts as an
+        # unintended adversary: it's a snapshot from a totally different
+        # training regime (possibly with bugs we've since fixed), yet
+        # the eval system treats it as our benchmark. The plateau
+        # counter and Δelo numbers then track progress against that
+        # alien model instead of against our own training trajectory.
+        # Simplest fix: delete it so the first eval bootstraps cleanly.
+        champ_path = cfg.CHECKPOINT_DIR / "champion.pt"
+        if champ_path.exists():
+            champ_path.unlink()
+            log.info("Cleared stale champion.pt (fresh run — next eval will bootstrap)")
 
     model_summary = cfg.model_summary_lines(
         lr=config.learning_rate,

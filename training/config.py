@@ -136,10 +136,20 @@ def build_config() -> TrainConfig:
         # is now 46% after the MCTS fix).
         random_start_prob=0.0,
 
-        # ---- MCTS (None = module default) ----
+        # ---- MCTS ----
+        # Dirichlet noise at root injects exploration into self-play
+        # prior probabilities. Module default is 0.25 (AZ's setting);
+        # we bump to 0.35 because our self-play policy kept over-
+        # committing — the model collapsed into a narrow style that
+        # exploits itself but misses basic tactics in eval against
+        # differently-trained opponents (e.g. mate-in-1s the policy
+        # ranked low). More root noise = more off-policy exploration
+        # during training, which diversifies the examples that feed
+        # back into the policy head. None for the others keeps module
+        # defaults (c_puct=1.5, dirichlet_alpha=0.3).
         c_puct=None,
         dirichlet_alpha=None,
-        dirichlet_epsilon=None,
+        dirichlet_epsilon=0.35,
 
         # ---- Replay buffer ----
         replay_buffer_capacity=200_000,
@@ -172,11 +182,15 @@ def build_config() -> TrainConfig:
         # 5 asymmetric + 5 balanced openings. Each position plays
         # exactly once per color so fairness is preserved end-to-end.
         eval_games=120,
-        # Deeper search for eval than self-play. Weak models can't find
-        # mate in K+Q vs K with only 30 sims; 60 gives them a real chance
-        # to demonstrate capability. Evals are rare, the extra compute is
-        # free (one match ≈ one 5k-gen training cycle anyway).
-        eval_mcts_sims=60,
+        # Deep search for eval. Self-play uses 60 sims, but a trained
+        # model's policy can become peaky (high prior mass on a few
+        # moves) to the point where MCTS with 60 sims never visits
+        # out-of-policy moves like mate-in-1 shots it happens to rank
+        # low. 200 sims gives PUCT exploration budget to get past that
+        # peakiness and surface forcing lines. Per-match cost roughly
+        # triples (10-15 min → 30-50 min) but evals fire every 10k
+        # gens, so total eval-overhead stays ≈10-15% of training.
+        eval_mcts_sims=200,
         # Longer cap (400 plies) lets weak models actually reach mate during
         # eval; otherwise every early match drifts to "draw at cap" and the
         # plateau detector misfires while the model is genuinely learning.
