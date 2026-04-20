@@ -352,6 +352,13 @@ class Trainer:
         self._plateau_counter = 0
         self._eval_history: list[dict] = []
         self._on_eval: Callable[[dict], None] | None = None
+        # Per-game progress callback during an in-flight eval match.
+        # Args: (games_done, total_games, wins, draws, losses, per_diff).
+        # `per_diff` maps difficulty -> {"w", "d", "l"} so the dashboard
+        # can show where the challenger is stronger/weaker mid-match.
+        # Lets the dashboard render activity while training is paused
+        # for the match (which can be 10+ minutes on 120 games).
+        self._on_eval_progress: Callable[[int, int, int, int, int, dict], None] | None = None
         # Set by the plateau detector (committed separately) to request a
         # clean shutdown on the next main-loop iteration.
         self._stop_requested = False
@@ -563,6 +570,7 @@ class Trainer:
         checkpoint_dir: str | Path | None = None,
         on_step: Callable[[TrainStats], None] | None = None,
         on_eval: Callable[[dict], None] | None = None,
+        on_eval_progress: Callable[[int, int, int, int, int, dict], None] | None = None,
     ) -> None:
         """Main loop: alternate self-play and gradient updates forever (or num_steps).
 
@@ -575,6 +583,7 @@ class Trainer:
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         self._on_eval = on_eval
+        self._on_eval_progress = on_eval_progress
 
         if self._mp_self_play is not None:
             self._run_mp(num_steps, ckpt_dir, on_step)
@@ -889,10 +898,15 @@ class Trainer:
             positions = build_eval_positions()
 
             wins = draws = losses = 0
+            total = self.config.eval_games
+            # Per-difficulty breakdown. Lets the dashboard show how the
+            # match is going in each category (mate-in-1, trivial, clear,
+            # balanced) separately — much more informative than one score.
+            per_diff: dict[str, dict[str, int]] = {}
             # Each position plays twice — once with challenger as white,
             # once as black — so any intrinsic imbalance in asymmetric
             # positions (K+Q vs K, etc.) averages across the pair.
-            for g in range(self.config.eval_games):
+            for g in range(total):
                 position = positions[(g // 2) % len(positions)]
                 challenger_white = (g % 2 == 0)
                 outcome = self._play_eval_game(
@@ -903,12 +917,27 @@ class Trainer:
                     self.config.eval_move_cap,
                     starting_state=position.state,
                 )
+                bucket = per_diff.setdefault(
+                    position.difficulty, {"w": 0, "d": 0, "l": 0}
+                )
                 if outcome == "challenger":
                     wins += 1
+                    bucket["w"] += 1
                 elif outcome == "champion":
                     losses += 1
+                    bucket["l"] += 1
                 else:
                     draws += 1
+                    bucket["d"] += 1
+                # Dashboard progress tick. Wrapped in try/except because a
+                # dashboard hiccup shouldn't abort the whole eval match.
+                if self._on_eval_progress is not None:
+                    try:
+                        self._on_eval_progress(
+                            g + 1, total, wins, draws, losses, per_diff,
+                        )
+                    except Exception:
+                        pass
         finally:
             if was_training:
                 self.model.train()

@@ -188,6 +188,11 @@ class DashboardLogger:
         self._eval_threshold: float = 0.54
         # Max plateau budget, same mechanism as above.
         self._plateau_max: int = 0
+        # Live progress during an in-flight eval match. None when idle,
+        # {done, total, wins, draws, losses} while a match is running.
+        # The validation panel renders a progress bar when this is set so
+        # the user sees activity during the 10+ minutes a big match takes.
+        self._eval_progress: dict | None = None
 
         # Rich setup. When stdout isn't a TTY we disable the live dashboard
         # and just print log lines + write CSV. This keeps `train.py > log.txt`
@@ -243,6 +248,36 @@ class DashboardLogger:
         if self._on_log is not None:
             self._on_log(message)
 
+    def on_eval_progress(
+        self,
+        games_done: int,
+        total: int,
+        wins: int,
+        draws: int,
+        losses: int,
+        per_diff: dict | None = None,
+    ) -> None:
+        """Trainer callback: fires after each game in a live eval match.
+
+        The validation panel reads `_eval_progress` and renders a live
+        scoreboard so the user sees activity during the 10+ min it takes
+        to run 120 games. Per-difficulty breakdown shows which bucket is
+        carrying the match (e.g., challenger dominating mate-in-1 but
+        losing balanced openings). Triggers a manual Live refresh so
+        the bar advances visibly between games (training main loop is
+        paused during eval, so on_step wouldn't fire on its own cadence).
+        """
+        self._eval_progress = {
+            "done": games_done, "total": total,
+            "wins": wins, "draws": draws, "losses": losses,
+            "per_diff": per_diff or {},
+        }
+        if self._live is not None:
+            try:
+                self._live.refresh()
+            except Exception:
+                pass
+
     def on_eval(
         self,
         result: dict,
@@ -256,6 +291,7 @@ class DashboardLogger:
             {gen, champion_gen, games, wins, draws, losses, score, elo_diff,
              new_champion, plateau_counter, [note]}
         """
+        self._eval_progress = None   # match done; clear the live bar
         self._eval_history.append(result)
         if threshold is not None:
             self._eval_threshold = float(threshold)
@@ -601,6 +637,79 @@ class DashboardLogger:
             border_style="blue",
         )
 
+    def _progress_row(self, progress: dict) -> Text:
+        """Top progress line: fractional-block bar + W/D/L tally."""
+        done = int(progress["done"])
+        total = max(1, int(progress["total"]))
+        pct = done / total * 100
+        w = int(progress["wins"])
+        d = int(progress["draws"])
+        l = int(progress["losses"])
+        bar = _fractional_bar(pct, width=20, fg="bright_magenta")
+        return Text.assemble(
+            bar,
+            (f"  {done}/{total}  ", "bright_white"),
+            ("W ", "dim"), (f"{w}", "bright_green"),
+            ("  D ", "dim"), (f"{d}", "yellow"),
+            ("  L ", "dim"), (f"{l}", "red"),
+        )
+
+    def _progress_score_row(self, progress: dict) -> Text:
+        """Running score + projected Elo + threshold — 'how the fight is going'."""
+        import math
+        w = int(progress["wins"])
+        d = int(progress["draws"])
+        l = int(progress["losses"])
+        done = w + d + l
+        if done == 0:
+            return Text("")
+        score = (w + 0.5 * d) / done
+        s_clamp = max(0.01, min(0.99, score))
+        elo = -400.0 * math.log10(1.0 / s_clamp - 1.0)
+        score_color = (
+            "bright_green" if score >= self._eval_threshold
+            else "yellow" if score >= 0.5
+            else "red"
+        )
+        return Text.assemble(
+            ("score ", "dim"),
+            (f"{score:.3f}", score_color),
+            ("   Δelo ", "dim"),
+            (f"{elo:+.0f}", "bright_green" if elo >= 0 else "red"),
+            (f"   (thresh {self._eval_threshold:.2f})", "dim"),
+        )
+
+    def _progress_diff_rows(self, progress: dict) -> list[Text]:
+        """Per-difficulty breakdown rows: name  W-D-L  (score).
+
+        Shows only categories with at least one completed game so early
+        in a match the row list grows naturally rather than showing
+        empty buckets.
+        """
+        per_diff = progress.get("per_diff", {}) or {}
+        out: list[Text] = []
+        for name in ("mate-in-1", "trivial", "clear", "balanced"):
+            stats = per_diff.get(name)
+            if not stats:
+                continue
+            n = stats["w"] + stats["d"] + stats["l"]
+            if n == 0:
+                continue
+            bucket_score = (stats["w"] + 0.5 * stats["d"]) / n
+            score_color = (
+                "bright_green" if bucket_score >= 0.6
+                else "yellow" if bucket_score >= 0.4
+                else "red"
+            )
+            # Display label — "mate-in-1" is long, abbreviate it.
+            label = {"mate-in-1": "mate-1", "balanced": "openings"}.get(name, name)
+            out.append(Text.assemble(
+                (f"  {label:<8}", "bright_white"),
+                (f"{stats['w']:>3}-{stats['d']:>2}-{stats['l']:>2}  ", "dim"),
+                (f"({bucket_score:.2f})", score_color),
+            ))
+        return out
+
     def _eval_panel(self) -> Panel:
         """Auto-eval match history + plateau status.
 
@@ -618,6 +727,8 @@ class DashboardLogger:
         # --- Header block: champion + plateau
         if not hist:
             body.add_row("status", Text("waiting for first eval match…", style="dim italic"))
+            if self._eval_progress is not None:
+                body.add_row("", self._progress_row(self._eval_progress))
             title = "validation"
             return Panel(body, title=title, border_style="magenta")
 
@@ -638,6 +749,15 @@ class DashboardLogger:
             body.add_row("plateau", plateau_text)
         else:
             body.add_row("plateau", Text("(disabled)", style="dim"))
+
+        # --- Live progress (only shown when a match is currently running)
+        if self._eval_progress is not None:
+            body.add_row("running", self._progress_row(self._eval_progress))
+            score_line = self._progress_score_row(self._eval_progress)
+            if str(score_line):
+                body.add_row("", score_line)
+            for row in self._progress_diff_rows(self._eval_progress):
+                body.add_row("", row)
 
         # --- Sparkline of scores across recent matches
         # Map each score into one of eight sparkline bars using a fixed

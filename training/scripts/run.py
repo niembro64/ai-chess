@@ -149,6 +149,7 @@ def main() -> None:
                     checkpoint_dir=ckpt_dir,
                     on_step=dash.on_step,
                     on_eval=eval_to_dash,
+                    on_eval_progress=dash.on_eval_progress,
                 )
             except KeyboardInterrupt:
                 dash.log("interrupted — writing final checkpoint")
