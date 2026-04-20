@@ -96,6 +96,14 @@ def main() -> None:
         if champ_path.exists():
             champ_path.unlink()
             log.info("Cleared stale champion.pt (fresh run — next eval will bootstrap)")
+        # Same cleanup applies to eval.csv. Otherwise a fresh training
+        # run appends new eval matches to a CSV that still contains
+        # rows from prior (potentially buggy) runs, polluting any
+        # downstream trajectory plotting.
+        eval_csv_path = cfg.CHECKPOINT_DIR / "eval.csv"
+        if eval_csv_path.exists():
+            eval_csv_path.unlink()
+            log.info("Cleared stale eval.csv (fresh run)")
 
     model_summary = cfg.model_summary_lines(
         lr=config.learning_rate,

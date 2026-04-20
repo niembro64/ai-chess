@@ -306,8 +306,15 @@ class DashboardLogger:
             )
             return
         tag = "★ NEW CHAMPION" if result.get("new_champion") else "no change"
+        # Human-friendly duration: "12m34s" instead of "754.3s".
+        duration_s = float(result.get("duration_s") or 0.0)
+        if duration_s > 0:
+            mm, ss = divmod(int(duration_s), 60)
+            dur = f" in {mm}m{ss:02d}s"
+        else:
+            dur = ""
         self.log(
-            f"eval gen {result['gen']:,}: "
+            f"eval gen {result['gen']:,}{dur}: "
             f"{result['wins']}-{result['draws']}-{result['losses']} "
             f"score={result['score']:.3f} Δelo={result['elo_diff']:+.0f}  {tag}"
         )

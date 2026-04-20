@@ -892,6 +892,18 @@ class Trainer:
             self._eval_history.append(result)
             return result
 
+        # Fire an immediate "0 games done" progress tick before any of
+        # the slow setup (loading champion, building evaluators) so the
+        # dashboard's validation panel shows `running 0/N` as soon as
+        # the match begins. Otherwise the first visible update waits on
+        # game-1 completion, which at 200 MCTS sims is 30-60s of
+        # apparent-silence in the panel.
+        if self._on_eval_progress is not None:
+            try:
+                self._on_eval_progress(0, self.config.eval_games, 0, 0, 0, {})
+            except Exception:
+                pass
+
         # Load (or reload) champion. Reload whenever it changed.
         if self._champion_model is None or self._champion_gen_on_disk(ckpt_dir) != self._champion_gen:
             self._champion_model = self._load_champion_model(ckpt_dir)
@@ -899,6 +911,7 @@ class Trainer:
         # Flip current model to eval for the match so BN uses running stats.
         was_training = self.model.training
         self.model.eval()
+        match_start = time.time()
         try:
             challenger_eval = self._make_model_evaluator(self.model)
             champion_eval = self._make_model_evaluator(self._champion_model)
@@ -979,6 +992,10 @@ class Trainer:
             "elo_diff": round(elo_diff, 1),
             "new_champion": new_champion,
             "plateau_counter": self._plateau_counter,
+            # Wall-clock duration of the match. Useful for spotting
+            # eval regressions (e.g. a match that suddenly takes 2×
+            # longer could mean MCTS is stuck exploring dead-end lines).
+            "duration_s": round(time.time() - match_start, 1),
             # Per-difficulty breakdown — lets the dashboard / event log
             # show which bucket the challenger dominated. Excluded from
             # eval.csv below (dict values don't fit a flat CSV).

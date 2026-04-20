@@ -182,15 +182,15 @@ def build_config() -> TrainConfig:
         # 5 asymmetric + 5 balanced openings. Each position plays
         # exactly once per color so fairness is preserved end-to-end.
         eval_games=120,
-        # Deep search for eval. Self-play uses 60 sims, but a trained
-        # model's policy can become peaky (high prior mass on a few
-        # moves) to the point where MCTS with 60 sims never visits
-        # out-of-policy moves like mate-in-1 shots it happens to rank
-        # low. 200 sims gives PUCT exploration budget to get past that
-        # peakiness and surface forcing lines. Per-match cost roughly
-        # triples (10-15 min → 30-50 min) but evals fire every 10k
-        # gens, so total eval-overhead stays ≈10-15% of training.
-        eval_mcts_sims=200,
+        # Deeper search for eval than self-play (60 sims). A trained
+        # model's policy can become peaky to the point where MCTS at
+        # 60 sims never explores mate shots ranked low in prior. 100
+        # sims gives enough PUCT exploration budget to get past the
+        # peakiness (combined with dirichlet_epsilon=0.35 during self-
+        # play preventing the policy from going too peaky in the first
+        # place). 200 was briefly tried — 3× match time for marginal
+        # diagnostic gain; 100 is the sweet spot.
+        eval_mcts_sims=100,
         # Longer cap (400 plies) lets weak models actually reach mate during
         # eval; otherwise every early match drifts to "draw at cap" and the
         # plateau detector misfires while the model is genuinely learning.
