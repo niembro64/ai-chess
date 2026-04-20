@@ -25,11 +25,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import random
 import sys
 from pathlib import Path
 
 import torch
+
+
+def _default_num_workers() -> int:
+    """Auto-pick worker count from CPU thread count, capped at 8.
+
+    9900K (16 threads) → 8. 4-core Ubuntu box → 4. macOS M1 (8-10) → 8.
+    Beyond 8, GPU-side batching dominates; more CPU workers just contend.
+    """
+    return max(1, min(os.cpu_count() or 1, 8))
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -56,8 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Multi-process self-play. Enabling --num-workers spawns that many CPU
     # worker processes + one GPU inference server that batches their eval
     # requests. Each worker runs --games-per-worker concurrent games.
-    p.add_argument("--num-workers", type=int, default=0,
-                   help="0 = single-process (legacy). >=1 enables MP mode.")
+    p.add_argument("--num-workers", type=int, default=_default_num_workers(),
+                   help="MP self-play worker count. 0 = single-process "
+                        "(legacy, GIL-bound). Default is auto-picked from "
+                        "os.cpu_count() capped at 8: 9900K (16 threads) → 8, "
+                        "4-core box → 4. Override explicitly if your machine "
+                        "has other work competing for cores.")
     p.add_argument("--games-per-worker", type=int, default=16,
                    help="MP mode: concurrent games per worker process.")
     p.add_argument("--mp-batch-wait-ms", type=float, default=5.0,
@@ -124,11 +138,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "KataGo-style multi-task training: dense gradient "
                         "signal on the trunk without polluting value/policy. "
                         "0 disables the aux head entirely.")
-    p.add_argument("--syzygy-path", type=str, default=None,
-                   help="Directory containing Syzygy tablebase files (.rtbw/"
-                        ".rtbz). When set, cap-timeout games with few enough "
-                        "pieces are adjudicated by the tablebase instead of "
-                        "being scored 0. Safe to omit — falls back silently.")
+    p.add_argument("--syzygy-path", type=str, default=str(Path.home() / "syzygy"),
+                   help="Directory containing Syzygy tablebase files (.rtbw). "
+                        "Defaults to ~/syzygy, which resolves to the user's "
+                        "home dir on both WSL (/home/<user>/syzygy) and macOS "
+                        "(/Users/<user>/syzygy). Cap-timeout games with few "
+                        "enough pieces are adjudicated by the tablebase "
+                        "instead of being scored 0. Missing dir → silently "
+                        "disabled.")
     p.add_argument("--syzygy-max-pieces", type=int, default=5,
                    help="Upper piece-count bound for tablebase probes. "
                         "Matches the tables you have installed (3-4-5 piece "
@@ -182,14 +199,16 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
+def main(parser: argparse.ArgumentParser | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] %(message)s",
         datefmt="%H:%M:%S",
     )
 
-    args = build_parser().parse_args()
+    if parser is None:
+        parser = build_parser()
+    args = parser.parse_args()
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
@@ -202,10 +221,8 @@ def main() -> None:
     from chess_ai import tablebase
     if tablebase.open_tablebase(args.syzygy_path, args.syzygy_max_pieces):
         log.info("Syzygy tablebase: %s (max %d pieces)", args.syzygy_path, args.syzygy_max_pieces)
-    elif args.syzygy_path:
-        log.warning(
-            "Syzygy tablebase NOT opened (path missing or unreadable): %s", args.syzygy_path
-        )
+    else:
+        log.info("Syzygy tablebase: not found at %s — cap games unadjudicated", args.syzygy_path)
 
     model = ChessNet(
         num_res_blocks=args.num_res_blocks,
