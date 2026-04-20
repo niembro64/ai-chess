@@ -41,6 +41,17 @@ def _default_num_workers() -> int:
     """
     return max(1, min(os.cpu_count() or 1, 8))
 
+
+def _describe_device(device: torch.device) -> str:
+    """Human-readable device string, e.g. 'cuda:0 (NVIDIA GeForce GTX 1080 Ti, 11.0 GiB)'."""
+    if device.type == "cuda":
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(idx)
+        return f"cuda:{idx} ({props.name}, {props.total_memory / (1024 ** 3):.1f} GiB)"
+    if device.type == "mps":
+        return "mps (Apple Silicon)"
+    return str(device)
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -213,7 +224,8 @@ def main(parser: argparse.ArgumentParser | None = None) -> None:
     random.seed(args.seed)
 
     device = pick_device(args.device)
-    log.info("Using device: %s", device)
+    device_label = _describe_device(device)
+    log.info("Using device: %s", device_label)
 
     # Configure Syzygy tablebase (silently skipped if --syzygy-path wasn't
     # set or the files are missing). Must happen BEFORE workers fork since
@@ -312,7 +324,7 @@ def main(parser: argparse.ArgumentParser | None = None) -> None:
         with DashboardLogger(
             args.checkpoint_dir,
             model_summary=model_summary,
-            device_summary=str(device),
+            device_summary=device_label,
             on_log=None,   # Dashboard panel shows events; don't double-log to stdout
         ) as dash:
             def dashboard_on_step(stats) -> None:
