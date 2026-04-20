@@ -441,7 +441,9 @@ class Trainer:
         self.model.train()
 
         t0 = time.perf_counter()
-        boards_np, policies_np, values_np = self.buffer.sample(self.config.batch_size, self.rng)
+        boards_np, policies_np, values_np, outcome_known_np = self.buffer.sample(
+            self.config.batch_size, self.rng
+        )
         if self.config.mirror_augment_prob > 0:
             # Use numpy's random state so we don't reseed from a Python
             # Random; a quick uniform-sample mask is cheap.
@@ -460,6 +462,7 @@ class Trainer:
         x = encoded_to_nchw(x_flat, NUM_PLANES)
         policy_target = torch.from_numpy(policies_np).to(self.device)
         wdl_target = torch.from_numpy(values_to_wdl_targets(values_np)).to(self.device)
+        outcome_known = torch.from_numpy(outcome_known_np).to(self.device)
         self._device_sync()
         t2 = time.perf_counter()
 
@@ -478,21 +481,27 @@ class Trainer:
 
             per_sample_value = -(wdl_target * torch.log(pred_wdl.clamp(min=1e-8))).sum(dim=1)
             draw_w = self.config.value_draw_weight
+            # Base weighting: down-weight draws (class-imbalance correction).
             if draw_w != 1.0:
-                # Draw samples have wdl_target = [0, 1, 0] exactly (values from
-                # selfplay are strictly -1 / 0 / +1, so the middle column of
-                # the WDL target is 1 for every drawn sample). This detects
-                # them and down-weights their contribution to the batch mean.
+                # Draw samples have wdl_target = [0, 1, 0] exactly (values
+                # from selfplay are strictly -1 / 0 / +1, so the middle
+                # column of the WDL target is 1 for every drawn sample).
                 is_draw = wdl_target[:, 1] > 0.5
                 sample_w = torch.where(
                     is_draw,
                     torch.full_like(per_sample_value, draw_w),
                     torch.ones_like(per_sample_value),
                 )
-                # Weighted mean. Matches unweighted .mean() scale when draw_w=1.
-                value_loss = (per_sample_value * sample_w).sum() / sample_w.sum().clamp_min(1e-8)
             else:
-                value_loss = per_sample_value.mean()
+                sample_w = torch.ones_like(per_sample_value)
+            # Hard mask out cap-timeout samples — their value=0 label is
+            # a no-signal placeholder, not an observed draw. Keeping them
+            # in the value loss pulls the head toward "predict draw" on
+            # unlabeled positions. Policy loss still uses every sample
+            # (the MCTS visit distributions are useful regardless).
+            effective_w = sample_w * outcome_known
+            total_weight = effective_w.sum().clamp_min(1e-8)
+            value_loss = (per_sample_value * effective_w).sum() / total_weight
 
             total = policy_loss + value_loss
 
@@ -967,17 +976,22 @@ class Trainer:
             "elo_diff": round(elo_diff, 1),
             "new_champion": new_champion,
             "plateau_counter": self._plateau_counter,
+            # Per-difficulty breakdown — lets the dashboard / event log
+            # show which bucket the challenger dominated. Excluded from
+            # eval.csv below (dict values don't fit a flat CSV).
+            "per_diff": per_diff,
         }
         self._eval_history.append(result)
 
-        # Append to eval.csv.
+        # Append to eval.csv. Exclude per_diff (nested dict).
         csv_path = ckpt_dir / "eval.csv"
         write_header = not csv_path.exists()
+        csv_row = {k: v for k, v in result.items() if k != "per_diff"}
         with csv_path.open("a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(result.keys()))
+            writer = csv.DictWriter(f, fieldnames=list(csv_row.keys()))
             if write_header:
                 writer.writeheader()
-            writer.writerow(result)
+            writer.writerow(csv_row)
 
         return result
 

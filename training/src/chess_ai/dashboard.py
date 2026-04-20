@@ -311,6 +311,25 @@ class DashboardLogger:
             f"{result['wins']}-{result['draws']}-{result['losses']} "
             f"score={result['score']:.3f} Δelo={result['elo_diff']:+.0f}  {tag}"
         )
+        # Per-difficulty summary (optional — only if trainer passed it).
+        # Highlights where the challenger out/underperformed, e.g.
+        # "mate-1 0.72  trivial 0.50  openings 0.40". Quick look-see for
+        # the events pane; the validation panel shows it graphically too.
+        per_diff = result.get("per_diff") or {}
+        if per_diff:
+            parts = []
+            for name in ("mate-in-1", "trivial", "clear", "balanced"):
+                stats = per_diff.get(name)
+                if not stats:
+                    continue
+                n = stats["w"] + stats["d"] + stats["l"]
+                if n == 0:
+                    continue
+                score = (stats["w"] + 0.5 * stats["d"]) / n
+                label = {"mate-in-1": "mate-1", "balanced": "openings"}.get(name, name)
+                parts.append(f"{label}={score:.2f}")
+            if parts:
+                self.log("  by difficulty:  " + "  ".join(parts))
 
     def on_step(self, stats) -> None:
         """Trainer callback: update loss history, refresh TUI, append CSV row."""

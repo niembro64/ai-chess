@@ -111,14 +111,13 @@ def build_config() -> TrainConfig:
         ),
         use_amp=True,
         policy_label_smoothing=0.03,
-        # Value-head class balancing. Self-play has ~80% draw-labeled
-        # samples (cap + tb_d + stalemate + 50-move, see outcomes panel).
-        # Without down-weighting, the value head collapses to "predict
-        # draw with high confidence" because that minimizes 80% of the
-        # loss — classic class-imbalance failure. 0.3 down-weights draws
-        # ~3×, pushing gradient attention toward decisive samples so the
-        # value head actually differentiates win/draw/loss.
-        value_draw_weight=0.3,
+        # Value-head class balancing. With the MCTS sign-fix + cap-mask
+        # in place, decisive rate in self-play runs at ~60-65% and cap
+        # games no longer feed noise into the value loss. That leaves
+        # a roughly 50/50 decisive-vs-legitimate-draw split, so we only
+        # lightly down-weight draws. (Set higher when decisive rate
+        # drops, lower when it's dominated by tb_d / stalemate / etc.)
+        value_draw_weight=0.5,
         aux_material_weight=0.1,
         mirror_augment_prob=0.5,
 
@@ -129,10 +128,13 @@ def build_config() -> TrainConfig:
         # used 30 plies; we were at 15. Bumped for coverage.
         temperature_threshold_plies=30,
         endgame_start_prob=0.40,
-        # Random-walk starts produced ~0% decisive signal in the last run
-        # (1 mate out of 1,239 games). Cut from 0.20 so more games go to
-        # the standard bucket where the model actually learns to convert.
-        random_start_prob=0.10,
+        # Random-walk starts consistently produce ~0-3% decisive signal
+        # (3 mates out of 331 random-origin games in the current run).
+        # They're nearly pure waste — cap-timeouts with no tb rescue.
+        # Zeroed out; that 10% of compute now flows to endgame (heavy
+        # decisive signal via tb) + standard (where natural mate rate
+        # is now 46% after the MCTS fix).
+        random_start_prob=0.0,
 
         # ---- MCTS (None = module default) ----
         c_puct=None,

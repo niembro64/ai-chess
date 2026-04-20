@@ -41,6 +41,14 @@ class TrainingExample:
     board: np.ndarray       # [8*8*NUM_PLANES]
     policy: np.ndarray      # [POLICY_SIZE]
     value: float            # [-1, 1]
+    # True iff we actually know the outcome: mate, stalemate, 50-move,
+    # or any tb-adjudicated result. False only for cap-timeout games
+    # where we ran out of plies with too many pieces for the tablebase
+    # to adjudicate — the value=0 label for those is a guess, not a
+    # known draw. The trainer masks these out of the value-loss
+    # computation so the value head isn't pulled toward "predict draw"
+    # by noise. Policy signal (MCTS visit distribution) is still used.
+    outcome_known: bool = True
 
 
 @dataclass
@@ -94,6 +102,11 @@ class ReplayBuffer:
         self._boards = np.zeros((capacity, 8 * 8 * NUM_PLANES), dtype=np.float32)
         self._policies = np.zeros((capacity, POLICY_SIZE), dtype=np.float32)
         self._values = np.zeros((capacity,), dtype=np.float32)
+        # Parallel mask: 1.0 when the value label reflects an actual
+        # outcome we observed, 0.0 when it's a stand-in for a cap-
+        # timeout we couldn't adjudicate. Stored as float32 for direct
+        # multiplication into the weighted value loss.
+        self._outcome_known = np.ones((capacity,), dtype=np.float32)
         self._size = 0
         self._head = 0
 
@@ -105,16 +118,31 @@ class ReplayBuffer:
         self._boards[i] = ex.board
         self._policies[i] = ex.policy
         self._values[i] = ex.value
+        self._outcome_known[i] = 1.0 if ex.outcome_known else 0.0
         self._head = (self._head + 1) % self.capacity
         if self._size < self.capacity:
             self._size += 1
 
-    def sample(self, batch_size: int, rng: random.Random | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def sample(
+        self, batch_size: int, rng: random.Random | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Returns (boards, policies, values, outcome_known_mask).
+
+        The mask is 1.0 for samples where the value label is real and
+        0.0 for cap-timeout samples where the value was a no-signal
+        guess. Callers should multiply the per-sample value loss by
+        this mask to ignore unreliable labels.
+        """
         rng = rng or random
         if self._size == 0:
             raise ValueError("Replay buffer is empty")
         idx = np.fromiter((rng.randrange(self._size) for _ in range(batch_size)), dtype=np.int64)
-        return self._boards[idx], self._policies[idx], self._values[idx]
+        return (
+            self._boards[idx],
+            self._policies[idx],
+            self._values[idx],
+            self._outcome_known[idx],
+        )
 
 
 # --- Starting position helpers (mirrors Trainer.ts) ---
@@ -574,12 +602,20 @@ class SelfPlayEngine:
                     self.caps += 1
 
         win_weight = self.config.rewards.winning
+        # Cap-timeouts with no tablebase signal are the only case where
+        # value=0 is a guess, not an observation. Every other outcome
+        # (mate, stalemate, 50-move, tb_*) has a real label; flag it as
+        # such so the trainer weights its value loss accordingly.
+        outcome_known = outcome != "cap"
 
         for ex in slot.examples:
             outcome_from_persp = white_outcome if ex.turn_color == "white" else -white_outcome
             value = outcome_from_persp * win_weight
             value = max(-1.0, min(1.0, value))
-            self.example_sink(TrainingExample(board=ex.board, policy=ex.policy, value=value))
+            self.example_sink(TrainingExample(
+                board=ex.board, policy=ex.policy, value=value,
+                outcome_known=outcome_known,
+            ))
 
         self.games_completed += 1
         self.recent_game_lengths.append(slot.move_count)
