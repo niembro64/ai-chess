@@ -104,6 +104,14 @@ def main() -> None:
         if eval_csv_path.exists():
             eval_csv_path.unlink()
             log.info("Cleared stale eval.csv (fresh run)")
+        # Snapshot the fresh (random-init) weights as champion.pt. This
+        # way the first eval at `eval_every_gens` plays the trained
+        # model against the initial random-init network — a real
+        # baseline — instead of silently bootstrapping and reporting
+        # no-contest. Gives us a meaningful Elo number for early gens.
+        cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        trainer._save_champion(cfg.CHECKPOINT_DIR, gen=0)
+        log.info("Bootstrapped champion from initial weights (gen 0)")
 
     model_summary = cfg.model_summary_lines(
         lr=config.learning_rate,
