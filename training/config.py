@@ -179,11 +179,12 @@ def build_config() -> TrainConfig:
         # reigning champion. Challenger promotes to champion if it scores
         # above `eval_score_threshold`. Training stops after
         # `max_plateau_evals` consecutive failed evals.
-        # Longer cadence (10k vs 5k gens) because the eval match is now
-        # much bigger — 120 games vs the previous 30. Eval overhead per
-        # match roughly quadruples, so we halve frequency to keep total
-        # eval wall-time fraction reasonable (~20-25% of training).
-        eval_every_gens=10_000,
+        # 5k cadence gives more data points on the learning trajectory
+        # — 10k left only ~10 evals across a 100k run, which is too
+        # sparse to see plateau trends before they're entrenched. With
+        # eval_mcts_sims back down to 100 and the rest of the match
+        # budget stable, eval wall-time fraction stays manageable.
+        eval_every_gens=5_000,
         # 120 games = 60 curated positions × 2 color assignments. The
         # position mix is 50 mate-in-1 (5 hand-crafted + 45 random) +
         # 5 asymmetric + 5 balanced openings. Each position plays
