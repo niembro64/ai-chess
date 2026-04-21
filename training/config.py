@@ -129,7 +129,12 @@ def build_config() -> TrainConfig:
         # Longer window = more opening variety in self-play. AlphaZero
         # used 30 plies; we were at 15. Bumped for coverage.
         temperature_threshold_plies=30,
-        endgame_start_prob=0.40,
+        # 40% was distorting the training distribution — 3-5 piece
+        # syzygy positions are cheap decisive-value labels but far
+        # from the middlegames the model actually plays. AlphaZero
+        # used 0%; 0.15 keeps the value-label benefit from endgame
+        # adjudication without skewing the policy head's distribution.
+        endgame_start_prob=0.15,
         # Random-walk starts consistently produce ~0-3% decisive signal
         # (3 mates out of 331 random-origin games in the current run).
         # They're nearly pure waste — cap-timeouts with no tb rescue.
