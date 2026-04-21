@@ -86,21 +86,26 @@ def build_config() -> TrainConfig:
         # gen/min stops rising with more workers.
         num_workers=6,
         games_per_worker=32,
-        # Self-play MCTS depth. AlphaZero / Leela use ~800. With only
-        # 60 sims over a ~1968-move action space, the MCTS visit-count
-        # distribution we feed the policy head as its target is noisy
-        # — we were training the policy to imitate a weak search. 200
-        # triples the depth and sharpens the target; gen/min drops
-        # ~3× (178 → ~60) but policy-target quality dominates raw
-        # iteration count for eventual strength.
-        mcts_simulations=200,
+        # Self-play MCTS depth. 200 sims produced ~45h ETA on the 3090
+        # AND policy-head collapse — visit distributions were sharp
+        # enough to reinforce whatever biases the policy developed
+        # early, driving it toward confidently-wrong moves. 100 matches
+        # `eval_mcts_sims` so self-play and eval see the same search
+        # strength (which was the original motivation for lifting sims
+        # past 25-30 in the first place).
+        mcts_simulations=100,
         mp_batch_wait_ms=5.0,
         weight_broadcast_every=50,
 
         # ---- Training hyperparams ----
         batch_size=512,
         gradient_steps_per_selfplay_step=1,
-        min_examples_between_grad_steps=8,
+        # 8 was cutting grad-step rate-limit 4× below the old working
+        # value (32). At 8, each sample got reused in ~64 consecutive
+        # batches before fresher data displaced it, which overfits the
+        # policy head onto whatever early biases the MCTS visit target
+        # happened to have. 32 is the AlphaZero-adjacent rule-of-thumb.
+        min_examples_between_grad_steps=32,
         learning_rate=1e-3,
         weight_decay=1e-4,
         # Step-decay schedule — rough AlphaZero-style. Steps are gentler
@@ -113,7 +118,15 @@ def build_config() -> TrainConfig:
             (85_000,  3e-5),
         ),
         use_amp=True,
-        policy_label_smoothing=0.03,
+        # 0.03 mixes 3% uniform into the MCTS visit target. In a broken
+        # run where MCTS visits were biased toward wrong moves, label
+        # smoothing prevented the policy from peaking on anything — but
+        # it also prevented the policy from converging on the CORRECT
+        # moves when MCTS found them. Diagnostic showed policy ranking
+        # mates at #20-40 / 4096 despite v=+1.0 on the same positions,
+        # consistent with smoothed targets + biased MCTS = no learning.
+        # 0.0 = use the MCTS visit distribution as-is.
+        policy_label_smoothing=0.0,
         # Value-head class balancing. With the MCTS sign-fix + cap-mask
         # in place, decisive rate in self-play runs at ~60-65% and cap
         # games no longer feed noise into the value loss. That leaves
@@ -121,7 +134,14 @@ def build_config() -> TrainConfig:
         # lightly down-weight draws. (Set higher when decisive rate
         # drops, lower when it's dominated by tb_d / stalemate / etc.)
         value_draw_weight=0.5,
-        aux_material_weight=0.1,
+        # Disabled. aux_material_weight feeds material-balance signal
+        # through the shared trunk, which can bias trunk features
+        # toward material-changing moves (captures, pushes) and away
+        # from mates that don't change material. With the value head
+        # already training well (diagnostic: avg v=+0.68 on winning
+        # positions), the aux head is redundant at best, distortive
+        # at worst — simplify it out until we have evidence we need it.
+        aux_material_weight=0.0,
         mirror_augment_prob=0.5,
 
         # ---- Self-play curriculum ----
