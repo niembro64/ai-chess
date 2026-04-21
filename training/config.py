@@ -85,12 +85,14 @@ def build_config() -> TrainConfig:
         # gen/min stops rising with more workers.
         num_workers=6,
         games_per_worker=32,
-        # Self-play MCTS depth. 30 was leaving the value head undertrained
-        # because shallow search + weak value head = shuffling policy.
-        # 60 doubles the depth and matches `eval_mcts_sims` — self-play
-        # shouldn't be weaker than eval. Expect gen/min to drop from ~286
-        # to ~150-200 on the 3090.
-        mcts_simulations=60,
+        # Self-play MCTS depth. AlphaZero / Leela use ~800. With only
+        # 60 sims over a ~1968-move action space, the MCTS visit-count
+        # distribution we feed the policy head as its target is noisy
+        # — we were training the policy to imitate a weak search. 200
+        # triples the depth and sharpens the target; gen/min drops
+        # ~3× (178 → ~60) but policy-target quality dominates raw
+        # iteration count for eventual strength.
+        mcts_simulations=200,
         mp_batch_wait_ms=5.0,
         weight_broadcast_every=50,
 
