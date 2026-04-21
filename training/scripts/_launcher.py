@@ -1,17 +1,9 @@
-"""Zero-option training entrypoint.
+"""Shared launcher for the hardware-specific training entrypoints.
 
-Reads all settings from `training/config.py`. Edit that file to change
-anything; run this file as-is. Optionally pass `--resume` to continue
-from a saved checkpoint.
-
-Usage:
-
-    python scripts/run.py                      # fresh run
-    python scripts/run.py --resume runs/latest/latest.pt
-
-Intended to be the single launch command for both local dev (laptop) and
-the remote training box (Ubuntu + 3090). The syzygy path, device, and
-number of workers are all picked up from config.py.
+`train_ubuntu.py` and `train_windows.py` each call `launch(...)` with
+their own hardware-tuned overrides. Everything else — MCTS depth,
+eval cadence, architecture, lr schedule, etc. — is read from
+`training/config.py`. Edit that file to change training behavior.
 """
 
 from __future__ import annotations
@@ -36,7 +28,19 @@ from chess_ai.train import Trainer, pick_device  # noqa: E402
 log = logging.getLogger("chess_ai.train")
 
 
-def main() -> None:
+def launch(
+    *,
+    num_workers: int,
+    games_per_worker: int,
+    batch_size: int,
+) -> None:
+    """Run training using `config.py` + the caller's hardware overrides.
+
+    The three overrides tune workload for the specific machine (core
+    count, VRAM). All other knobs (MCTS depth, eval cadence, arch,
+    lr schedule, etc.) come from config.py and are shared across
+    machines.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] %(message)s",
@@ -54,7 +58,6 @@ def main() -> None:
     device = pick_device(cfg.DEVICE)
     log.info("Using device: %s", device)
 
-    # Tablebase setup (silent no-op when path is missing).
     from chess_ai import tablebase
     syzygy_path_str = str(cfg.SYZYGY_PATH) if cfg.SYZYGY_PATH else None
     if tablebase.open_tablebase(syzygy_path_str, cfg.SYZYGY_MAX_PIECES):
@@ -77,6 +80,17 @@ def main() -> None:
     )
 
     config = cfg.build_config()
+    # Hardware overrides from the caller (train_ubuntu / train_windows).
+    # These three values are the only machine-specific knobs; everything
+    # else is shared across boxes via config.py.
+    config.num_workers = num_workers
+    config.games_per_worker = games_per_worker
+    config.batch_size = batch_size
+    log.info(
+        "Hardware overrides: num_workers=%d games_per_worker=%d batch_size=%d",
+        num_workers, games_per_worker, batch_size,
+    )
+
     trainer = Trainer(model=model, device=device, config=config,
                       rng=random.Random(cfg.SEED))
 
@@ -91,11 +105,10 @@ def main() -> None:
         # the eval system treats it as our benchmark. The plateau
         # counter and Δelo numbers then track progress against that
         # alien model instead of against our own training trajectory.
-        # Simplest fix: delete it so the first eval bootstraps cleanly.
         champ_path = cfg.CHECKPOINT_DIR / "champion.pt"
         if champ_path.exists():
             champ_path.unlink()
-            log.info("Cleared stale champion.pt (fresh run — next eval will bootstrap)")
+            log.info("Cleared stale champion.pt (fresh run)")
         # Same cleanup applies to eval.csv. Otherwise a fresh training
         # run appends new eval matches to a CSV that still contains
         # rows from prior (potentially buggy) runs, polluting any
@@ -157,7 +170,6 @@ def main() -> None:
             device_summary=str(device),
             on_log=None,
         ) as dash:
-            # Hook checkpoint saves so they show up in the events pane.
             _orig_save = trainer.save_checkpoint
             def save_and_log(directory):
                 paths = _orig_save(directory)
@@ -184,9 +196,6 @@ def main() -> None:
                 dash.log("interrupted — writing final checkpoint")
                 trainer.save_checkpoint(ckpt_dir)
                 dash.log(f"saved to {ckpt_dir}")
-            # Plateau-stop: the main loop exits quietly when
-            # _stop_requested flips. Surface it to the events pane so
-            # the user doesn't wonder why it ended.
             if trainer._stop_requested:
                 dash.log(
                     f"PLATEAU STOP — {config.max_plateau_evals} consecutive "
@@ -211,7 +220,3 @@ def main() -> None:
                 config.max_plateau_evals,
             )
             trainer.save_checkpoint(ckpt_dir)
-
-
-if __name__ == "__main__":
-    main()

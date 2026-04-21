@@ -1,11 +1,11 @@
 """Training entrypoint for the Ubuntu box (4-core CPU + RTX 3090).
 
-Thin wrapper around train.py with hardware-specific defaults:
-  * 4 workers (CPU has 4 cores — one per worker, none left idle)
-  * 24 games per worker (3090 chews through big batches; keep it fed)
-  * batch size 512 (3090 has 24 GiB, no reason to starve it)
+Reads everything from `training/config.py` except the three hardware-
+specific knobs set below. Use `--resume <ckpt>` to continue from a saved
+checkpoint.
 
-All flags from train.py still work — defaults are just overridden here.
+    python scripts/train_ubuntu.py                 # fresh run
+    python scripts/train_ubuntu.py --resume runs/latest/latest.pt
 """
 
 from __future__ import annotations
@@ -15,14 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import train  # noqa: E402
+from _launcher import launch  # noqa: E402
 
 
 if __name__ == "__main__":
-    parser = train.build_parser()
-    parser.set_defaults(
-        num_workers=4,
-        games_per_worker=24,
-        batch_size=512,
+    launch(
+        num_workers=4,          # one per CPU core
+        games_per_worker=24,    # 3090 eats big batches; keep it fed
+        batch_size=512,         # 24 GiB VRAM, no reason to starve it
     )
-    train.main(parser)

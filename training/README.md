@@ -25,7 +25,9 @@ training/
 │   ├── selfplay.py      # ReplayBuffer, SelfPlayEngine
 │   └── train.py         # Main training loop + checkpoints
 ├── scripts/
-│   ├── train.py                     # CLI entrypoint for training
+│   ├── _launcher.py                 # Shared config-driven training launcher
+│   ├── train_ubuntu.py              # Entrypoint: 4-core + RTX 3090
+│   ├── train_windows.py             # Entrypoint: 9900K + 1080 Ti
 │   ├── make_roundtrip_fixture.py    # Generates PyTorch round-trip fixture
 │   └── deploy_to_browser.py         # Copies weights JSON into the browser preset
 └── tests/
@@ -75,14 +77,13 @@ tmux new -s train
 
 # Checkpoints land in runs/latest/ (single fixed spot — re-running
 # overwrites the previous checkpoint; there is no v1/v2 scheme).
-python scripts/train.py \
-    --num-res-blocks 10 --num-filters 128 \
-    --num-workers 8 --games-per-worker 16 --mcts-sims 40 \
-    --batch-size 256 --min-buffer 2000 --replay-buffer 200000 \
-    --lr 1e-3 \
-    --device cuda
+# Everything (MCTS depth, lr schedule, eval cadence, arch) lives in
+# training/config.py. Pick the entrypoint matching your hardware:
+python scripts/train_ubuntu.py        # 4-core + RTX 3090
+# or
+python scripts/train_windows.py       # 9900K + 1080 Ti
 # Detach with Ctrl-b d; re-attach with `tmux a -t train`.
-# Add --no-dashboard if you're redirecting stdout to a log file.
+# Use --resume runs/latest/latest.pt to continue a saved checkpoint.
 
 # 4. Ship the weights to the browser preset slot
 python scripts/deploy_to_browser.py runs/latest/latest.json
@@ -93,8 +94,8 @@ cd .. && npm run build
 
 ## Live training dashboard
 
-When running in a terminal (TTY), `scripts/train.py` paints a Rich-based TUI
-in the current tmux pane:
+When running in a terminal (TTY), the training launcher paints a Rich-based
+TUI in the current tmux pane:
 
 - `progress` — step, gen, games, games/min, replay size
 - `model` — architecture summary + device + path to the CSV log
@@ -111,8 +112,9 @@ df = pd.read_csv("runs/latest/stats.csv")
 df.plot(x="step", y=["policy_loss", "value_loss"])
 ```
 
-Pass `--no-dashboard` (or redirect stdout to a file) to fall back to plain
-text logging, which is friendlier for `nohup`/systemd-style runs.
+Set `ENABLE_DASHBOARD = False` in `config.py` (or redirect stdout to a file)
+to fall back to plain text logging, which is friendlier for `nohup`/systemd-
+style runs.
 
 ## Parity gates
 
@@ -136,6 +138,6 @@ re-run the tests. These are ordered from cheap to expensive:
 - **Model architecture** → `src/chess_ai/model.py` + `src/game/ai/ChessNet.ts`
   + `src/game/ai/CPUForward.ts`. Also update the weight-order documentation
   at the top of `weight_io.py` if weight ordering shifts.
-- **Training hyperparameters** → CLI flags in `scripts/train.py`.
+- **Training hyperparameters** → `training/config.py` (single source of truth).
 - **Self-play scheduling** → `src/chess_ai/selfplay.py` (concurrent games,
   MCTS sim count, random-start distribution).

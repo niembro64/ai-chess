@@ -1,13 +1,14 @@
 """Single-source training config.
 
-Edit this file to change anything about training. Run with:
+Edit this file to change anything about training. Launch with the
+hardware-specific entrypoint for your box:
 
-    python scripts/run.py
+    python scripts/train_ubuntu.py     # 4-core + RTX 3090
+    python scripts/train_windows.py    # 9900K + 1080 Ti
 
-No CLI flags, no options to remember — just tweak here and relaunch.
-
-The separate `scripts/train.py` still exists for one-off experiments that
-need argparse knobs; this file is the canonical path for normal runs.
+The two entrypoints share `scripts/_launcher.py` and differ only in
+their hardware-specific overrides (num_workers, games_per_worker,
+batch_size). Every other knob lives here.
 """
 
 from __future__ import annotations

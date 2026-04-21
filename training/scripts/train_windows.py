@@ -1,11 +1,11 @@
 """Training entrypoint for the Windows/WSL box (9900K + 1080 Ti).
 
-Thin wrapper around train.py with hardware-specific defaults:
-  * 8 workers (9900K: 8 physical cores)
-  * 16 games per worker
-  * batch size 256 (fits comfortably in 11 GiB)
+Reads everything from `training/config.py` except the three hardware-
+specific knobs set below. Use `--resume <ckpt>` to continue from a saved
+checkpoint.
 
-All flags from train.py still work — defaults are just overridden here.
+    python scripts/train_windows.py                # fresh run
+    python scripts/train_windows.py --resume runs/latest/latest.pt
 """
 
 from __future__ import annotations
@@ -15,14 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import train  # noqa: E402
+from _launcher import launch  # noqa: E402
 
 
 if __name__ == "__main__":
-    parser = train.build_parser()
-    parser.set_defaults(
-        num_workers=16,
+    launch(
+        num_workers=16,         # 9900K: 8 physical / 16 logical cores
         games_per_worker=16,
-        batch_size=256,
+        batch_size=256,         # fits comfortably in 11 GiB
     )
-    train.main(parser)

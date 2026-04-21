@@ -9,7 +9,7 @@ plotting with matplotlib/pandas/whatever.
 Gracefully falls back to plain-text logging when stdout isn't a TTY (e.g.,
 piped to a file, running under nohup without a terminal).
 
-Usage (inside `train.py`):
+Usage (inside the launcher):
 
     dash = DashboardLogger(checkpoint_dir, model_summary=..., on_log=logger.info)
     with dash:
@@ -195,7 +195,7 @@ class DashboardLogger:
         self._eval_progress: dict | None = None
 
         # Rich setup. When stdout isn't a TTY we disable the live dashboard
-        # and just print log lines + write CSV. This keeps `train.py > log.txt`
+        # and just print log lines + write CSV. This keeps `... > log.txt`
         # and non-interactive CI invocations sane.
         self._is_tty = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
         self._console = Console()
