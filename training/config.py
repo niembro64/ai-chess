@@ -134,6 +134,14 @@ def build_config() -> TrainConfig:
         # lightly down-weight draws. (Set higher when decisive rate
         # drops, lower when it's dominated by tb_d / stalemate / etc.)
         value_draw_weight=0.5,
+        # Per-ply decay on value targets. Fixes the policy-collapse
+        # failure mode where every position in a winning game got
+        # label +1, leaving MCTS Q undifferentiated across all winning
+        # moves and the trained policy unable to prefer faster wins.
+        # 0.99 is what Leela/KataGo use; mate-in-1 ≈ 0.99, mate-in-50
+        # ≈ 0.61, mate-in-100 ≈ 0.37 — enough spread for Q to guide
+        # MCTS toward mates without terminal expansion.
+        value_ply_decay=0.99,
         # Disabled. aux_material_weight feeds material-balance signal
         # through the shared trunk, which can bias trunk features
         # toward material-changing moves (captures, pushes) and away

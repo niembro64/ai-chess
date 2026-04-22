@@ -95,6 +95,14 @@ class TrainConfig:
     # see ~80% draw labels). 1.0 preserves the unweighted cross-entropy.
     # Starting point: 0.3 under-weights draws ~3× without ignoring them.
     value_draw_weight: float = 1.0
+    # Per-ply value-target decay. Positions i plies from game end get a
+    # value target of outcome * decay^i. 1.0 reproduces the AlphaZero
+    # convention (every position in a winning game labeled +1). <1.0
+    # teaches the value head to distinguish mate-in-1 from mate-in-100
+    # — crucial when self-play MCTS sims are too low (we use 100, AZ
+    # used 800) to reach terminal nodes often enough for Q to carry
+    # mate-speed signal. Leela / KataGo use ~0.99.
+    value_ply_decay: float = 1.0
     # Mixed-precision training on CUDA: forward/backward in fp16 with a
     # GradScaler. 2-3x speedup on Pascal (1080 Ti) with no measurable
     # quality loss. No-op on CPU/MPS.
@@ -321,6 +329,7 @@ class Trainer:
                 syzygy_path=self.config.syzygy_path,
                 syzygy_max_pieces=self.config.syzygy_max_pieces,
                 rewards=self.config.rewards,
+                value_ply_decay=self.config.value_ply_decay,
             )
             self._mp_self_play = MultiprocessingSelfPlay(
                 arch=ModelArch.from_model(self.model),
@@ -340,6 +349,7 @@ class Trainer:
                     random_start_prob=self.config.random_start_prob,
                     temperature_threshold_plies=self.config.temperature_threshold_plies,
                     rewards=self.config.rewards,
+                    value_ply_decay=self.config.value_ply_decay,
                 ),
                 rng=self.rng,
             )

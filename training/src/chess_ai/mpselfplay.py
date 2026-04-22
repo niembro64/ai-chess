@@ -79,6 +79,9 @@ class MultiprocessingConfig:
     # None = disabled.
     syzygy_path: str | None = None
     syzygy_max_pieces: int = 5
+    # Per-ply decay on the value target. <1.0 teaches the value head
+    # to prefer fast wins (see TrainConfig.value_ply_decay for why).
+    value_ply_decay: float = 1.0
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -253,6 +256,7 @@ def _worker_main(
             random_start_prob=config.random_start_prob,
             temperature_threshold_plies=config.temperature_threshold_plies,
             rewards=config.rewards,
+            value_ply_decay=config.value_ply_decay,
         ),
         rng=rng,
     )

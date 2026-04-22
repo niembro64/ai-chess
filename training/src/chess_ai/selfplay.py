@@ -432,6 +432,12 @@ class SelfPlayConfig:
     # AlphaZero move-selection schedule.
     temperature_threshold_plies: int = 15
     rewards: RewardWeights = field(default_factory=lambda: RewardWeights(**DEFAULT_REWARD_WEIGHTS.__dict__))
+    # Per-ply value-target decay. value_i = outcome * decay^plies_from_end.
+    # 1.0 = AlphaZero convention (all positions in a winning game label
+    # to +1). <1.0 teaches the value head to distinguish mate-in-1 from
+    # mate-in-100; essential when MCTS sim count is too low for terminal
+    # backup to reliably carry mate-speed info through Q alone.
+    value_ply_decay: float = 1.0
 
 
 # A "sink" accepts completed training examples one at a time. The single-process
@@ -608,9 +614,20 @@ class SelfPlayEngine:
         # such so the trainer weights its value loss accordingly.
         outcome_known = outcome != "cap"
 
-        for ex in slot.examples:
+        # Per-ply value decay: positions close to terminal get magnitude
+        # ≈1, positions further away decay toward 0. Teaches the value
+        # head to rank mate-in-1 > mate-in-20 > "merely winning" —
+        # otherwise MCTS Q is undifferentiated across all winning moves
+        # and can't guide search toward faster wins. The last example
+        # in slot.examples is the position just before the terminal
+        # move, so plies_from_end indexes from the end.
+        decay = self.config.value_ply_decay
+        n = len(slot.examples)
+        for i, ex in enumerate(slot.examples):
+            plies_from_end = n - i
+            ply_factor = decay ** plies_from_end if decay != 1.0 else 1.0
             outcome_from_persp = white_outcome if ex.turn_color == "white" else -white_outcome
-            value = outcome_from_persp * win_weight
+            value = outcome_from_persp * ply_factor * win_weight
             value = max(-1.0, min(1.0, value))
             self.example_sink(TrainingExample(
                 board=ex.board, policy=ex.policy, value=value,
