@@ -476,13 +476,19 @@ class DashboardLogger:
         t = Table.grid(padding=(0, 2))
         t.add_column(style="dim", justify="right")
         t.add_column()
-        for line in self.model_summary.split("\n"):
-            if "=" in line:
-                k, _, v = line.partition("=")
-                t.add_row(k.strip(), v.strip())
-            else:
-                t.add_row("", line)
-        t.add_row("device", self.device_summary)
+
+        def _add_kv_lines(blob: str) -> None:
+            for line in blob.split("\n"):
+                if not line:
+                    continue
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    t.add_row(k.strip(), v.strip())
+                else:
+                    t.add_row("", line)
+
+        _add_kv_lines(self.model_summary)
+        _add_kv_lines(self.device_summary)
         t.add_row("csv", str(self.csv_path))
         return Panel(t, title="model", border_style="blue")
 

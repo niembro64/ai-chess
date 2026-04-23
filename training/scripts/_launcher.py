@@ -10,11 +10,42 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import platform
 import random
 import sys
 from pathlib import Path
 
 import torch
+
+
+def _build_system_summary(device: torch.device) -> str:
+    """Multi-line k=v summary of the host + device for the dashboard panel.
+
+    Cheap probes only — this runs once at startup. GPU name / VRAM via
+    torch.cuda when applicable; CPU count via os.cpu_count(). Missing
+    fields are just omitted.
+    """
+    lines = [f"device={device}"]
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        idx = device.index or 0
+        props = torch.cuda.get_device_properties(idx)
+        vram_gb = props.total_memory / (1024**3)
+        lines.append(f"gpu={props.name}")
+        lines.append(f"vram={vram_gb:.1f}GB")
+        cuda_ver = torch.version.cuda or "?"
+        lines.append(f"cuda={cuda_ver}")
+    elif device.type == "mps":
+        lines.append("gpu=Apple Silicon (MPS)")
+
+    cpu_count = os.cpu_count() or 0
+    lines.append(f"cpu-cores={cpu_count}")
+    lines.append(f"host={platform.node()}")
+    lines.append(f"os={platform.system()} {platform.release()}")
+    lines.append(f"python={platform.python_version()}")
+    lines.append(f"torch={torch.__version__}")
+    return "\n".join(lines)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -167,7 +198,7 @@ def launch(
         with DashboardLogger(
             ckpt_dir,
             model_summary=model_summary,
-            device_summary=str(device),
+            device_summary=_build_system_summary(device),
             on_log=None,
         ) as dash:
             _orig_save = trainer.save_checkpoint
