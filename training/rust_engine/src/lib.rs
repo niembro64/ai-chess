@@ -16,7 +16,7 @@
 //! enforced by `tests/test_rust_engine_parity.py`.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 // ------------------------------------------------------------
 // Constants / types
@@ -876,6 +876,149 @@ fn generate_children(
     Ok(out.unbind())
 }
 
+// ------------------------------------------------------------
+// Board encoding (NN input)
+// ------------------------------------------------------------
+//
+// Mirrors `chess_ai.encoding.encode_board` bit-for-bit. Returns bytes
+// holding a flat [8*8*NUM_PLANES] f32 row-major tensor; Python wraps
+// them with np.frombuffer. Avoids the per-square Python loop that
+// dominated encoding time on every MCTS leaf.
+//
+// Channel layout (NUM_PLANES = 20):
+//   0..5   own pieces    (king, queen, rook, bishop, knight, pawn)
+//   6..11  opponent pieces (same order)
+//   12     constant 1.0 (bias)
+//   13     halfMoveClock / 50 (clamped)
+//   14     fullMoveNumber / 100 (clamped)
+//   15..18 castling rights (from stm perspective)
+//   19     en passant target square
+//
+// For black-to-move positions, rank/file are flipped so "own side"
+// always occupies the bottom half of the board — matching Python.
+
+const NUM_PLANES: usize = 20;
+
+#[inline(always)]
+fn plane_index(r: usize, f: usize, c: usize) -> usize {
+    (r * 8 + f) * NUM_PLANES + c
+}
+
+fn fill_constant_plane(data: &mut [f32], channel: usize, value: f32) {
+    for r in 0..8 {
+        for f in 0..8 {
+            data[plane_index(r, f, channel)] = value;
+        }
+    }
+}
+
+/// Encode a board to the flat NN-input tensor. Returned as `bytes`
+/// holding `8*8*20 = 1280` little-endian f32s; Python wraps via
+/// `np.frombuffer(..., dtype=np.float32)`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn encode_board(
+    py: Python<'_>,
+    board_list: Bound<'_, PyList>,
+    current_turn: &str,
+    half_move_clock: i32,
+    full_move_number: i32,
+    castling: Bound<'_, PyDict>,
+    en_passant: Bound<'_, PyAny>,
+) -> PyResult<Py<PyBytes>> {
+    let board = pack_board(&board_list)?;
+    let cr = pack_castling(&castling)?;
+    let ep = pack_en_passant(&en_passant)?;
+    let white_to_move = current_turn == "white";
+
+    let mut data = vec![0f32; 8 * 8 * NUM_PLANES];
+
+    // Piece planes (0..11). Mirror coords when stm is black so "own side"
+    // occupies the bottom half of the planes.
+    for r in 0..8 {
+        for f in 0..8 {
+            let piece = board[r][f];
+            if piece == 0 {
+                continue;
+            }
+            let is_white = piece > 0;
+            let type_idx = (piece.unsigned_abs() as usize) - 1; // king=0 .. pawn=5
+            let is_own = is_white == white_to_move;
+            let channel = if is_own { type_idx } else { 6 + type_idx };
+            let (or, of) = if white_to_move { (r, f) } else { (7 - r, 7 - f) };
+            data[plane_index(or, of, channel)] = 1.0;
+        }
+    }
+
+    // Channel 12: constant bias.
+    fill_constant_plane(&mut data, 12, 1.0);
+
+    // Channel 13: halfMoveClock / 50, clamped to 1.0. Skip the write if
+    // the value is zero to match the Python behavior (which conditionally
+    // assigns).
+    let hmc = (half_move_clock as f32 / 50.0).min(1.0);
+    if hmc > 0.0 {
+        fill_constant_plane(&mut data, 13, hmc);
+    }
+
+    // Channel 14: fullMoveNumber / 100, clamped.
+    let fmn = (full_move_number as f32 / 100.0).min(1.0);
+    if fmn > 0.0 {
+        fill_constant_plane(&mut data, 14, fmn);
+    }
+
+    // Channels 15..18: castling rights from stm perspective. White-to-move
+    // gets (wk, wq, bk, bq); black-to-move gets (bk, bq, wk, wq).
+    let rights = if white_to_move {
+        [cr.wk, cr.wq, cr.bk, cr.bq]
+    } else {
+        [cr.bk, cr.bq, cr.wk, cr.wq]
+    };
+    for (i, &flag) in rights.iter().enumerate() {
+        if flag {
+            fill_constant_plane(&mut data, 15 + i, 1.0);
+        }
+    }
+
+    // Channel 19: en passant target (single one-hot square).
+    if let Some((ep_r, ep_f)) = ep {
+        let (er, ef) = if white_to_move {
+            (ep_r as usize, ep_f as usize)
+        } else {
+            (7 - ep_r as usize, 7 - ep_f as usize)
+        };
+        data[plane_index(er, ef, 19)] = 1.0;
+    }
+
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
+    };
+    Ok(PyBytes::new_bound(py, bytes).unbind())
+}
+
+/// Mirror of `chess_ai.encoding.move_to_index`. Same per-color flip as
+/// `encode_board` (keeps "own side" at the bottom of the planes).
+#[pyfunction]
+fn move_to_index_fast(
+    from_r: i32,
+    from_f: i32,
+    to_r: i32,
+    to_f: i32,
+    is_white: bool,
+) -> i32 {
+    let (fr, ff) = if is_white {
+        (from_r, from_f)
+    } else {
+        (7 - from_r, 7 - from_f)
+    };
+    let (tr, tf) = if is_white {
+        (to_r, to_f)
+    } else {
+        (7 - to_r, 7 - to_f)
+    };
+    (fr * 8 + ff) * 64 + (tr * 8 + tf)
+}
+
 #[pymodule]
 fn chess_ai_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_legal_moves, m)?)?;
@@ -883,5 +1026,7 @@ fn chess_ai_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_square_attacked_by_py, m)?)?;
     m.add_function(wrap_pyfunction!(apply_move_full, m)?)?;
     m.add_function(wrap_pyfunction!(generate_children, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_board, m)?)?;
+    m.add_function(wrap_pyfunction!(move_to_index_fast, m)?)?;
     Ok(())
 }

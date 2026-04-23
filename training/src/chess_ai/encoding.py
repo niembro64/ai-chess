@@ -33,6 +33,13 @@ def encode_board(state: ChessGameState) -> np.ndarray:
     nested-list-of-Piece-dataclasses, so we need to resolve each cell). The
     constant planes (bias/counters/castling) are filled with numpy slice
     broadcasts, which skips 64 Python iterations per plane.
+
+    A Rust implementation exists in rust_engine but benchmarks ~15% slower
+    here because marshalling the Python board (nested dataclass list →
+    list-of-dicts) into FFI dwarfs the scalar-loop saving. It'll become
+    the fast path once MCTS owns state in Rust (no marshalling on the
+    leaf-expansion boundary). Keeping the Rust function exported for
+    that integration.
     """
     data = np.zeros((8, 8, NUM_PLANES), dtype=np.float32)
     is_white = state.currentTurn == "white"
