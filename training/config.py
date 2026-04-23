@@ -197,6 +197,14 @@ def build_config() -> TrainConfig:
         c_puct=None,
         dirichlet_alpha=None,
         dirichlet_epsilon=0.35,
+        # Widen PUCT at self-play only (eval keeps c_puct=1.5 default
+        # for sharp exploitation). 2.5 gives low-prior moves ~67% more
+        # exploration bonus than the 1.5 default — on a sharp prior of
+        # 0.005 at 60 visits, U goes from 0.058 to 0.097, enough to
+        # start tipping the selection when Q deltas are small. Paired
+        # with policy softening (T=1.5), this gives MCTS a real chance
+        # to escape the collapsed prior at low sim counts.
+        self_play_c_puct=2.5,
 
         # ---- Replay buffer ----
         replay_buffer_capacity=200_000,

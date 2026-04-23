@@ -83,6 +83,12 @@ class TrainConfig:
     c_puct: float | None = None
     dirichlet_alpha: float | None = None
     dirichlet_epsilon: float | None = None
+    # Self-play-only override for c_puct. MP workers set their MCTS
+    # globals from this; main-process eval keeps `c_puct` above. Used
+    # to widen PUCT exploration during self-play (recovery from
+    # collapse) while keeping eval's search strength tuned for
+    # exploitation of the trained policy. None = use `c_puct`.
+    self_play_c_puct: float | None = None
     # Left-right (file) mirror augmentation on sampled batches. Chess is
     # symmetric about the file axis, so this is a free 2x data multiplier.
     # 0.0 disables. 0.5 mirrors half the batch each step (standard).
@@ -331,7 +337,11 @@ class Trainer:
                 endgame_start_prob=self.config.endgame_start_prob,
                 random_start_prob=self.config.random_start_prob,
                 temperature_threshold_plies=self.config.temperature_threshold_plies,
-                c_puct=self.config.c_puct,
+                # Workers use self_play_c_puct when set; falls back to c_puct.
+                # Main-process eval below keeps config.c_puct.
+                c_puct=self.config.self_play_c_puct
+                    if self.config.self_play_c_puct is not None
+                    else self.config.c_puct,
                 dirichlet_alpha=self.config.dirichlet_alpha,
                 dirichlet_epsilon=self.config.dirichlet_epsilon,
                 syzygy_path=self.config.syzygy_path,
