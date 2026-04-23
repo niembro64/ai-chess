@@ -103,6 +103,14 @@ class TrainConfig:
     # used 800) to reach terminal nodes often enough for Q to carry
     # mate-speed signal. Leela / KataGo use ~0.99.
     value_ply_decay: float = 1.0
+    # Soften NN policy priors during self-play MCTS (>1.0 = flatter). The
+    # training target (MCTS visit distribution) is unchanged; only the
+    # input prior to MCTS is softened, so trained-policy sharpness at
+    # eval time is preserved. Fixes policy-collapse where MCTS can't
+    # explore past an overconfident wrong-move prior at low sim counts.
+    # Typical: 1.3–1.6 when recovering from a collapsed policy; 1.0
+    # (no-op) otherwise.
+    self_play_policy_softening_temperature: float = 1.0
     # Mixed-precision training on CUDA: forward/backward in fp16 with a
     # GradScaler. 2-3x speedup on Pascal (1080 Ti) with no measurable
     # quality loss. No-op on CPU/MPS.
@@ -330,6 +338,7 @@ class Trainer:
                 syzygy_max_pieces=self.config.syzygy_max_pieces,
                 rewards=self.config.rewards,
                 value_ply_decay=self.config.value_ply_decay,
+                policy_softening_temperature=self.config.self_play_policy_softening_temperature,
             )
             self._mp_self_play = MultiprocessingSelfPlay(
                 arch=ModelArch.from_model(self.model),
@@ -350,6 +359,7 @@ class Trainer:
                     temperature_threshold_plies=self.config.temperature_threshold_plies,
                     rewards=self.config.rewards,
                     value_ply_decay=self.config.value_ply_decay,
+                    policy_softening_temperature=self.config.self_play_policy_softening_temperature,
                 ),
                 rng=self.rng,
             )

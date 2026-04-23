@@ -82,6 +82,9 @@ class MultiprocessingConfig:
     # Per-ply decay on the value target. <1.0 teaches the value head
     # to prefer fast wins (see TrainConfig.value_ply_decay for why).
     value_ply_decay: float = 1.0
+    # Soften NN policy priors in self-play MCTS (>1.0 = flatter prior).
+    # See SelfPlayConfig.policy_softening_temperature.
+    policy_softening_temperature: float = 1.0
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -257,6 +260,7 @@ def _worker_main(
             temperature_threshold_plies=config.temperature_threshold_plies,
             rewards=config.rewards,
             value_ply_decay=config.value_ply_decay,
+            policy_softening_temperature=config.policy_softening_temperature,
         ),
         rng=rng,
     )

@@ -312,18 +312,35 @@ def _add_dirichlet_noise(root: MCTSNode) -> None:
 # --- Batched MCTS across many games ---
 
 
+def _soften_policy(policies: np.ndarray, temperature: float) -> np.ndarray:
+    """Apply p**(1/T) and renormalize row-wise. T>1 flattens the prior."""
+    softened = np.power(np.maximum(policies, 1e-12), 1.0 / temperature)
+    row_sums = softened.sum(axis=-1, keepdims=True)
+    return softened / np.maximum(row_sums, 1e-12)
+
+
 def run_batched_mcts(
     states: list[ChessGameState],
     evaluator: BatchedEvaluator,
     num_simulations: int,
     rng: random.Random | None = None,
     temperatures: list[float] | None = None,
+    policy_softening_temperature: float = 1.0,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
 
     `temperatures[i]` controls the move-selection temperature for game `i`.
     Defaults to τ=1.0 for every game (AlphaZero-style exploration). Pass a
     list of zeros to get argmax (greedy) selection for all games.
+
+    `policy_softening_temperature` flattens the priors fed to MCTS: >1.0
+    lets low-prior moves accumulate enough PUCT exploration to actually
+    get visited. Applied to every NN policy read (root + leaf expansions)
+    before priors are set. The training target (MCTS visit distribution)
+    is unchanged; this only widens search. Use at self-play time when a
+    collapsed policy head is overconfident on wrong moves and preventing
+    MCTS from escaping — the trained-policy sharpness at eval time is
+    preserved (eval callers leave this at 1.0).
     """
     rng = rng or random
     if temperatures is None:
@@ -332,6 +349,8 @@ def run_batched_mcts(
         raise ValueError(
             f"temperatures length {len(temperatures)} != states length {len(states)}"
         )
+
+    soften = policy_softening_temperature != 1.0
 
     searches = [MCTSSearch(s) for s in states]
 
@@ -342,6 +361,8 @@ def run_batched_mcts(
     # Batch-evaluate the root positions.
     root_boards = np.stack([s.get_root_board() for s in active])
     root_policies, root_values = evaluator(root_boards)
+    if soften:
+        root_policies = _soften_policy(root_policies, policy_softening_temperature)
     for i, s in enumerate(active):
         s.init_root(root_policies[i], float(root_values[i]))
 
@@ -356,6 +377,8 @@ def run_batched_mcts(
         if pending:
             boards = np.stack([b for _, b in pending])
             policies, values = evaluator(boards)
+            if soften:
+                policies = _soften_policy(policies, policy_softening_temperature)
             for j, (idx, _) in enumerate(pending):
                 active[idx].supply_eval(policies[j], float(values[j]))
 

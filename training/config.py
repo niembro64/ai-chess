@@ -142,6 +142,15 @@ def build_config() -> TrainConfig:
         # ≈ 0.61, mate-in-100 ≈ 0.37 — enough spread for Q to guide
         # MCTS toward mates without terminal expansion.
         value_ply_decay=0.99,
+        # Soften self-play MCTS priors. Diagnostic on the 32k-gen
+        # checkpoint showed a collapsed policy with prior 0.67–0.78
+        # on the wrong move vs 0.001–0.015 on the mating move — PUCT
+        # at 100 sims + c_puct=1.5 can't explore past that. Softening
+        # with T=1.5 flattens the prior (e.g. 0.78→0.67, 0.003→0.012)
+        # giving low-prior good moves enough exploration budget to
+        # actually get visited. Only applied at self-play time;
+        # eval keeps the trained policy's sharpness intact.
+        self_play_policy_softening_temperature=1.5,
         # Disabled. aux_material_weight feeds material-balance signal
         # through the shared trunk, which can bias trunk features
         # toward material-changing moves (captures, pushes) and away

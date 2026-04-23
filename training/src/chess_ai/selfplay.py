@@ -438,6 +438,15 @@ class SelfPlayConfig:
     # mate-in-100; essential when MCTS sim count is too low for terminal
     # backup to reliably carry mate-speed info through Q alone.
     value_ply_decay: float = 1.0
+    # Soften NN policy priors before feeding them to MCTS during self-play.
+    # 1.0 = no change; >1.0 flattens the prior (p**(1/T) + renormalize).
+    # Fixes policy-collapse where the trained policy peaks at prior~0.7+
+    # on a wrong move — at 100 sims + c_puct=1.5, PUCT can't overcome
+    # that peak to visit moves with prior~0.001, so MCTS stays stuck on
+    # the bad move and trains the policy to be even more confident.
+    # Training target (visit distribution) is unchanged; eval callers
+    # leave this at 1.0 so the sharp trained policy is used verbatim.
+    policy_softening_temperature: float = 1.0
 
 
 # A "sink" accepts completed training examples one at a time. The single-process
@@ -482,7 +491,12 @@ class SelfPlayEngine:
             for g in self.games
         ]
         mcts_results = run_batched_mcts(
-            states, self.evaluator, self.config.mcts_simulations, self.rng, temperatures
+            states,
+            self.evaluator,
+            self.config.mcts_simulations,
+            self.rng,
+            temperatures,
+            policy_softening_temperature=self.config.policy_softening_temperature,
         )
 
         finished: list[GameResult] = []
