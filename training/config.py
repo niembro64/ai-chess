@@ -95,23 +95,32 @@ def build_config() -> TrainConfig:
         # past 25-30 in the first place).
         mcts_simulations=100,
         # Max time the inference server waits to accumulate requests before
-        # dispatching a GPU batch. 5ms was tuned for 4 workers; with 8
-        # workers (Rust-MCTS era) requests arrive faster so 8ms lets
-        # bigger batches accumulate without adding meaningful latency.
-        # Measured tradeoff: +3ms per leaf eval vs ~2× inference batch
-        # = net GPU throughput win because GPU is the bottleneck now.
-        mp_batch_wait_ms=8.0,
+        # dispatching a GPU batch. History: 5ms (pre-Rust, 4 workers) →
+        # 8ms (Rust MCTS, 8 workers) → 12ms (once GPU hit 92% we bumped
+        # again to let even bigger batches queue up). Above ~15ms each
+        # worker feels the latency and per-game throughput drops; at 12
+        # the GPU is processing near-optimal batch sizes with minimal
+        # worker-side stall.
+        mp_batch_wait_ms=12.0,
         weight_broadcast_every=50,
 
         # ---- Training hyperparams ----
         batch_size=512,
         gradient_steps_per_selfplay_step=1,
-        # 8 was cutting grad-step rate-limit 4× below the old working
-        # value (32). At 8, each sample got reused in ~64 consecutive
-        # batches before fresher data displaced it, which overfits the
-        # policy head onto whatever early biases the MCTS visit target
-        # happened to have. 32 is the AlphaZero-adjacent rule-of-thumb.
-        min_examples_between_grad_steps=32,
+        # Post-Rust-MCTS era the self-play pipeline flows ~4× faster,
+        # which means each sample in the 200k buffer gets re-sampled
+        # many more times per minute than under the Python-MCTS regime.
+        # At 32, effective sample reuse was ~44×/minute (vs AlphaZero's
+        # target of ~8× *lifetime* per position). Bumping to 64 halves
+        # the reuse rate and lets each grad step see fresher data —
+        # trades raw gen/min for actual learning per step. ETA goes up
+        # but convergence-per-gen should improve.
+        # (Original comment: 8 was cutting grad-step rate-limit 4× below
+        # the old working value (32). At 8, each sample got reused in
+        # ~64 consecutive batches before fresher data displaced it,
+        # which overfits the policy head onto whatever early biases the
+        # MCTS visit target happened to have.)
+        min_examples_between_grad_steps=64,
         learning_rate=1e-3,
         weight_decay=1e-4,
         # Step-decay schedule — rough AlphaZero-style. Steps are gentler
