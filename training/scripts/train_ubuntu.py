@@ -19,8 +19,13 @@ from _launcher import launch  # noqa: E402
 
 
 if __name__ == "__main__":
+    # Post-Rust-MCTS tuning: each worker's MCTS is ~20× cheaper now, so
+    # workers spend most of their time waiting on NN evals (I/O-bound)
+    # rather than burning a core on Python. Oversubscribing cores by 2×
+    # keeps the inference-server queue deeper, which lets it build
+    # bigger GPU batches (3090 was at ~33% util on first restart).
     launch(
-        num_workers=4,          # one per CPU core
-        games_per_worker=24,    # 3090 eats big batches; keep it fed
-        batch_size=512,         # 24 GiB VRAM, no reason to starve it
+        num_workers=8,          # 2× cores; MCTS is Rust, workers are I/O-bound
+        games_per_worker=24,    # 8×24 = 192 concurrent games → big batches
+        batch_size=1024,        # was 512; VRAM at 1.2/24GB, headroom to spare
     )

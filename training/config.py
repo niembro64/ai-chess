@@ -94,7 +94,13 @@ def build_config() -> TrainConfig:
         # strength (which was the original motivation for lifting sims
         # past 25-30 in the first place).
         mcts_simulations=100,
-        mp_batch_wait_ms=5.0,
+        # Max time the inference server waits to accumulate requests before
+        # dispatching a GPU batch. 5ms was tuned for 4 workers; with 8
+        # workers (Rust-MCTS era) requests arrive faster so 8ms lets
+        # bigger batches accumulate without adding meaningful latency.
+        # Measured tradeoff: +3ms per leaf eval vs ~2× inference batch
+        # = net GPU throughput win because GPU is the bottleneck now.
+        mp_batch_wait_ms=8.0,
         weight_broadcast_every=50,
 
         # ---- Training hyperparams ----
