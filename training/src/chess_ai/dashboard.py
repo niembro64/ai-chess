@@ -38,6 +38,8 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
+from .sysmon import SystemMonitor, SystemSnapshot
+
 # Keep at most this many points on each rolling line in the ASCII plot.
 _LOSS_HISTORY_POINTS = 500
 
@@ -65,6 +67,22 @@ def _format_duration(seconds: float) -> str:
     if h:
         return f"{h}h{m:02d}m"
     return f"{m}m{s:02d}s"
+
+
+def _bar_pct(pct: float, width: int = 10) -> str:
+    """Fixed-width unicode bar for utilization percentages (0-100)."""
+    pct = max(0.0, min(100.0, pct))
+    full = int(pct * width / 100.0)
+    return "█" * full + "░" * (width - full)
+
+
+def _util_style(pct: float) -> str:
+    """Color utilization: red = idle (bad for training), green = hot."""
+    if pct < 30:
+        return "red"
+    if pct < 70:
+        return "yellow"
+    return "green"
 
 
 def _fractional_bar(pct: float, width: int, fg: str) -> Text:
@@ -204,6 +222,11 @@ class DashboardLogger:
 
         self._csv_writer: csv.DictWriter | None = None
         self._csv_fp = None
+
+        # Hardware telemetry. Best-effort: missing libs (pynvml on macOS,
+        # psutil unavailable) result in a hidden panel, not a crash.
+        self._sysmon = SystemMonitor()
+        self._sys_snapshot: SystemSnapshot | None = None
 
     # -- Context manager --
 
@@ -388,11 +411,16 @@ class DashboardLogger:
     # -- Rendering --
 
     def _render(self, stats) -> Layout:
+        # Refresh hardware snapshot each render tick. Cheap (psutil
+        # delta-read + cached NVML handles) and keeps the panel live.
+        self._sys_snapshot = self._sysmon.snapshot()
+
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="top", size=9),
             Layout(name="middle", size=19),
+            Layout(name="hardware", size=6),
             Layout(name="timings", size=9),
             Layout(name="loss"),
             Layout(name="events", size=10),
@@ -406,6 +434,7 @@ class DashboardLogger:
             Layout(self._eval_panel(), name="eval"),
         )
         layout["header"].update(self._header_panel())
+        layout["hardware"].update(self._hardware_panel())
         layout["timings"].update(self._timings_panel(stats))
         layout["loss"].update(self._loss_panel())
         layout["events"].update(self._events_panel())
@@ -886,6 +915,70 @@ class DashboardLogger:
             "optim", fmt("t_optim_ms"),
         )
         return Panel(table, title="timings (EMA, per loop/step)", border_style="yellow")
+
+    def _hardware_panel(self) -> Panel:
+        """Live CPU / RAM / GPU utilization. Sampled per render tick."""
+        snap = self._sys_snapshot
+        if snap is None or not snap.have_data:
+            # Libraries unavailable (pynvml missing, psutil missing) or
+            # failed to init. Show a placeholder so the user knows the
+            # panel is there but silent, rather than hiding it entirely.
+            t = Table.grid(expand=True, padding=(0, 1))
+            t.add_column()
+            t.add_row(Text("telemetry unavailable (install psutil / pynvml)", style="dim"))
+            return Panel(t, title="hardware", border_style="yellow")
+
+        # Two-row grid: GPU row(s) on top, host row at bottom.
+        table = Table.grid(expand=True, padding=(0, 2))
+        # 4 info groups per row so a single GPU row fits comfortably at
+        # typical terminal widths.
+        table.add_column(style="dim", justify="right", width=10)
+        table.add_column(width=26)
+        table.add_column(style="dim", justify="right", width=10)
+        table.add_column(width=26)
+        table.add_column(style="dim", justify="right", width=10)
+        table.add_column(width=22)
+
+        for i, g in enumerate(snap.gpus):
+            label = f"gpu{i}" if len(snap.gpus) > 1 else "gpu"
+            name = g.name if g.name else "?"
+            util_bar = _bar_pct(g.util_pct, width=10)
+            util_txt = Text.assemble(
+                (f"{util_bar}  ", _util_style(g.util_pct)),
+                (f"{g.util_pct:5.1f}%  ", _util_style(g.util_pct)),
+                (f"{name}", "dim"),
+            )
+            vram_pct = (
+                100.0 * g.mem_used_gb / g.mem_total_gb if g.mem_total_gb > 0 else 0.0
+            )
+            vram_txt = (
+                f"{g.mem_used_gb:4.1f} / {g.mem_total_gb:4.1f} GB  "
+                f"({vram_pct:4.1f}%)"
+            )
+            extra_txt = f"{g.temp_c:.0f}°C"
+            if g.power_limit_w > 0:
+                extra_txt += f"   {g.power_w:.0f} / {g.power_limit_w:.0f} W"
+            elif g.power_w > 0:
+                extra_txt += f"   {g.power_w:.0f} W"
+            table.add_row(label, util_txt, "vram", vram_txt, "temp", extra_txt)
+
+        # Host row: CPU util + RAM.
+        cpu_bar = _bar_pct(snap.cpu_util_pct, width=10)
+        cpu_txt = Text.assemble(
+            (f"{cpu_bar}  ", _util_style(snap.cpu_util_pct)),
+            (f"{snap.cpu_util_pct:5.1f}%  ", _util_style(snap.cpu_util_pct)),
+            (f"({snap.cpu_cores} cores)", "dim"),
+        )
+        ram_pct = (
+            100.0 * snap.ram_used_gb / snap.ram_total_gb if snap.ram_total_gb > 0 else 0.0
+        )
+        ram_txt = (
+            f"{snap.ram_used_gb:4.1f} / {snap.ram_total_gb:4.1f} GB  "
+            f"({ram_pct:4.1f}%)"
+        )
+        table.add_row("cpu", cpu_txt, "ram", ram_txt, "", "")
+
+        return Panel(table, title="hardware (live)", border_style="yellow")
 
     def _loss_panel(self) -> Panel:
         # plotext renders into a size in cell units. Leave margins for the panel border.
