@@ -18,16 +18,18 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
+mod mcts;
+
 // ------------------------------------------------------------
 // Constants / types
 // ------------------------------------------------------------
 
-const KING: i8 = 1;
-const QUEEN: i8 = 2;
-const ROOK: i8 = 3;
-const BISHOP: i8 = 4;
-const KNIGHT: i8 = 5;
-const PAWN: i8 = 6;
+pub(crate) const KING: i8 = 1;
+pub(crate) const QUEEN: i8 = 2;
+pub(crate) const ROOK: i8 = 3;
+pub(crate) const BISHOP: i8 = 4;
+pub(crate) const KNIGHT: i8 = 5;
+pub(crate) const PAWN: i8 = 6;
 
 // Must match Python _KNIGHT_OFFSETS / _ROOK_DIRS / _BISHOP_DIRS order to
 // preserve legal-move ordering for parity tests.
@@ -42,24 +44,24 @@ const QUEEN_DIRS: [(i32, i32); 8] = [
     (1, 1), (1, -1), (-1, 1), (-1, -1),
 ];
 
-type Board = [[i8; 8]; 8];
+pub(crate) type Board = [[i8; 8]; 8];
 
 #[derive(Clone, Copy, Debug)]
-struct CastlingRights {
-    wk: bool,
-    wq: bool,
-    bk: bool,
-    bq: bool,
+pub(crate) struct CastlingRights {
+    pub(crate) wk: bool,
+    pub(crate) wq: bool,
+    pub(crate) bk: bool,
+    pub(crate) bq: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Move {
-    from_r: u8,
-    from_f: u8,
-    to_r: u8,
-    to_f: u8,
+pub(crate) struct Move {
+    pub(crate) from_r: u8,
+    pub(crate) from_f: u8,
+    pub(crate) to_r: u8,
+    pub(crate) to_f: u8,
     // 0 = no promotion; otherwise one of QUEEN/ROOK/BISHOP/KNIGHT.
-    promotion: i8,
+    pub(crate) promotion: i8,
 }
 
 // ------------------------------------------------------------
@@ -160,7 +162,7 @@ fn find_king(board: &Board, white: bool) -> (i32, i32) {
 }
 
 #[inline]
-fn is_in_check(board: &Board, white: bool) -> bool {
+pub(crate) fn is_in_check(board: &Board, white: bool) -> bool {
     let (kr, kf) = find_king(board, white);
     is_pos_attacked_by(board, kr, kf, !white)
 }
@@ -340,7 +342,7 @@ fn pseudo_legal_moves(
 // In-place apply (with the info needed to undo)
 // ------------------------------------------------------------
 
-fn apply_move_to_board(board: &mut Board, m: &Move, castling: &mut CastlingRights) -> (i8, bool, bool) {
+pub(crate) fn apply_move_to_board(board: &mut Board, m: &Move, castling: &mut CastlingRights) -> (i8, bool, bool) {
     let piece = board[m.from_r as usize][m.from_f as usize];
     let captured = board[m.to_r as usize][m.to_f as usize];
     let mut is_en_passant = false;
@@ -401,7 +403,7 @@ fn apply_move_to_board(board: &mut Board, m: &Move, castling: &mut CastlingRight
 // get_legal_moves — the headline hot path
 // ------------------------------------------------------------
 
-fn legal_moves_impl(
+pub(crate) fn legal_moves_impl(
     board: &mut Board,
     white_to_move: bool,
     castling: &mut CastlingRights,
@@ -467,7 +469,7 @@ fn legal_moves_impl(
 // Python ↔ Rust marshalling
 // ------------------------------------------------------------
 
-fn piece_type_from_str(s: &str) -> PyResult<i8> {
+pub(crate) fn piece_type_from_str(s: &str) -> PyResult<i8> {
     Ok(match s {
         "king" => KING,
         "queen" => QUEEN,
@@ -479,7 +481,7 @@ fn piece_type_from_str(s: &str) -> PyResult<i8> {
     })
 }
 
-fn piece_type_to_str(pt: i8) -> &'static str {
+pub(crate) fn piece_type_to_str(pt: i8) -> &'static str {
     match pt {
         KING => "king",
         QUEEN => "queen",
@@ -491,7 +493,7 @@ fn piece_type_to_str(pt: i8) -> &'static str {
     }
 }
 
-fn pack_board(py_board: &Bound<'_, PyList>) -> PyResult<Board> {
+pub(crate) fn pack_board(py_board: &Bound<'_, PyList>) -> PyResult<Board> {
     let mut board: Board = [[0i8; 8]; 8];
     for (r, row_any) in py_board.iter().enumerate() {
         if r >= 8 { break; }
@@ -517,7 +519,7 @@ fn pack_board(py_board: &Bound<'_, PyList>) -> PyResult<Board> {
     Ok(board)
 }
 
-fn pack_castling(py_castling: &Bound<'_, PyDict>) -> PyResult<CastlingRights> {
+pub(crate) fn pack_castling(py_castling: &Bound<'_, PyDict>) -> PyResult<CastlingRights> {
     let get = |k: &str| -> PyResult<bool> {
         let obj = py_castling.get_item(k)?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(k.to_string()))?;
@@ -531,7 +533,7 @@ fn pack_castling(py_castling: &Bound<'_, PyDict>) -> PyResult<CastlingRights> {
     })
 }
 
-fn pack_en_passant(py_ep: &Bound<'_, PyAny>) -> PyResult<Option<(u8, u8)>> {
+pub(crate) fn pack_en_passant(py_ep: &Bound<'_, PyAny>) -> PyResult<Option<(u8, u8)>> {
     if py_ep.is_none() {
         return Ok(None);
     }
@@ -590,6 +592,79 @@ fn is_in_check_py(board_list: Bound<'_, PyList>, color: &str) -> PyResult<bool> 
 /// Python wrapper maps back to `Piece` dataclass instances via a static
 /// lookup table — significantly cheaper than round-tripping through
 /// dict-of-dicts.
+/// Pure-Rust state transition: apply a move and detect the resulting
+/// status. Shared between `apply_move_full` (Python-facing) and the
+/// MCTS tree expansion (which builds hundreds of child states per sim
+/// without crossing FFI). Returns
+///   (new_board, new_castling, new_ep, new_hmc, new_fmn, new_white_to_move, status)
+/// where `status` matches Python's status strings exactly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_move_full_core(
+    mut board: Board,
+    white_to_move: bool,
+    mut castling: CastlingRights,
+    _ep: Option<(u8, u8)>,
+    hmc: i32,
+    fmn: i32,
+    m: &Move,
+) -> (
+    Board,
+    CastlingRights,
+    Option<(u8, u8)>,
+    i32,
+    i32,
+    bool,
+    &'static str,
+) {
+    let piece_before = board[m.from_r as usize][m.from_f as usize];
+    let is_pawn_move = piece_before != 0 && piece_before.abs() == PAWN;
+    let was_capture = board[m.to_r as usize][m.to_f as usize] != 0;
+
+    let (_, is_en_passant, _) = apply_move_to_board(&mut board, m, &mut castling);
+
+    let new_ep: Option<(u8, u8)> =
+        if is_pawn_move && (m.to_r as i32 - m.from_r as i32).abs() == 2 {
+            Some(((m.from_r + m.to_r) / 2, m.from_f))
+        } else {
+            None
+        };
+
+    let new_hmc = if is_pawn_move || was_capture || is_en_passant {
+        0
+    } else {
+        hmc + 1
+    };
+
+    let new_fmn = if !white_to_move { fmn + 1 } else { fmn };
+    let new_white_to_move = !white_to_move;
+
+    // Status detection (matches apply_move_full): count legal moves on a
+    // scratch copy and combine with in-check detection.
+    let mut test_board = board;
+    let mut test_cr = castling;
+    let next_legal = legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep);
+    let in_check = is_in_check(&board, new_white_to_move);
+    let status: &'static str = if next_legal.is_empty() {
+        if in_check { "checkmate" } else { "stalemate" }
+    } else if in_check {
+        "check"
+    } else if new_hmc >= 100 {
+        "draw"
+    } else {
+        "active"
+    };
+
+    (
+        board,
+        castling,
+        new_ep,
+        new_hmc,
+        new_fmn,
+        new_white_to_move,
+        status,
+    )
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (
@@ -611,13 +686,9 @@ fn apply_move_full(
     to_f: i32,
     promotion: Option<String>,
 ) -> PyResult<Py<PyDict>> {
-    let mut board = pack_board(&board_list)?;
-    let mut cr = pack_castling(&castling)?;
-    // pack_en_passant is still called so we surface any parse error from
-    // malformed input; the actual en-passant-capture handling inside
-    // apply_move_to_board runs off the pawn-diagonal-to-empty heuristic,
-    // which doesn't need the ep target at apply time.
-    let _ep = pack_en_passant(&en_passant)?;
+    let board = pack_board(&board_list)?;
+    let cr = pack_castling(&castling)?;
+    let ep = pack_en_passant(&en_passant)?;
     let white_to_move = current_turn == "white";
 
     let promo: i8 = match promotion.as_deref() {
@@ -632,54 +703,14 @@ fn apply_move_full(
         promotion: promo,
     };
 
-    let piece_before = board[m.from_r as usize][m.from_f as usize];
-    if piece_before == 0 {
+    if board[m.from_r as usize][m.from_f as usize] == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "No piece at source square",
         ));
     }
-    let is_pawn_move = piece_before.abs() == PAWN;
-    let was_capture = board[m.to_r as usize][m.to_f as usize] != 0;
 
-    let (_, is_en_passant, _) = apply_move_to_board(&mut board, &m, &mut cr);
-
-    let new_ep: Option<(u8, u8)> = if is_pawn_move && (m.to_r as i32 - m.from_r as i32).abs() == 2 {
-        Some(((m.from_r + m.to_r) / 2, m.from_f))
-    } else {
-        None
-    };
-
-    let new_hmc = if is_pawn_move || was_capture || is_en_passant {
-        0
-    } else {
-        half_move_clock + 1
-    };
-
-    // Full-move number increments after black's move (Python: `if
-    // state.currentTurn == "black": newState.fullMoveNumber += 1`).
-    let new_fmn = if !white_to_move {
-        full_move_number + 1
-    } else {
-        full_move_number
-    };
-
-    let new_white_to_move = !white_to_move;
-
-    // Status: check legal-move count on a scratch copy (legal_moves_impl
-    // restores in-place, but being defensive is cheap).
-    let mut test_board = board;
-    let mut test_cr = cr;
-    let next_legal = legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep);
-    let in_check = is_in_check(&board, new_white_to_move);
-    let status: &str = if next_legal.is_empty() {
-        if in_check { "checkmate" } else { "stalemate" }
-    } else if in_check {
-        "check"
-    } else if new_hmc >= 100 {
-        "draw"
-    } else {
-        "active"
-    };
+    let (board, cr, new_ep, new_hmc, new_fmn, new_white_to_move, status) =
+        apply_move_full_core(board, white_to_move, cr, ep, half_move_clock, full_move_number, &m);
 
     // Pack new state. Board goes out as a flat list of 64 signed ints
     // — the Python wrapper maps each int back to its cached Piece via a
@@ -897,14 +928,14 @@ fn generate_children(
 // For black-to-move positions, rank/file are flipped so "own side"
 // always occupies the bottom half of the board — matching Python.
 
-const NUM_PLANES: usize = 20;
+pub(crate) const NUM_PLANES: usize = 20;
 
 #[inline(always)]
-fn plane_index(r: usize, f: usize, c: usize) -> usize {
+pub(crate) fn plane_index(r: usize, f: usize, c: usize) -> usize {
     (r * 8 + f) * NUM_PLANES + c
 }
 
-fn fill_constant_plane(data: &mut [f32], channel: usize, value: f32) {
+pub(crate) fn fill_constant_plane(data: &mut [f32], channel: usize, value: f32) {
     for r in 0..8 {
         for f in 0..8 {
             data[plane_index(r, f, channel)] = value;
@@ -1028,5 +1059,6 @@ fn chess_ai_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_children, m)?)?;
     m.add_function(wrap_pyfunction!(encode_board, m)?)?;
     m.add_function(wrap_pyfunction!(move_to_index_fast, m)?)?;
+    mcts::register(m)?;
     Ok(())
 }

@@ -19,7 +19,7 @@ from typing import Callable
 import numpy as np
 
 from .encoding import POLICY_SIZE, encode_board, move_to_index
-from .engine import ChessGameState, Move, apply_move, expand_children, get_legal_moves
+from .engine import ChessGameState, Move, Position, apply_move, expand_children, get_legal_moves
 
 C_PUCT = 1.5
 DIRICHLET_ALPHA = 0.3
@@ -319,6 +319,138 @@ def _soften_policy(policies: np.ndarray, temperature: float) -> np.ndarray:
     return softened / np.maximum(row_sums, 1e-12)
 
 
+try:
+    import chess_ai_rust as _rust_mcts
+
+    _HAVE_RUST_MCTS = hasattr(_rust_mcts, "MctsSearch")
+except ImportError:
+    _HAVE_RUST_MCTS = False
+
+# Opt-in flag; defaults on when the Rust extension is present. Set
+# `CHESS_AI_PYTHON_MCTS=1` to force the Python implementation for
+# parity testing / debugging.
+import os as _os
+USE_RUST_MCTS = _HAVE_RUST_MCTS and not _os.environ.get("CHESS_AI_PYTHON_MCTS")
+
+
+def _state_to_dict(state: ChessGameState) -> dict:
+    """Serialize a ChessGameState into the plain-dict form Rust MctsSearch
+    expects. Mirrors `ChessGameState.to_dict()` but avoids the method call
+    overhead and keeps this module self-contained."""
+    cr = state.castlingRights
+    ep = state.enPassantTarget
+    return {
+        "board": [
+            [None if p is None else {"color": p.color, "type": p.type} for p in row]
+            for row in state.board
+        ],
+        "currentTurn": state.currentTurn,
+        "castlingRights": {
+            "whiteKingside": cr.whiteKingside,
+            "whiteQueenside": cr.whiteQueenside,
+            "blackKingside": cr.blackKingside,
+            "blackQueenside": cr.blackQueenside,
+        },
+        "enPassantTarget": None if ep is None else {"rank": ep.rank, "file": ep.file},
+        "halfMoveClock": state.halfMoveClock,
+        "fullMoveNumber": state.fullMoveNumber,
+        "status": state.status,
+    }
+
+
+def _tuple_to_move(tup: tuple[int, int, int, int, str | None]) -> Move:
+    from_r, from_f, to_r, to_f, promo = tup
+    return Move(
+        from_pos=Position(rank=from_r, file=from_f),
+        to_pos=Position(rank=to_r, file=to_f),
+        promotion=promo,
+    )
+
+
+def _run_batched_mcts_rust(
+    states: list[ChessGameState],
+    evaluator: BatchedEvaluator,
+    num_simulations: int,
+    rng: random.Random,
+    temperatures: list[float],
+    policy_softening_temperature: float,
+) -> list[MCTSResult]:
+    """Rust-backed MCTS loop. Same semantics as the Python path; ~20× faster
+    per-sim because the tree + PUCT + backprop live in Rust and the board
+    encoding is emitted directly from Rust without marshalling."""
+    soften = policy_softening_temperature != 1.0
+    searches = [_rust_mcts.MctsSearch(_state_to_dict(s), C_PUCT) for s in states]
+    active_idx = [i for i, s in enumerate(searches) if not s.is_terminal()]
+
+    # Terminal-at-construction games return a zero-policy sentinel with
+    # a dummy move. The outer self-play loop shouldn't call into MCTS for
+    # already-terminal states, but we mirror Python's behavior defensively.
+    if not active_idx:
+        results = []
+        for i, s in enumerate(searches):
+            seed = rng.randrange(2**63)
+            policy_bytes, move_tup, rv = s.get_result(temperatures[i], seed)
+            policy = np.frombuffer(policy_bytes, dtype=np.float32).copy()
+            if sum(move_tup[:4]) == 0 and move_tup[4] is None:
+                # No legal moves — return the existing (zero) policy but
+                # synthesize a placeholder Move; caller is expected to
+                # check the state's status, not use this move.
+                move = Move(Position(0, 0), Position(0, 0), None)
+            else:
+                move = _tuple_to_move(move_tup)
+            results.append(MCTSResult(policy=policy, move=move, root_value=rv))
+        return results
+
+    # Batch-evaluate the root positions.
+    root_boards_bytes = [searches[i].get_root_board() for i in active_idx]
+    root_boards = np.stack(
+        [np.frombuffer(b, dtype=np.float32) for b in root_boards_bytes]
+    )
+    root_policies, root_values = evaluator(root_boards)
+    if soften:
+        root_policies = _soften_policy(root_policies, policy_softening_temperature)
+
+    for k, gi in enumerate(active_idx):
+        searches[gi].init_root(
+            root_policies[k].tobytes(),
+            float(root_values[k]),
+            DIRICHLET_EPSILON,
+            DIRICHLET_ALPHA,
+            rng.randrange(2**63),
+        )
+
+    # Simulation loop.
+    for _ in range(num_simulations):
+        pending: list[tuple[int, bytes]] = []
+        for gi in active_idx:
+            board = searches[gi].select_leaf()
+            if board is not None:
+                pending.append((gi, board))
+        if pending:
+            boards = np.stack(
+                [np.frombuffer(b, dtype=np.float32) for _, b in pending]
+            )
+            policies, values = evaluator(boards)
+            if soften:
+                policies = _soften_policy(policies, policy_softening_temperature)
+            for j, (gi, _) in enumerate(pending):
+                searches[gi].supply_eval(policies[j].tobytes(), float(values[j]))
+
+    # Extract results.
+    results: list[MCTSResult | None] = [None] * len(searches)
+    for gi, s in enumerate(searches):
+        seed = rng.randrange(2**63)
+        policy_bytes, move_tup, rv = s.get_result(temperatures[gi], seed)
+        policy = np.frombuffer(policy_bytes, dtype=np.float32).copy()
+        if gi in active_idx:
+            move = _tuple_to_move(move_tup)
+        else:
+            # Terminal; synthesize a placeholder (caller shouldn't use it).
+            move = Move(Position(0, 0), Position(0, 0), None)
+        results[gi] = MCTSResult(policy=policy, move=move, root_value=rv)
+    return results  # type: ignore[return-value]
+
+
 def run_batched_mcts(
     states: list[ChessGameState],
     evaluator: BatchedEvaluator,
@@ -348,6 +480,16 @@ def run_batched_mcts(
     elif len(temperatures) != len(states):
         raise ValueError(
             f"temperatures length {len(temperatures)} != states length {len(states)}"
+        )
+
+    if USE_RUST_MCTS:
+        return _run_batched_mcts_rust(
+            states,
+            evaluator,
+            num_simulations,
+            rng,
+            temperatures,
+            policy_softening_temperature,
         )
 
     soften = policy_softening_temperature != 1.0
