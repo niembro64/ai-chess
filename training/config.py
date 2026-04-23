@@ -118,15 +118,17 @@ def build_config() -> TrainConfig:
             (85_000,  3e-5),
         ),
         use_amp=True,
-        # 0.03 mixes 3% uniform into the MCTS visit target. In a broken
-        # run where MCTS visits were biased toward wrong moves, label
-        # smoothing prevented the policy from peaking on anything — but
-        # it also prevented the policy from converging on the CORRECT
-        # moves when MCTS found them. Diagnostic showed policy ranking
-        # mates at #20-40 / 4096 despite v=+1.0 on the same positions,
-        # consistent with smoothed targets + biased MCTS = no learning.
-        # 0.0 = use the MCTS visit distribution as-is.
-        policy_label_smoothing=0.0,
+        # Mix uniform probability into the MCTS visit target. Protects
+        # against the "policy becomes arbitrarily confident on wrong
+        # moves" failure mode observed at gen 32k: priors reached 0.78
+        # on non-mating moves while mating moves sat at 0.001 — a
+        # self-reinforcing collapse that MCTS alone can't undo at
+        # 100 sims. Previous 0.03 was too low to matter against a
+        # 4096-wide policy (per-move floor ~7e-6). 0.10 caps max
+        # achievable prior and gives every legal move a meaningful
+        # probability floor, bounding how peaky the policy can get
+        # regardless of what MCTS found.
+        policy_label_smoothing=0.10,
         # Value-head class balancing. With the MCTS sign-fix + cap-mask
         # in place, decisive rate in self-play runs at ~60-65% and cap
         # games no longer feed noise into the value loss. That leaves
