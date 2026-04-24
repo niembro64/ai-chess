@@ -51,6 +51,125 @@ class SystemSnapshot:
     have_data: bool = False
 
 
+@dataclass
+class StaticSystemInfo:
+    """Host info probed once at startup. Unlike SystemSnapshot this is
+    immutable — everything here is a fixed property of the hardware
+    (CPU model) or driver install (NVIDIA driver version) that doesn't
+    change while training is running. Splitting it out means the live
+    snapshot path stays cheap (no repeated subprocess calls)."""
+    cpu_model: str = ""
+    cpu_physical_cores: int = 0
+    cpu_logical_cores: int = 0
+    # Apple Silicon only: performance/efficiency core split. Both 0
+    # on non-Apple or pre-M1 hardware.
+    cpu_p_cores: int = 0
+    cpu_e_cores: int = 0
+    nvidia_driver: str = ""
+    # Disk free at startup, in GB, for the checkpoint directory's
+    # filesystem. Updated rarely (not every render) but cheap enough
+    # for occasional refresh.
+    disk_free_gb: float = 0.0
+    disk_total_gb: float = 0.0
+
+
+def _read_cpu_model() -> str:
+    """Best-effort readable CPU model name across Linux/Mac/Windows.
+
+    `platform.processor()` is near-useless on Linux (returns 'x86_64')
+    and Mac (returns 'arm'), so we fall through to /proc/cpuinfo or
+    sysctl for something like 'Apple M1 Max' / 'Intel(R) Core(TM)
+    i7-9700K CPU @ 3.60GHz'.
+    """
+    import platform
+    import subprocess
+    system = platform.system()
+    try:
+        if system == "Linux":
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+        elif system == "Darwin":
+            out = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=1.0,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        elif system == "Windows":
+            p = platform.processor()
+            if p:
+                return p
+    except Exception:
+        pass
+    return platform.processor() or "unknown"
+
+
+def _read_apple_pe_cores() -> tuple[int, int]:
+    """(P-cores, E-cores) on Apple Silicon; (0, 0) elsewhere.
+
+    Uses sysctl's perflevel hierarchy: perflevel0 = performance cores,
+    perflevel1 = efficiency cores. Pre-M1 Macs and non-Macs return
+    (0, 0) and the caller should treat that as 'unknown'.
+    """
+    import platform
+    import subprocess
+    if platform.system() != "Darwin":
+        return (0, 0)
+    try:
+        p = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+            capture_output=True, text=True, timeout=1.0,
+        )
+        e = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel1.physicalcpu"],
+            capture_output=True, text=True, timeout=1.0,
+        )
+        if p.returncode == 0 and e.returncode == 0:
+            return (int(p.stdout.strip()), int(e.stdout.strip()))
+    except Exception:
+        pass
+    return (0, 0)
+
+
+def probe_static_info(checkpoint_dir: str | None = None) -> StaticSystemInfo:
+    """One-shot probe of host info the dashboard wants to display in the
+    header/hardware panel. Cheap enough to call at dashboard startup.
+    Everything best-effort: missing probes leave fields at their default."""
+    import platform
+    import shutil
+
+    info = StaticSystemInfo()
+    info.cpu_model = _read_cpu_model()
+    info.cpu_p_cores, info.cpu_e_cores = _read_apple_pe_cores()
+
+    if _HAVE_PSUTIL:
+        try:
+            info.cpu_physical_cores = psutil.cpu_count(logical=False) or 0
+            info.cpu_logical_cores = psutil.cpu_count(logical=True) or 0
+        except Exception:
+            pass
+
+    if _HAVE_PYNVML and platform.system() != "Darwin":
+        try:
+            pynvml.nvmlInit()
+            raw = pynvml.nvmlSystemGetDriverVersion()
+            info.nvidia_driver = raw.decode() if isinstance(raw, bytes) else str(raw)
+        except Exception:
+            pass
+
+    if checkpoint_dir is not None:
+        try:
+            usage = shutil.disk_usage(checkpoint_dir)
+            info.disk_free_gb = usage.free / (1024 ** 3)
+            info.disk_total_gb = usage.total / (1024 ** 3)
+        except Exception:
+            pass
+
+    return info
+
+
 class SystemMonitor:
     """Maintains open handles to psutil / pynvml. Call `snapshot()` from
     the dashboard refresh loop."""

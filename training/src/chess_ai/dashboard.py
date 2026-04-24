@@ -38,7 +38,7 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
-from .sysmon import SystemMonitor, SystemSnapshot
+from .sysmon import SystemMonitor, SystemSnapshot, StaticSystemInfo, probe_static_info
 
 # Keep at most this many points on each rolling line in the ASCII plot.
 _LOSS_HISTORY_POINTS = 500
@@ -198,9 +198,11 @@ class DashboardLogger:
         self._events: deque[tuple[float, str]] = deque(maxlen=8)
         self._on_log = on_log
         # Rolling window of recent auto-eval match results (the raw dicts
-        # `Trainer._run_eval_match` returns). Newest last. Sized to fit the
-        # validation panel's history table.
-        self._eval_history: deque[dict] = deque(maxlen=10)
+        # `Trainer._run_eval_match` returns). Newest last. Sized to hold a
+        # full training run's worth (eval_every_gens=5000 over 100k gens =
+        # 20 matches) with headroom for longer runs, so the score chart
+        # panel can plot the full trajectory.
+        self._eval_history: deque[dict] = deque(maxlen=60)
         # Score threshold the trainer is applying. Set from on_eval's first
         # match result so the panel can draw a clear "pass/fail" line.
         self._eval_threshold: float = 0.54
@@ -227,6 +229,17 @@ class DashboardLogger:
         # psutil unavailable) result in a hidden panel, not a crash.
         self._sysmon = SystemMonitor()
         self._sys_snapshot: SystemSnapshot | None = None
+        # One-shot probe of CPU model name, driver version, disk space.
+        # Cheap enough at startup; everything else in the hardware panel
+        # comes from the live snapshot.
+        self._static_info: StaticSystemInfo = probe_static_info(str(self.checkpoint_dir))
+
+        # Cache of the most recent on_step stats so on_eval_progress can
+        # rebuild the full layout (Rich's Live.refresh() only repaints
+        # the stored renderable — it doesn't re-evaluate the panel
+        # callables, so without a layout rebuild the live eval panel
+        # appears frozen during a match).
+        self._last_stats = None
 
     # -- Context manager --
 
@@ -291,10 +304,14 @@ class DashboardLogger:
         The validation panel reads `_eval_progress` and renders a live
         scoreboard with match ETA, per-difficulty W/D/L, a recent-games
         strip, and the name of the position currently being played.
-        Triggers a manual Live refresh so the display advances visibly
-        between progress ticks (training main loop is paused during
-        eval, so on_step wouldn't fire on its own cadence).
+
+        Triggers a full layout rebuild (not just Live.refresh()) because
+        Rich only re-renders the stored Layout on refresh — the Panel
+        contents are fixed when _render() builds them. Without the
+        rebuild the eval panel appears frozen during a match since the
+        training main loop's on_step cadence pauses during eval.
         """
+        was_idle = self._eval_progress is None
         self._eval_progress = {
             "done": games_done, "total": total,
             "wins": wins, "draws": draws, "losses": losses,
@@ -303,9 +320,17 @@ class DashboardLogger:
             "recent": list(recent or []),
             "elapsed_s": float(elapsed_s),
         }
+        # Events-log breadcrumb on match start. Symmetric with the
+        # match-end log in on_eval(). Matters because an eval match
+        # takes ~5-10 min and the live panel is only visible while the
+        # user is looking; the events pane persists the lifecycle even
+        # if they miss the live view.
+        if was_idle and self._last_stats is not None:
+            gen = getattr(self._last_stats, "generation", 0)
+            self.log(f"eval match started: challenger gen {gen:,}")
         if self._live is not None:
             try:
-                self._live.refresh()
+                self._live.update(self._render(self._last_stats))
             except Exception:
                 pass
 
@@ -371,6 +396,7 @@ class DashboardLogger:
 
     def on_step(self, stats) -> None:
         """Trainer callback: update loss history, refresh TUI, append CSV row."""
+        self._last_stats = stats
         self._loss_history.append(
             stats.generation, stats.policy_loss, stats.value_loss, stats.total_loss
         )
@@ -423,12 +449,18 @@ class DashboardLogger:
         # delta-read + cached NVML handles) and keeps the panel live.
         self._sys_snapshot = self._sysmon.snapshot()
 
+        # Eval chart gets its own row between middle and hardware — only
+        # meaningful once we have ≥2 eval results. We still allocate the
+        # row unconditionally (Rich doesn't easily support dynamic layout
+        # dimensions) so the panel stays in a stable position; early in a
+        # run it shows a 'waiting for eval matches' placeholder.
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="top", size=9),
-            Layout(name="middle", size=19),
-            Layout(name="hardware", size=6),
+            Layout(name="middle", size=22),
+            Layout(name="eval_chart", size=10),
+            Layout(name="hardware", size=7),
             Layout(name="timings", size=9),
             Layout(name="loss"),
             Layout(name="events", size=10),
@@ -442,6 +474,7 @@ class DashboardLogger:
             Layout(self._eval_panel(), name="eval"),
         )
         layout["header"].update(self._header_panel())
+        layout["eval_chart"].update(self._eval_chart_panel())
         layout["hardware"].update(self._hardware_panel())
         layout["timings"].update(self._timings_panel(stats))
         layout["loss"].update(self._loss_panel())
@@ -525,7 +558,10 @@ class DashboardLogger:
                     t.add_row("", line)
 
         _add_kv_lines(self.model_summary)
-        _add_kv_lines(self.device_summary)
+        # device_summary (os/python/torch/host/cuda) was being clipped
+        # here by the fixed panel height; it now lives in the hardware
+        # panel where it fits. Keeping just model arch + csv here keeps
+        # this panel focused on "what we're training."
         t.add_row("csv", str(self.csv_path))
         return Panel(t, title="model", border_style="blue")
 
@@ -932,22 +968,27 @@ class DashboardLogger:
         body.add_row("", Text(""))  # spacer
 
         # --- History table (most recent first, up to what fits)
-        # Columns: challenger gen, opponent gen, W-D-L, score, Δelo. The
-        # "vs" column is the champion-at-match-time — makes it obvious that
+        # Columns: challenger gen, opponent gen, W-D-L, score, Δelo, dur.
+        # The "vs" column is the champion-at-match-time — makes it obvious
         # each score is measured against a moving baseline, not against
-        # gen 0 random-init weights.
+        # gen 0 random-init weights. Duration helps spot eval regressions
+        # (if matches suddenly take 2× longer MCTS is stuck).
         head = Text.assemble(
             ("gen      ", "dim bold"),
             ("vs       ", "dim bold"),
             ("W-D-L     ", "dim bold"),
             ("score  ", "dim bold"),
-            ("Δelo  ", "dim bold"),
+            ("Δelo    ", "dim bold"),
+            ("dur", "dim bold"),
         )
         body.add_row("", head)
 
-        # Show up to 5 rows newest-first. Anything older falls off. We
-        # budget 5 data rows + 4 header rows + 1 spacer = 10, fits 15-row panel.
-        for h in reversed(hist[-5:]):
+        # When a match is live we've already consumed ~6 rows for the
+        # running/score/now/recent/per-diff block, so keep the table
+        # shorter. When idle, show a full 10 rows of history. The panel
+        # is sized (22-row middle split) to fit either case.
+        rows_to_show = 5 if self._eval_progress is not None else 10
+        for h in reversed(list(hist)[-rows_to_show:]):
             gen_str = f"{h.get('gen', 0):>6,}"
             if h.get("note") == "bootstrap":
                 row_text = Text.assemble(
@@ -966,6 +1007,13 @@ class DashboardLogger:
             if opp_gen is None:
                 opp_gen = h.get("champion_gen", 0)
             opp_str = f"{opp_gen:>6,}"
+            # Duration: "5m03" format. Missing/zero duration → "—".
+            dur_s = float(h.get("duration_s") or 0.0)
+            if dur_s > 0:
+                mm, ss = divmod(int(dur_s), 60)
+                dur_str = f"{mm}m{ss:02d}"
+            else:
+                dur_str = "  — "
             score_style = "bright_green" if score >= self._eval_threshold else "yellow"
             elo_style = "bright_green" if elo >= 0 else "red"
             star = " ★" if h.get("new_champion") else "  "
@@ -976,6 +1024,7 @@ class DashboardLogger:
                 (f"{score:>5.3f}  ", score_style),
                 (f"{elo:+5.1f}", elo_style),
                 (star, "bright_yellow bold"),
+                (f"  {dur_str}", "dim"),
             )
             body.add_row("", row_text)
 
@@ -985,6 +1034,97 @@ class DashboardLogger:
             title += "  — PLATEAU STOP"
             border = "red"
         return Panel(body, title=title, border_style=border)
+
+    def _eval_chart_panel(self) -> Panel:
+        """Score trajectory across eval matches, with threshold line.
+
+        Plots score (y-axis, 0.40-0.70 window centered on the threshold)
+        vs challenger gen (x-axis). A horizontal line marks the promotion
+        threshold — points above it were promotions (★), points below
+        were non-promotions. Gives a single-glance view of whether the
+        model is trending toward or away from promotions.
+
+        Placeholder rendered until there are ≥2 eval results — a single
+        point would just be noise and plotext needs ≥2 x-values to axis
+        correctly anyway.
+        """
+        hist = [h for h in self._eval_history
+                if h.get("games", 0) > 0 and h.get("note") != "bootstrap"]
+
+        if len(hist) < 2:
+            msg = Text(
+                "waiting for eval matches — chart appears after the 2nd eval",
+                style="dim italic",
+            )
+            return Panel(msg, title="eval scores", border_style="magenta")
+
+        gens = [int(h["gen"]) for h in hist]
+        scores = [float(h["score"]) for h in hist]
+        # Promotions get a separate scatter series so they stand out.
+        promo_gens = [int(h["gen"]) for h in hist if h.get("new_champion")]
+        promo_scores = [float(h["score"]) for h in hist if h.get("new_champion")]
+        threshold = [self._eval_threshold] * len(gens)
+
+        size = self._console.size
+        plot_w = max(40, size.width - 6)
+        plot_h = max(6, 7)
+
+        # Auto-window the y-axis around the actual data range so tiny
+        # swings near the threshold stay visible. Pad by 0.03 on each
+        # side, clamp to [0.35, 0.75] to avoid absurd scales on early
+        # outlier results, and make sure the threshold line is always
+        # inside the window.
+        s_min = min(min(scores), self._eval_threshold)
+        s_max = max(max(scores), self._eval_threshold)
+        y_lo = max(0.35, s_min - 0.03)
+        y_hi = min(0.75, s_max + 0.03)
+        # Ensure at least a 0.08 window so short flat runs don't degenerate
+        # into a single-line plot with invisible variation.
+        if y_hi - y_lo < 0.08:
+            mid = (y_hi + y_lo) / 2
+            y_lo, y_hi = max(0.35, mid - 0.04), min(0.75, mid + 0.04)
+
+        plt.clf()
+        plt.theme("dark")
+        plt.plot(gens, threshold, label=f"thresh {self._eval_threshold:.2f}",
+                 color="yellow")
+        plt.plot(gens, scores, label="score", color="cyan", marker="braille")
+        if promo_gens:
+            plt.scatter(promo_gens, promo_scores, label="★ promoted",
+                        color="green", marker="heart")
+        plt.plotsize(plot_w, plot_h)
+        plt.ylim(y_lo, y_hi)
+        plt.xlabel("gen")
+        plt.ylabel("score")
+        chart = plt.build()
+
+        # Tail summary line: latest score, delta, direction arrow.
+        latest = hist[-1]
+        latest_score = float(latest["score"])
+        latest_elo = float(latest.get("elo_diff", 0.0))
+        latest_gen = int(latest["gen"])
+        opp = latest.get("opponent_gen") or latest.get("champion_gen", 0)
+        tail_style = (
+            "bright_green" if latest_score >= self._eval_threshold
+            else "yellow" if latest_score >= 0.5
+            else "red"
+        )
+        if len(hist) >= 2:
+            prev_score = float(hist[-2]["score"])
+            delta = latest_score - prev_score
+            trend = "↑" if delta > 0.005 else "↓" if delta < -0.005 else "→"
+            trend_str = f"   {trend} {delta:+.3f} vs previous"
+        else:
+            trend_str = ""
+        tail = Text.assemble(
+            (f"latest: gen {latest_gen:,} vs gen {opp:,}  ", "dim"),
+            (f"score {latest_score:.3f}", tail_style),
+            (f"   Δelo {latest_elo:+.1f}", "dim"),
+            (trend_str, "dim"),
+        )
+
+        return Panel(Group(Text.from_ansi(chart), tail),
+                     title="eval scores", border_style="magenta")
 
     def _timings_panel(self, stats) -> Panel:
         """EMA-smoothed per-phase durations for bottleneck diagnosis (ms)."""
@@ -1068,10 +1208,18 @@ class DashboardLogger:
 
         # Host row: CPU util + RAM.
         cpu_bar = _bar_pct(snap.cpu_util_pct, width=10)
+        # Apple Silicon P/E breakdown when known; falls back to plain
+        # core count otherwise.
+        if self._static_info.cpu_p_cores or self._static_info.cpu_e_cores:
+            core_label = (
+                f"({self._static_info.cpu_p_cores}P+{self._static_info.cpu_e_cores}E)"
+            )
+        else:
+            core_label = f"({snap.cpu_cores} cores)"
         cpu_txt = Text.assemble(
             (f"{cpu_bar}  ", _util_style(snap.cpu_util_pct)),
             (f"{snap.cpu_util_pct:5.1f}%  ", _util_style(snap.cpu_util_pct)),
-            (f"({snap.cpu_cores} cores)", "dim"),
+            (core_label, "dim"),
         )
         ram_pct = (
             100.0 * snap.ram_used_gb / snap.ram_total_gb if snap.ram_total_gb > 0 else 0.0
@@ -1082,7 +1230,48 @@ class DashboardLogger:
         )
         table.add_row("cpu", cpu_txt, "ram", ram_txt, "", "")
 
-        return Panel(table, title="hardware (live)", border_style="yellow")
+        # Static info row: CPU model (truncated), NVIDIA driver, disk
+        # free for runs/. Probed once at startup — not live — but valuable
+        # at-a-glance context for bug reports.
+        cpu_model = self._static_info.cpu_model or "?"
+        # Truncate overly-long Intel names like
+        # "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz" → fits column width.
+        if len(cpu_model) > 34:
+            cpu_model = cpu_model[:31] + "…"
+        extras_txt = self._static_info.nvidia_driver or ""
+        disk_txt = ""
+        if self._static_info.disk_total_gb > 0:
+            disk_txt = (
+                f"{self._static_info.disk_free_gb:.0f} / "
+                f"{self._static_info.disk_total_gb:.0f} GB free"
+            )
+        table.add_row(
+            "model", Text(cpu_model, style="dim"),
+            "driver", Text(extras_txt or "—", style="dim"),
+            "disk", Text(disk_txt or "—", style="dim"),
+        )
+
+        # Environment line — pulls os/host/python/torch/cuda out of the
+        # device_summary blob the launcher builds. Rendered as its own
+        # full-width Text below the table (not a table row) because a
+        # 6-column grid would truncate the long dotted list.
+        env_fields = {}
+        for line in (self.device_summary or "").split("\n"):
+            if "=" in line:
+                k, _, v = line.partition("=")
+                env_fields[k.strip()] = v.strip()
+        env_parts = []
+        for key in ("device", "host", "os", "python", "torch", "cuda"):
+            val = env_fields.get(key)
+            if val:
+                env_parts.append(f"{key}={val}")
+        env_line = Text.assemble(
+            ("              env  ", "dim"),
+            ("  ·  ".join(env_parts) if env_parts else "—", "dim"),
+        )
+
+        return Panel(Group(table, env_line), title="hardware (live)",
+                     border_style="yellow")
 
     def _loss_panel(self) -> Panel:
         # plotext renders into a size in cell units. Leave margins for the panel border.
