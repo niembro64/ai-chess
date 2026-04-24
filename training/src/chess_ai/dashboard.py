@@ -932,8 +932,13 @@ class DashboardLogger:
         body.add_row("", Text(""))  # spacer
 
         # --- History table (most recent first, up to what fits)
+        # Columns: challenger gen, opponent gen, W-D-L, score, Δelo. The
+        # "vs" column is the champion-at-match-time — makes it obvious that
+        # each score is measured against a moving baseline, not against
+        # gen 0 random-init weights.
         head = Text.assemble(
-            ("gen        ", "dim bold"),
+            ("gen      ", "dim bold"),
+            ("vs       ", "dim bold"),
             ("W-D-L     ", "dim bold"),
             ("score  ", "dim bold"),
             ("Δelo  ", "dim bold"),
@@ -954,11 +959,19 @@ class DashboardLogger:
             w, d, l = h.get("wins", 0), h.get("draws", 0), h.get("losses", 0)
             score = float(h.get("score", 0.5))
             elo = float(h.get("elo_diff", 0.0))
+            # opponent_gen was added after the early runs; fall back to
+            # champion_gen for back-compat with historical eval records
+            # that predate the field.
+            opp_gen = h.get("opponent_gen")
+            if opp_gen is None:
+                opp_gen = h.get("champion_gen", 0)
+            opp_str = f"{opp_gen:>6,}"
             score_style = "bright_green" if score >= self._eval_threshold else "yellow"
             elo_style = "bright_green" if elo >= 0 else "red"
             star = " ★" if h.get("new_champion") else "  "
             row_text = Text.assemble(
                 (f"{gen_str}  ", "white"),
+                (f"{opp_str}  ", "dim"),
                 (f"{w:>2}-{d:>2}-{l:>2}    ", "dim"),
                 (f"{score:>5.3f}  ", score_style),
                 (f"{elo:+5.1f}", elo_style),

@@ -909,6 +909,7 @@ class Trainer:
             result = {
                 "gen": gen,
                 "champion_gen": gen,
+                "opponent_gen": gen,
                 "games": 0,
                 "wins": 0,
                 "draws": 0,
@@ -941,6 +942,12 @@ class Trainer:
         # Load (or reload) champion. Reload whenever it changed.
         if self._champion_model is None or self._champion_gen_on_disk(ckpt_dir) != self._champion_gen:
             self._champion_model = self._load_champion_model(ckpt_dir)
+
+        # Snapshot the opponent's gen BEFORE the match. `self._champion_gen`
+        # gets overwritten if the challenger is promoted below, so we need
+        # the pre-match value to record "challenger gen X played vs champion
+        # gen Y". Without this, promoted evals show opponent=self.
+        opponent_gen = self._champion_gen
 
         # Flip current model to eval for the match so BN uses running stats.
         was_training = self.model.training
@@ -1046,6 +1053,7 @@ class Trainer:
         result = {
             "gen": gen,
             "champion_gen": self._champion_gen,
+            "opponent_gen": opponent_gen,
             "games": total,
             "wins": wins,
             "draws": draws,
@@ -1065,12 +1073,23 @@ class Trainer:
         }
         self._eval_history.append(result)
 
-        # Append to eval.csv. Exclude per_diff (nested dict).
+        # Append to eval.csv. Exclude per_diff (nested dict). On --resume,
+        # the file may already have an older schema (missing opponent_gen
+        # etc.) — respect the existing header and drop any new fields with
+        # extrasaction='ignore' so the CSV stays readable. Fresh runs get
+        # the full current schema.
         csv_path = ckpt_dir / "eval.csv"
-        write_header = not csv_path.exists()
         csv_row = {k: v for k, v in result.items() if k != "per_diff"}
+        if csv_path.exists():
+            with csv_path.open("r") as f:
+                first_line = f.readline().strip()
+            fieldnames = first_line.split(",") if first_line else list(csv_row.keys())
+            write_header = False
+        else:
+            fieldnames = list(csv_row.keys())
+            write_header = True
         with csv_path.open("a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(csv_row.keys()))
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             if write_header:
                 writer.writeheader()
             writer.writerow(csv_row)
