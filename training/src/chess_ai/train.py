@@ -212,6 +212,8 @@ class TrainStats:
     mate_b: int = 0                  # over-the-board black checkmate
     stalemate: int = 0               # no legal moves, not in check
     draw_50: int = 0                 # 50-move rule
+    draw_repetition: int = 0         # FIDE threefold repetition
+    draw_insufficient: int = 0       # FIDE insufficient material
     tb_w: int = 0                    # cap-timeout → Syzygy says white wins
     tb_b: int = 0                    # cap-timeout → Syzygy says black wins
     tb_d: int = 0                    # cap-timeout → Syzygy says draw
@@ -260,8 +262,15 @@ class TrainStats:
 
     @property
     def draws(self) -> int:
-        """All drawn games: stalemate + 50-move + tablebase-adjudicated."""
-        return self.stalemate + self.draw_50 + self.tb_d
+        """All drawn games: stalemate + 50-move + threefold repetition +
+        insufficient material + tablebase-adjudicated draw."""
+        return (
+            self.stalemate
+            + self.draw_50
+            + self.draw_repetition
+            + self.draw_insufficient
+            + self.tb_d
+        )
 
     @property
     def caps(self) -> int:
@@ -283,6 +292,7 @@ class TrainStats:
         origin: {
             "mate_w": 0, "mate_b": 0,
             "stalemate": 0, "draw_50": 0,
+            "draw_repetition": 0, "draw_insufficient": 0,
             "tb_w": 0, "tb_b": 0, "tb_d": 0,
             "cap": 0,
         }

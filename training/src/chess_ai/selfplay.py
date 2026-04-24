@@ -79,6 +79,93 @@ class GameSlot:
     # (mate_w/mate_b) vs mostly tablebase-distilled labels (tb_w/tb_b).
     # One of: "standard" | "endgame" | "random".
     origin: str = "standard"
+    # Position-occurrence counter for FIDE threefold-repetition detection.
+    # Keyed by `_position_key` (board + side-to-move + castling + ep);
+    # halfmove clock excluded since FIDE compares positions modulo it.
+    position_history: dict[bytes, int] = field(default_factory=dict)
+    # Set by self-play's per-move post-check when it detects a draw the
+    # engine doesn't natively report. None = no early termination, fall
+    # back to engine status / move-cap. Values: "repetition" |
+    # "insufficient_material". The engine doesn't track these because
+    # repetition needs game history (engine is stateless across moves)
+    # and insufficient-material is FIDE rules glue layered on top of
+    # legal-move generation.
+    early_termination: str | None = None
+
+
+def _position_key(state: ChessGameState) -> bytes:
+    """Stable byte-string identifying a chess position for FIDE-style
+    threefold-repetition comparison. Includes board layout, side to
+    move, castling rights, and en-passant target. Excludes the halfmove
+    clock and full-move number — FIDE 9.2 compares by position only.
+    """
+    parts = bytearray(64 + 1 + 4 + 2)
+    i = 0
+    for r in range(8):
+        for f in range(8):
+            p = state.board[r][f]
+            if p is None:
+                parts[i] = ord('.')
+            else:
+                tmap = {"king": 'k', "queen": 'q', "rook": 'r',
+                        "bishop": 'b', "knight": 'n', "pawn": 'p'}
+                ch = tmap[p.type]
+                if p.color == "white":
+                    ch = ch.upper()
+                parts[i] = ord(ch)
+            i += 1
+    parts[i] = ord(state.currentTurn[0])  # 'w' or 'b'
+    i += 1
+    cr = state.castlingRights
+    for flag in (cr.whiteKingside, cr.whiteQueenside,
+                 cr.blackKingside, cr.blackQueenside):
+        parts[i] = ord('1' if flag else '0')
+        i += 1
+    if state.enPassantTarget is not None:
+        parts[i] = ord('a') + state.enPassantTarget.file
+        parts[i + 1] = ord('1') + state.enPassantTarget.rank
+    else:
+        parts[i] = ord('-')
+        parts[i + 1] = ord('-')
+    return bytes(parts)
+
+
+def _is_insufficient_material(board) -> bool:
+    """FIDE-strict insufficient material check. Returns True when no
+    sequence of legal moves can produce checkmate (per FIDE 5.2.2):
+      - K vs K
+      - K + bishop vs K
+      - K + knight vs K
+      - K + bishop vs K + bishop (bishops on same square color)
+    NOT included (technically still allow mate via opponent's blunders):
+      - K + N vs K + N      → returned as not-insufficient
+      - K + B vs K + N      → not-insufficient
+      - K + N + N vs K      → not-insufficient (can't *force* but allowed)
+    """
+    minor_pieces = []  # list of (color, type, square_color)
+    for r in range(8):
+        for f in range(8):
+            p = board[r][f]
+            if p is None:
+                continue
+            if p.type == "king":
+                continue
+            # Any pawn, rook, or queen → mate is reachable.
+            if p.type in ("pawn", "rook", "queen"):
+                return False
+            minor_pieces.append((p.color, p.type, (r + f) % 2))
+    if not minor_pieces:
+        return True  # K vs K
+    if len(minor_pieces) == 1:
+        # Single bishop or knight (against bare king) — insufficient.
+        return True
+    if len(minor_pieces) == 2:
+        a, b = minor_pieces
+        if a[1] == "bishop" and b[1] == "bishop":
+            # Two bishops, one each side, on same square color → insufficient.
+            if a[0] != b[0] and a[2] == b[2]:
+                return True
+    return False
 
 
 @dataclass
@@ -86,14 +173,16 @@ class GameResult:
     move_count: int
     # Granular end-state label. The trainer's _record_outcome dispatches
     # on this to increment the right bucket in TrainStats:
-    #   mate_w    — over-the-board checkmate, white won
-    #   mate_b    — over-the-board checkmate, black won
-    #   stalemate — no legal moves, not in check
-    #   draw_50   — 50-move rule
-    #   tb_w      — cap-timeout, Syzygy adjudicated as white win
-    #   tb_b      — cap-timeout, Syzygy adjudicated as black win
-    #   tb_d      — cap-timeout, Syzygy adjudicated as draw
-    #   cap       — cap-timeout, no tablebase signal (scored 0)
+    #   mate_w            — over-the-board checkmate, white won
+    #   mate_b            — over-the-board checkmate, black won
+    #   stalemate         — no legal moves, not in check
+    #   draw_50           — 50-move rule
+    #   draw_repetition   — FIDE threefold repetition
+    #   draw_insufficient — FIDE insufficient material (K vs K, etc.)
+    #   tb_w              — cap-timeout, Syzygy adjudicated as white win
+    #   tb_b              — cap-timeout, Syzygy adjudicated as black win
+    #   tb_d              — cap-timeout, Syzygy adjudicated as draw
+    #   cap               — cap-timeout, no tablebase signal (scored 0)
     outcome: str
     outcome_label: str        # human string for logging
     white_outcome: float      # [-1, 1]
@@ -563,8 +652,24 @@ class SelfPlayEngine:
             slot.state = apply_move(slot.state, move)
             slot.move_count += 1
 
+            # FIDE draw detection that the engine doesn't catch on its own:
+            # threefold repetition needs game history (engine is stateless),
+            # and insufficient material is rules glue not in legal-move gen.
+            # Skip the check when the engine already produced a terminal
+            # status (checkmate / stalemate / 50-move draw) — those are
+            # already game-ending and dispatching on early_termination
+            # would just shadow them.
+            if slot.state.status not in ("checkmate", "stalemate", "draw"):
+                key = _position_key(slot.state)
+                slot.position_history[key] = slot.position_history.get(key, 0) + 1
+                if slot.position_history[key] >= 3:
+                    slot.early_termination = "repetition"
+                elif _is_insufficient_material(slot.state.board):
+                    slot.early_termination = "insufficient_material"
+
             is_over = (
                 slot.state.status in ("checkmate", "stalemate", "draw")
+                or slot.early_termination is not None
                 or slot.move_count >= slot.move_cap
             )
             if is_over:
@@ -597,6 +702,20 @@ class SelfPlayEngine:
                 outcome = "mate_b"
                 label = "black mates"
                 self.black_wins += 1
+        elif slot.early_termination == "repetition":
+            # FIDE threefold repetition — same position seen 3+ times.
+            # Real, FIDE-recognized draw; not a cap-timeout, no TB probe.
+            outcome = "draw_repetition"
+            label = "3-fold repetition"
+            white_outcome = 0.0
+            self.draws += 1
+        elif slot.early_termination == "insufficient_material":
+            # FIDE insufficient material (K vs K, K+B vs K, etc.). No
+            # mate is reachable; outcome is forced-draw and known.
+            outcome = "draw_insufficient"
+            label = "insufficient material"
+            white_outcome = 0.0
+            self.draws += 1
         else:
             # Non-mate ending — stalemate, 50-move rule, or our own cap.
             # Consult the tablebase on cap-timeouts AND 50-move draws:

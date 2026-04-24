@@ -51,6 +51,7 @@ CSV_FIELDS = (
     "white_wins", "black_wins", "draws", "caps", "tb_adjudications",
     # Granular end-state buckets — canonical source of truth.
     "mate_w", "mate_b", "stalemate", "draw_50",
+    "draw_repetition", "draw_insufficient",
     "tb_w", "tb_b", "tb_d", "cap",
     "gen_per_min", "games_per_min", "replay_size",
     "eta_seconds",
@@ -420,6 +421,8 @@ class DashboardLogger:
                 "mate_b": getattr(stats, "mate_b", 0),
                 "stalemate": getattr(stats, "stalemate", 0),
                 "draw_50": getattr(stats, "draw_50", 0),
+                "draw_repetition": getattr(stats, "draw_repetition", 0),
+                "draw_insufficient": getattr(stats, "draw_insufficient", 0),
                 "tb_w": getattr(stats, "tb_w", 0),
                 "tb_b": getattr(stats, "tb_b", 0),
                 "tb_d": getattr(stats, "tb_d", 0),
@@ -458,7 +461,7 @@ class DashboardLogger:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="top", size=9),
-            Layout(name="middle", size=22),
+            Layout(name="middle", size=24),
             Layout(name="eval_chart", size=10),
             Layout(name="hardware", size=7),
             Layout(name="timings", size=9),
@@ -576,6 +579,7 @@ class DashboardLogger:
         buckets: dict[str, int] = {
             "mate_w": 0, "mate_b": 0,
             "stalemate": 0, "draw_50": 0,
+            "draw_repetition": 0, "draw_insufficient": 0,
             "tb_w": 0, "tb_b": 0, "tb_d": 0,
             "cap": 0,
         }
@@ -665,6 +669,8 @@ class DashboardLogger:
         table.add_row(*section("drawn"))
         table.add_row(*row("stalemate", buckets["stalemate"], "yellow"))
         table.add_row(*row("50-move", buckets["draw_50"], "yellow"))
+        table.add_row(*row("3-fold", buckets["draw_repetition"], "yellow"))
+        table.add_row(*row("insuff-mat", buckets["draw_insufficient"], "yellow"))
 
         table.add_row(*section("tablebase"))
         table.add_row(*row("TB → W", buckets["tb_w"], "green"))
