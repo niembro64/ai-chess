@@ -131,6 +131,12 @@ class TrainConfig:
     # GradScaler. 2-3x speedup on Pascal (1080 Ti) with no measurable
     # quality loss. No-op on CPU/MPS.
     use_amp: bool = True
+    # Global gradient-norm clip. Stabilizes against rare outlier batches
+    # (e.g. a mate-in-1 position producing a spike in policy loss) that
+    # can blow up into a single bad step ruining many hours of training.
+    # Standard practice in modern training rigs; AlphaZero/Leela use ~1.0.
+    # 0.0 disables the clip (pre-commit behavior).
+    grad_clip_norm: float = 1.0
     # Label smoothing on the MCTS policy target: mix a tiny uniform prior
     # over all legal moves to prevent the policy head from collapsing
     # probability to exactly 0 on moves the current search didn't visit.
@@ -579,6 +585,17 @@ class Trainer:
             total.backward()
         self._device_sync()
         t4 = time.perf_counter()
+
+        # Gradient clipping, post-backward and pre-optimizer-step. With
+        # AMP we must unscale gradients first so the clip threshold acts
+        # in real-gradient units, not scaled ones. clip_grad_norm_ no-op
+        # when max_norm <= 0, matching our config's "disable" sentinel.
+        if self.config.grad_clip_norm > 0:
+            if self._scaler is not None:
+                self._scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.config.grad_clip_norm,
+            )
 
         if self._scaler is not None:
             self._scaler.step(self.optimizer)
