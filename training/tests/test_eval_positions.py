@@ -45,6 +45,28 @@ def test_eval_positions_are_non_terminal():
         assert len(legal) > 0, f"position {p.name!r} has no legal moves"
 
 
+def test_side_not_to_move_is_not_in_check():
+    """Any position where the side NOT to move is in check is illegal —
+    it could only have arisen from an illegal previous move that left
+    the mover's own king in check. `get_legal_moves` doesn't catch this
+    (it checks legality for the SIDE TO MOVE only), so this test guards
+    the eval set against hand-built bugs that slip past the other
+    sanity checks.
+
+    Concretely: Rust MCTS's first move-gen call may attempt to capture
+    the exposed king as a legal move, then panic later when find_king
+    can't locate the captured side's king on the post-capture board.
+    """
+    from chess_ai.engine import is_in_check
+    for p in build_eval_positions():
+        other = "black" if p.state.currentTurn == "white" else "white"
+        assert not is_in_check(p.state.board, other), (  # type: ignore[arg-type]
+            f"position {p.name!r}: {p.state.currentTurn} to move but "
+            f"{other} is in check — illegal. Fix the builder so the "
+            f"side not to move is not under attack."
+        )
+
+
 def test_difficulty_mix_present():
     """All four difficulty categories are represented — keeps future
     edits from accidentally collapsing the set to one category."""

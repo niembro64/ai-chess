@@ -469,18 +469,20 @@ def _build_rook_endgame_drawn() -> ChessGameState:
     """R+P vs R with defender's king in front of the pawn — Philidor-
     like drawing position.
 
-    White king on d5, pawn on d4, rook on a7 (attacker). Black king on
-    d7 (front-of-pawn defense), rook on h6 (sixth-rank defense pattern).
-    A correctly-played defender holds; this tests whether the model
-    knows the Philidor method (and whether the attacker can find wins
-    that aren't actually there).
+    White king on d5, pawn on d4, rook on h1 (attacker's rook passive,
+    awaiting activation). Black king on d7 (front-of-pawn defense),
+    rook on b6 (sixth-rank defense pattern). A correctly-played
+    defender holds; this tests whether the model knows the Philidor
+    method (and whether the attacker can find wins that aren't actually
+    there). Rook placements avoid any king-in-check for the side NOT
+    to move, which would make the position illegal.
     """
     b = _empty_board()
     _place(b, "white", "king", "d5")
     _place(b, "white", "pawn", "d4")
-    _place(b, "white", "rook", "a7")
+    _place(b, "white", "rook", "h1")
     _place(b, "black", "king", "d7")
-    _place(b, "black", "rook", "h6")
+    _place(b, "black", "rook", "b6")
     return _state_from_board(b, "white")
 
 
