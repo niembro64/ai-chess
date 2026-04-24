@@ -64,13 +64,17 @@ def launch(
     num_workers: int,
     games_per_worker: int,
     batch_size: int,
+    mp_batch_wait_ms: float | None = None,
+    min_examples_between_grad_steps: int | None = None,
 ) -> None:
     """Run training using `config.py` + the caller's hardware overrides.
 
-    The three overrides tune workload for the specific machine (core
-    count, VRAM). All other knobs (MCTS depth, eval cadence, arch,
-    lr schedule, etc.) come from config.py and are shared across
-    machines.
+    The first three overrides tune workload for the specific machine
+    (core count, VRAM). The last two are optional inference/gradient
+    cadence knobs — Mac (MPS) benefits from much larger inference
+    batches than Ubuntu (CUDA) because MPS has higher kernel-launch
+    overhead, so those boxes pass them; Ubuntu/Windows inherit the
+    config.py defaults.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -117,9 +121,15 @@ def launch(
     config.num_workers = num_workers
     config.games_per_worker = games_per_worker
     config.batch_size = batch_size
+    if mp_batch_wait_ms is not None:
+        config.mp_batch_wait_ms = mp_batch_wait_ms
+    if min_examples_between_grad_steps is not None:
+        config.min_examples_between_grad_steps = min_examples_between_grad_steps
     log.info(
-        "Hardware overrides: num_workers=%d games_per_worker=%d batch_size=%d",
+        "Hardware overrides: num_workers=%d games_per_worker=%d batch_size=%d "
+        "mp_batch_wait_ms=%.1f min_examples_between_grad_steps=%d",
         num_workers, games_per_worker, batch_size,
+        config.mp_batch_wait_ms, config.min_examples_between_grad_steps,
     )
 
     trainer = Trainer(model=model, device=device, config=config,
