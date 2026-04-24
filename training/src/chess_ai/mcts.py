@@ -24,12 +24,14 @@ from .engine import ChessGameState, Move, Position, apply_move, expand_children,
 C_PUCT = 1.5
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_EPSILON = 0.25
+FPU_REDUCTION = 0.0
 
 
 def set_mcts_params(
     c_puct: float | None = None,
     dirichlet_alpha: float | None = None,
     dirichlet_epsilon: float | None = None,
+    fpu_reduction: float | None = None,
 ) -> None:
     """Override MCTS hyperparams at runtime (before starting self-play).
 
@@ -43,14 +45,21 @@ def set_mcts_params(
                        ~0.3 for chess (avg ~30 legal moves). Lower = spikier.
     dirichlet_epsilon — mixing weight: prior = (1-eps)*prior + eps*noise.
                         0 disables root noise entirely.
+    fpu_reduction    — First-Play Urgency reduction. Unvisited children get
+                        an initial Q of parent_Q - fpu_reduction so PUCT
+                        doesn't over-commit to the prior-peaked leading
+                        move. 0.0 = old behavior (unvisited Q=0).
+                        Leela-derived rigs use ~0.4–0.5.
     """
-    global C_PUCT, DIRICHLET_ALPHA, DIRICHLET_EPSILON
+    global C_PUCT, DIRICHLET_ALPHA, DIRICHLET_EPSILON, FPU_REDUCTION
     if c_puct is not None:
         C_PUCT = c_puct
     if dirichlet_alpha is not None:
         DIRICHLET_ALPHA = dirichlet_alpha
     if dirichlet_epsilon is not None:
         DIRICHLET_EPSILON = dirichlet_epsilon
+    if fpu_reduction is not None:
+        FPU_REDUCTION = fpu_reduction
 
 # Batched evaluator signature: takes an (B, 8*8*NUM_PLANES) numpy array and
 # returns (policies [B, POLICY_SIZE], values [B] scalar from current-player's
@@ -379,7 +388,10 @@ def _run_batched_mcts_rust(
     per-sim because the tree + PUCT + backprop live in Rust and the board
     encoding is emitted directly from Rust without marshalling."""
     soften = policy_softening_temperature != 1.0
-    searches = [_rust_mcts.MctsSearch(_state_to_dict(s), C_PUCT) for s in states]
+    searches = [
+        _rust_mcts.MctsSearch(_state_to_dict(s), C_PUCT, FPU_REDUCTION)
+        for s in states
+    ]
     active_idx = [i for i, s in enumerate(searches) if not s.is_terminal()]
 
     # Terminal-at-construction games return a zero-policy sentinel with

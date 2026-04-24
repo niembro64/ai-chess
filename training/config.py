@@ -230,6 +230,17 @@ def build_config() -> TrainConfig:
         # with policy softening (T=1.5), this gives MCTS a real chance
         # to escape the collapsed prior at low sim counts.
         self_play_c_puct=2.5,
+        # First-Play Urgency reduction — AlphaZero/Leela-standard PUCT
+        # refinement. Unvisited children get an initial Q of
+        # `parent_Q - fpu_reduction` instead of 0. This pessimizes
+        # prior-peaked unvisited children once their siblings have been
+        # explored and found OK, shifting sim budget toward the moves
+        # most likely to beat the current best. Complements policy
+        # softening: softening flattens the input prior, FPU makes PUCT
+        # less dependent on that prior once search is underway. 0.4 is
+        # the Leela default and produces the expected behavior on
+        # our c_puct=1.5–2.5 range.
+        fpu_reduction=0.4,
 
         # ---- Replay buffer ----
         replay_buffer_capacity=200_000,

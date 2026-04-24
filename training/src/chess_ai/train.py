@@ -83,6 +83,12 @@ class TrainConfig:
     c_puct: float | None = None
     dirichlet_alpha: float | None = None
     dirichlet_epsilon: float | None = None
+    # First-Play Urgency reduction. Unvisited children's initial Q =
+    # parent_Q - fpu_reduction (from parent's perspective). 0.0 keeps the
+    # old behavior (unvisited Q=0). Leela/AlphaZero use ~0.4. Helps MCTS
+    # escape over-peaked priors by pessimizing untried siblings once a
+    # leading move has been explored — complementary to policy softening.
+    fpu_reduction: float | None = None
     # Self-play-only override for c_puct. MP workers set their MCTS
     # globals from this; main-process eval keeps `c_puct` above. Used
     # to widen PUCT exploration during self-play (recovery from
@@ -314,6 +320,7 @@ class Trainer:
             c_puct=self.config.c_puct,
             dirichlet_alpha=self.config.dirichlet_alpha,
             dirichlet_epsilon=self.config.dirichlet_epsilon,
+            fpu_reduction=self.config.fpu_reduction,
         )
 
         # Optional material aux head (KataGo-style). Only instantiated when
@@ -360,6 +367,7 @@ class Trainer:
                     else self.config.c_puct,
                 dirichlet_alpha=self.config.dirichlet_alpha,
                 dirichlet_epsilon=self.config.dirichlet_epsilon,
+                fpu_reduction=self.config.fpu_reduction,
                 syzygy_path=self.config.syzygy_path,
                 syzygy_max_pieces=self.config.syzygy_max_pieces,
                 rewards=self.config.rewards,

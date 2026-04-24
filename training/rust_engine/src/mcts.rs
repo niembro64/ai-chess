@@ -123,15 +123,26 @@ pub struct MctsSearch {
     states: Vec<NodeState>,
     pending_leaf: Option<u32>,
     c_puct: f32,
+    /// FPU (First-Play Urgency) reduction. Unvisited children get an
+    /// initial Q of `parent_Q - fpu_reduction` (from parent's perspective)
+    /// so exploration prefers proven moves over prior-peaked untried ones.
+    /// 0.0 = unvisited children score as "neutral" (old behavior).
+    /// Leela/AlphaZero-derived rigs use ~0.4–0.5.
+    fpu_reduction: f32,
 }
 
 #[pymethods]
 impl MctsSearch {
     /// Construct a search rooted at the supplied game state dict (mirrors
-    /// `ChessGameState.to_dict()` from Python). `c_puct` defaults to 1.5.
+    /// `ChessGameState.to_dict()` from Python). `c_puct` defaults to 1.5,
+    /// `fpu_reduction` defaults to 0.0 (back-compat with pre-FPU behavior).
     #[new]
-    #[pyo3(signature = (state_dict, c_puct=None))]
-    fn new(state_dict: &Bound<'_, PyDict>, c_puct: Option<f32>) -> PyResult<Self> {
+    #[pyo3(signature = (state_dict, c_puct=None, fpu_reduction=None))]
+    fn new(
+        state_dict: &Bound<'_, PyDict>,
+        c_puct: Option<f32>,
+        fpu_reduction: Option<f32>,
+    ) -> PyResult<Self> {
         let root_state = parse_state_dict(state_dict)?;
         let is_terminal = root_state.status.is_terminal();
         let terminal_value = root_state.status.terminal_value();
@@ -151,6 +162,7 @@ impl MctsSearch {
             states: vec![root_state],
             pending_leaf: None,
             c_puct: c_puct.unwrap_or(1.5),
+            fpu_reduction: fpu_reduction.unwrap_or(0.0),
         })
     }
 
@@ -300,8 +312,22 @@ impl MctsSearch {
     fn select_child(&self, node: usize) -> usize {
         // PUCT: q from parent-perspective (negate child's stored Q), plus
         // the c_puct * prior * sqrt(N) / (1+n) exploration term.
+        //
+        // FPU reduction (First-Play Urgency): unvisited children get an
+        // initial Q of `parent_Q - fpu_reduction` (in parent-perspective)
+        // rather than a naive 0. This prevents an over-peaked prior on a
+        // single wrong move from dominating exploration — once one child
+        // has been visited and its Q is known, untouched siblings start
+        // from a pessimized baseline, shifting sim budget toward
+        // under-prior moves when the leading move's Q disappoints.
         let n = &self.nodes[node];
         let sqrt_parent = (n.visit_count.max(1) as f32).sqrt();
+        let parent_q = if n.visit_count > 0 {
+            (n.total_value as f32) / n.visit_count as f32
+        } else {
+            0.0
+        };
+        let q_unvisited = parent_q - self.fpu_reduction;
         let mut best_score = f32::NEG_INFINITY;
         let mut best_idx = n.children[0].1 as usize;
         for &(_, ci) in &n.children {
@@ -309,7 +335,7 @@ impl MctsSearch {
             let q = if c.visit_count > 0 {
                 -(c.total_value as f32) / c.visit_count as f32
             } else {
-                0.0
+                q_unvisited
             };
             let u = self.c_puct * c.prior * sqrt_parent / (1.0 + c.visit_count as f32);
             let score = q + u;

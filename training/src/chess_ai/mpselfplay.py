@@ -74,6 +74,8 @@ class MultiprocessingConfig:
     c_puct: float | None = None
     dirichlet_alpha: float | None = None
     dirichlet_epsilon: float | None = None
+    # First-Play Urgency reduction — see TrainConfig.fpu_reduction.
+    fpu_reduction: float | None = None
     # Syzygy tablebase directory (passed to every worker since worker
     # processes don't inherit parent globals under "spawn" start method).
     # None = disabled.
@@ -236,6 +238,7 @@ def _worker_main(
         c_puct=config.c_puct,
         dirichlet_alpha=config.dirichlet_alpha,
         dirichlet_epsilon=config.dirichlet_epsilon,
+        fpu_reduction=config.fpu_reduction,
     )
     # Same reason for the Syzygy tablebase: each worker must open it itself.
     if config.syzygy_path:
