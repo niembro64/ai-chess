@@ -279,21 +279,29 @@ class DashboardLogger:
         draws: int,
         losses: int,
         per_diff: dict | None = None,
+        *,
+        current: dict | None = None,
+        recent: list[str] | None = None,
+        elapsed_s: float = 0.0,
     ) -> None:
-        """Trainer callback: fires after each game in a live eval match.
+        """Trainer callback: fires twice per game in a live eval match
+        (once before, once after) so the panel updates without waiting
+        on the 30-60s game-play block.
 
         The validation panel reads `_eval_progress` and renders a live
-        scoreboard so the user sees activity during the 10+ min it takes
-        to run 120 games. Per-difficulty breakdown shows which bucket is
-        carrying the match (e.g., challenger dominating mate-in-1 but
-        losing balanced openings). Triggers a manual Live refresh so
-        the bar advances visibly between games (training main loop is
-        paused during eval, so on_step wouldn't fire on its own cadence).
+        scoreboard with match ETA, per-difficulty W/D/L, a recent-games
+        strip, and the name of the position currently being played.
+        Triggers a manual Live refresh so the display advances visibly
+        between progress ticks (training main loop is paused during
+        eval, so on_step wouldn't fire on its own cadence).
         """
         self._eval_progress = {
             "done": games_done, "total": total,
             "wins": wins, "draws": draws, "losses": losses,
             "per_diff": per_diff or {},
+            "current": current,
+            "recent": list(recent or []),
+            "elapsed_s": float(elapsed_s),
         }
         if self._live is not None:
             try:
@@ -716,13 +724,21 @@ class DashboardLogger:
         )
 
     def _progress_score_row(self, progress: dict) -> Text:
-        """Running score + projected Elo + threshold — 'how the fight is going'."""
+        """Running score + projected Elo + threshold + elapsed/ETA —
+        'how the fight is going' and 'when will it end'."""
         import math
         w = int(progress["wins"])
         d = int(progress["draws"])
         l = int(progress["losses"])
         done = w + d + l
         if done == 0:
+            # Still show elapsed even when no game has finished yet.
+            elapsed = float(progress.get("elapsed_s", 0.0))
+            if elapsed > 0:
+                return Text.assemble(
+                    ("elapsed ", "dim"),
+                    (_format_duration(elapsed), "bright_white"),
+                )
             return Text("")
         score = (w + 0.5 * d) / done
         s_clamp = max(0.01, min(0.99, score))
@@ -732,13 +748,67 @@ class DashboardLogger:
             else "yellow" if score >= 0.5
             else "red"
         )
+
+        # ETA: extrapolate from games-per-second so far.
+        elapsed = float(progress.get("elapsed_s", 0.0))
+        total = max(1, int(progress.get("total", 0)))
+        eta_str = ""
+        if elapsed > 0 and done > 0:
+            per_game = elapsed / done
+            remaining = (total - done) * per_game
+            eta_str = f"   elapsed {_format_duration(elapsed)}   ETA {_format_duration(remaining)}"
+
         return Text.assemble(
             ("score ", "dim"),
             (f"{score:.3f}", score_color),
             ("   Δelo ", "dim"),
             (f"{elo:+.0f}", "bright_green" if elo >= 0 else "red"),
             (f"   (thresh {self._eval_threshold:.2f})", "dim"),
+            (eta_str, "dim"),
         )
+
+    def _progress_now_row(self, progress: dict) -> Text | None:
+        """'Currently playing' row: which curated position the eval is on
+        right now, plus which side the challenger is taking. Returns None
+        when there's no active game (between ticks or match-finished)."""
+        current = progress.get("current")
+        if not current:
+            return None
+        game_no = int(current.get("game", 0))
+        total = int(progress.get("total", 0))
+        pos_name = str(current.get("pos_name", "?"))
+        difficulty = str(current.get("difficulty", "?"))
+        challenger_white = bool(current.get("challenger_white"))
+        side = "WHITE" if challenger_white else "BLACK"
+        side_color = "bright_white" if challenger_white else "grey50"
+        # Truncate long position names so the panel doesn't break layout.
+        if len(pos_name) > 28:
+            pos_name = pos_name[:25] + "…"
+        return Text.assemble(
+            (f"game {game_no}/{total}  ", "dim"),
+            (pos_name, "bright_white"),
+            (f"  ({difficulty})", "cyan"),
+            ("  challenger ", "dim"),
+            (side, side_color),
+        )
+
+    def _progress_recent_row(self, progress: dict) -> Text | None:
+        """Last N game outcomes as a colored strip — 'W W D L W W …'.
+        Newest on the right so the eye naturally reads it as history →
+        present."""
+        recent = progress.get("recent") or []
+        if not recent:
+            return None
+        parts = []
+        for r in recent:
+            if r == "W":
+                parts.append((r, "bright_green"))
+            elif r == "L":
+                parts.append((r, "red"))
+            else:
+                parts.append((r, "yellow"))
+            parts.append((" ", "dim"))
+        return Text.assemble(*parts, (" →", "dim"))
 
     def _progress_diff_rows(self, progress: dict) -> list[Text]:
         """Per-difficulty breakdown rows: name  W-D-L  (score).
@@ -787,11 +857,26 @@ class DashboardLogger:
 
         # --- Header block: champion + plateau
         if not hist:
-            body.add_row("status", Text("waiting for first eval match…", style="dim italic"))
-            if self._eval_progress is not None:
-                body.add_row("", self._progress_row(self._eval_progress))
-            title = "validation"
-            return Panel(body, title=title, border_style="magenta")
+            # Before the first eval completes there's no history; show a
+            # one-line status placeholder + full live progress if a match
+            # is in flight. Symmetric with the have-history branch below
+            # so first-eval users aren't left staring at "waiting…".
+            if self._eval_progress is None:
+                body.add_row("status", Text("waiting for first eval match…", style="dim italic"))
+                return Panel(body, title="validation", border_style="magenta")
+            body.add_row("running", self._progress_row(self._eval_progress))
+            score_line = self._progress_score_row(self._eval_progress)
+            if str(score_line):
+                body.add_row("", score_line)
+            now_line = self._progress_now_row(self._eval_progress)
+            if now_line is not None:
+                body.add_row("now", now_line)
+            recent_line = self._progress_recent_row(self._eval_progress)
+            if recent_line is not None:
+                body.add_row("recent", recent_line)
+            for row in self._progress_diff_rows(self._eval_progress):
+                body.add_row("", row)
+            return Panel(body, title="validation", border_style="magenta")
 
         latest = hist[-1]
         champ_gen = latest.get("champion_gen", 0) or 0
@@ -817,6 +902,12 @@ class DashboardLogger:
             score_line = self._progress_score_row(self._eval_progress)
             if str(score_line):
                 body.add_row("", score_line)
+            now_line = self._progress_now_row(self._eval_progress)
+            if now_line is not None:
+                body.add_row("now", now_line)
+            recent_line = self._progress_recent_row(self._eval_progress)
+            if recent_line is not None:
+                body.add_row("recent", recent_line)
             for row in self._progress_diff_rows(self._eval_progress):
                 body.add_row("", row)
 

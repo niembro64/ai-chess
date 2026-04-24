@@ -391,7 +391,7 @@ class Trainer:
         # can show where the challenger is stronger/weaker mid-match.
         # Lets the dashboard render activity while training is paused
         # for the match (which can be 10+ minutes on 120 games).
-        self._on_eval_progress: Callable[[int, int, int, int, int, dict], None] | None = None
+        self._on_eval_progress: Callable[..., None] | None = None
         # Set by the plateau detector (committed separately) to request a
         # clean shutdown on the next main-loop iteration.
         self._stop_requested = False
@@ -612,7 +612,7 @@ class Trainer:
         checkpoint_dir: str | Path | None = None,
         on_step: Callable[[TrainStats], None] | None = None,
         on_eval: Callable[[dict], None] | None = None,
-        on_eval_progress: Callable[[int, int, int, int, int, dict], None] | None = None,
+        on_eval_progress: Callable[..., None] | None = None,
     ) -> None:
         """Main loop: alternate self-play and gradient updates forever (or num_steps).
 
@@ -926,11 +926,15 @@ class Trainer:
         # the slow setup (loading champion, building evaluators) so the
         # dashboard's validation panel shows `running 0/N` as soon as
         # the match begins. Otherwise the first visible update waits on
-        # game-1 completion, which at 200 MCTS sims is 30-60s of
+        # game-1 completion, which at 100 MCTS sims is 30-60s of
         # apparent-silence in the panel.
+        match_start = time.time()
         if self._on_eval_progress is not None:
             try:
-                self._on_eval_progress(0, self.config.eval_games, 0, 0, 0, {})
+                self._on_eval_progress(
+                    0, self.config.eval_games, 0, 0, 0, {},
+                    current=None, recent=[], elapsed_s=0.0,
+                )
             except Exception:
                 pass
 
@@ -941,7 +945,6 @@ class Trainer:
         # Flip current model to eval for the match so BN uses running stats.
         was_training = self.model.training
         self.model.eval()
-        match_start = time.time()
         try:
             challenger_eval = self._make_model_evaluator(self.model)
             champion_eval = self._make_model_evaluator(self._champion_model)
@@ -958,12 +961,35 @@ class Trainer:
             # match is going in each category (mate-in-1, trivial, clear,
             # balanced) separately — much more informative than one score.
             per_diff: dict[str, dict[str, int]] = {}
+            # Rolling outcomes so the dashboard can show a recent-results
+            # strip ("W W D L W …") that gives an immediate visual read
+            # on momentum during the long eval match.
+            from collections import deque
+            recent: deque[str] = deque(maxlen=14)
             # Each position plays twice — once with challenger as white,
             # once as black — so any intrinsic imbalance in asymmetric
             # positions (K+Q vs K, etc.) averages across the pair.
             for g in range(total):
                 position = positions[(g // 2) % len(positions)]
                 challenger_white = (g % 2 == 0)
+                current = {
+                    "game": g + 1,
+                    "pos_name": position.name,
+                    "difficulty": position.difficulty,
+                    "challenger_white": challenger_white,
+                }
+                # Pre-game tick so the dashboard's "now" row updates
+                # before we disappear into a 30-60s game-play block.
+                if self._on_eval_progress is not None:
+                    try:
+                        self._on_eval_progress(
+                            g, total, wins, draws, losses, per_diff,
+                            current=current,
+                            recent=list(recent),
+                            elapsed_s=time.time() - match_start,
+                        )
+                    except Exception:
+                        pass
                 outcome = self._play_eval_game(
                     challenger_eval,
                     champion_eval,
@@ -978,18 +1004,24 @@ class Trainer:
                 if outcome == "challenger":
                     wins += 1
                     bucket["w"] += 1
+                    recent.append("W")
                 elif outcome == "champion":
                     losses += 1
                     bucket["l"] += 1
+                    recent.append("L")
                 else:
                     draws += 1
                     bucket["d"] += 1
-                # Dashboard progress tick. Wrapped in try/except because a
+                    recent.append("D")
+                # Post-game tick. Wrapped in try/except because a
                 # dashboard hiccup shouldn't abort the whole eval match.
                 if self._on_eval_progress is not None:
                     try:
                         self._on_eval_progress(
                             g + 1, total, wins, draws, losses, per_diff,
+                            current=current,
+                            recent=list(recent),
+                            elapsed_s=time.time() - match_start,
                         )
                     except Exception:
                         pass
