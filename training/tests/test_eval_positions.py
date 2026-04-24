@@ -14,19 +14,25 @@ from chess_ai.eval_positions import build_eval_positions
 
 def test_all_eval_positions_build():
     positions = build_eval_positions()
-    # 50 mate-in-1 (5 hand + 45 random) + 5 asymmetric + 5 balanced = 60.
-    # eval_games must be 120 to play each position once per color.
+    # 20 mate-in-1 (5 hand + 15 random) + 10 endgame + 15 middlegame
+    # + 15 opening = 60. eval_games must be 120 to play each position
+    # once per color.
     assert len(positions) == 60
     names = [p.name for p in positions]
     assert len(names) == len(set(names)), f"duplicate names: {names}"
 
 
-def test_mate_in_1_count_is_50():
-    """10× the original 5 hand-crafted positions — stress-tests pattern
-    recognition across many positions, not just a handful."""
+def test_category_counts():
+    """Each difficulty category hits its target count — guards against
+    accidentally dropping a chunk of positions during a refactor."""
     positions = build_eval_positions()
-    mate_in_1 = [p for p in positions if p.difficulty == "mate-in-1"]
-    assert len(mate_in_1) == 50, f"expected 50 mate-in-1, got {len(mate_in_1)}"
+    counts = {}
+    for p in positions:
+        counts[p.difficulty] = counts.get(p.difficulty, 0) + 1
+    assert counts.get("mate-in-1") == 20, counts
+    assert counts.get("endgame") == 10, counts
+    assert counts.get("middlegame") == 15, counts
+    assert counts.get("opening") == 15, counts
 
 
 def test_eval_positions_are_non_terminal():
@@ -40,23 +46,27 @@ def test_eval_positions_are_non_terminal():
 
 
 def test_difficulty_mix_present():
-    """We want a balance of difficulty levels — at least one trivial,
-    at least one clear, and several balanced openings. Keeps future
+    """All four difficulty categories are represented — keeps future
     edits from accidentally collapsing the set to one category."""
     positions = build_eval_positions()
     difficulties = {p.difficulty for p in positions}
-    assert "trivial" in difficulties
-    assert "clear" in difficulties
-    assert "balanced" in difficulties
+    assert "mate-in-1" in difficulties
+    assert "endgame" in difficulties
+    assert "middlegame" in difficulties
+    assert "opening" in difficulties
 
 
-def test_trivial_positions_have_material_imbalance():
-    """Trivial-difficulty positions should have overwhelmingly
-    asymmetric material. Checked by material value, not piece count —
-    K+Q vs K is 2-vs-1 pieces but 9 points of advantage."""
+def test_endgame_overwhelming_positions_have_material_imbalance():
+    """A subset of endgames (the legacy 'trivial' ones like K+Q vs K)
+    should have overwhelming material imbalance. Identified by name —
+    technique-heavy endgames like Lucena/Philidor have small imbalances
+    by design and aren't checked here."""
     values = {"pawn": 1, "knight": 3, "bishop": 3, "rook": 5, "queen": 9, "king": 0}
+    overwhelming_names = {
+        "K+Q vs K", "K+R vs K", "Lone king vs full army",
+    }
     for p in build_eval_positions():
-        if p.difficulty != "trivial":
+        if p.name not in overwhelming_names:
             continue
         white_val = black_val = 0
         for r in range(8):
@@ -69,10 +79,9 @@ def test_trivial_positions_have_material_imbalance():
                     white_val += v
                 else:
                     black_val += v
-        # Trivial = >= 5 points of material imbalance (rook or better).
         assert abs(white_val - black_val) >= 5, (
-            f"{p.name!r} is tagged 'trivial' but material imbalance is "
-            f"only {abs(white_val - black_val)} points "
+            f"{p.name!r} should be overwhelmingly-winning but material "
+            f"imbalance is only {abs(white_val - black_val)} points "
             f"(W={white_val}, B={black_val})."
         )
 

@@ -381,7 +381,7 @@ class DashboardLogger:
         per_diff = result.get("per_diff") or {}
         if per_diff:
             parts = []
-            for name in ("mate-in-1", "trivial", "clear", "balanced"):
+            for name in ("mate-in-1", "endgame", "middlegame", "opening"):
                 stats = per_diff.get(name)
                 if not stats:
                     continue
@@ -389,7 +389,7 @@ class DashboardLogger:
                 if n == 0:
                     continue
                 score = (stats["w"] + 0.5 * stats["d"]) / n
-                label = {"mate-in-1": "mate-1", "balanced": "openings"}.get(name, name)
+                label = {"mate-in-1": "mate-1", "middlegame": "midgame", "opening": "openings"}.get(name, name)
                 parts.append(f"{label}={score:.2f}")
             if parts:
                 self.log("  by difficulty:  " + "  ".join(parts))
@@ -869,7 +869,7 @@ class DashboardLogger:
                 else "red"
             )
             # Display label — "mate-in-1" is long, abbreviate it.
-            label = {"mate-in-1": "mate-1", "balanced": "openings"}.get(name, name)
+            label = {"mate-in-1": "mate-1", "middlegame": "midgame", "opening": "openings"}.get(name, name)
             out.append(Text.assemble(
                 (f"  {label:<8}", "bright_white"),
                 (f"{stats['w']:>3}-{stats['d']:>2}-{stats['l']:>2}  ", "dim"),

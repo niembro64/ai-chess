@@ -1,25 +1,38 @@
 """Curated starting positions for the auto-eval tournament.
 
 Instead of playing every eval game from the standard opening (where two
-weak models both draw by shuffling), we test across a mix of difficulty
-levels:
+weak models both draw by shuffling), we test across a balanced mix of
+position types so most of the eval budget measures skills that are
+actively improving (not saturated tactical patterns):
 
-  * "trivial"  — one side has overwhelming material (e.g. K+Q vs K). A
-    competent model MUST win these; any draw here is a sign the value
-    head can't even convert a won position. Each is played once from
-    each color, so both models face the same test. If one model fails
-    to convert, the match score reflects it directly.
-  * "clear"    — winning but requires technique (K+P vs K, middlegame
-    up a knight). Tests "can you close out a slight advantage?"
-  * "balanced" — mainline openings after 4-8 moves. Standard relative-
-    strength test; stronger middlegame tech wins more of these.
+  * "mate-in-1"  — side-to-move has a forced mate in one. Tests value-
+    head sanity / tactical pattern recognition. Past mid-training both
+    models solve ~all of these; kept mainly as a regression sentinel.
+  * "endgame"    — asymmetric or technically-difficult endgames.
+    Ranges from "overwhelming" (K+Q vs K) to "subtle" (R+P vs R
+    Lucena/Philidor, opposite-color bishops). Tests conversion
+    technique — where most strength gains land past the opening.
+  * "middlegame" — structural middlegame tests (IQP, minority attack,
+    opposite-side castling attack, classical tabiya positions). Reached
+    via deep move sequences from known lines. Tests positional
+    understanding once the opening phase is over.
+  * "opening"    — mainline openings after 4-10 moves. Standard
+    relative-strength test; stronger opening+early-middlegame play
+    wins more of these.
 
-Each position is played exactly twice (one game per color assignment)
-so any intrinsic advantage in an asymmetric position averages out
-across the pair. 5 asymmetric + 5 balanced × 2 colors = 20 games.
+Every position is played exactly twice (one game per color assignment)
+so any intrinsic imbalance averages across the pair.
+
+Mix (total 60 positions → 120 games at eval_games=120):
+    20 mate-in-1  (5 hand-crafted + 15 procedurally generated)
+    10 endgame    (5 asymmetric + 5 technique-heavy)
+    15 middlegame (15 themed structural positions)
+    15 opening    (5 original + 10 modern lines)
 
 Hardcoded, deterministic — fixed across every eval match so scores are
-directly comparable gen-to-gen.
+directly comparable gen-to-gen WITHIN a given position set. Changing
+the set resets the comparison baseline (so eval.csv scores pre- vs.
+post-change aren't directly comparable).
 """
 
 from __future__ import annotations
@@ -40,7 +53,7 @@ from .engine import (
     is_in_check,
 )
 
-Difficulty = Literal["mate-in-1", "trivial", "clear", "balanced"]
+Difficulty = Literal["mate-in-1", "endgame", "middlegame", "opening"]
 
 
 @dataclass(frozen=True)
@@ -50,17 +63,34 @@ class EvalPosition:
     difficulty: Difficulty
 
 
-# --- Mainline opening sequences (balanced positions) -----------------------
+# --- Mainline opening sequences (opening-phase positions) ------------------
 
 # Move sequences in UCI long algebraic (e.g. "e2e4"). Castling is encoded
 # as the king's two-square move ("e1g1" or "e1c1"). Promotions end with a
 # fifth char ("e7e8q") — none of our book lines need them.
+#
+# These are "opening phase" positions — 4-10 moves deep — meant to test
+# early-game judgment. Deeper structural positions live in
+# _MIDDLEGAME_SEQUENCES below.
 _OPENING_SEQUENCES: tuple[tuple[str, str], ...] = (
+    # Original 5 — kept for continuity with pre-rebalance eval runs.
     ("Italian Game",             "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5"),
     ("Ruy Lopez, Closed",        "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7"),
     ("Sicilian Najdorf",         "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6"),
     ("Queen's Gambit Declined",  "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 f8e7"),
     ("King's Indian Defense",    "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8"),
+    # 10 additional modern lines covering 1.e4 / 1.d4 / 1.c4 / 1.Nf3,
+    # both classical and hypermodern systems.
+    ("Scotch Game",              "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 f8c5 c1e3"),
+    ("Vienna Game",              "e2e4 e7e5 b1c3 g8f6 f2f4 d7d5 f4e5 f6e4"),
+    ("French Classical",         "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 c1g5 f8e7"),
+    ("Caro-Kann Classical",      "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5"),
+    ("Pirc Defense",             "e2e4 d7d6 d2d4 g8f6 b1c3 g7g6 g1f3 f8g7"),
+    ("Alekhine's Defense",       "e2e4 g8f6 e4e5 f6d5 d2d4 d7d6 g1f3 g7g6"),
+    ("English (1.c4 e5)",        "c2c4 e7e5 b1c3 g8f6 g1f3 b8c6 g2g3 f8b4"),
+    ("Dutch Leningrad",          "d2d4 f7f5 g2g3 g8f6 f1g2 g7g6 g1f3 f8g7"),
+    ("London System",            "d2d4 d7d5 g1f3 g8f6 c1f4 e7e6 e2e3 f8d6"),
+    ("Petroff Defense",          "e2e4 e7e5 g1f3 g8f6 f3e5 d7d6 e5f3 f6e4"),
 )
 
 
@@ -296,7 +326,7 @@ _HAND_MATE_IN_1_POSITIONS: tuple[tuple[str, Callable[[], ChessGameState], Diffic
 # eval behavior as hand-crafted positions.
 
 _RANDOM_SEED = 4242           # fixed for determinism across runs
-_RANDOM_MATE_TARGET = 45      # +5 hand-crafted = 50 mate-in-1 positions total
+_RANDOM_MATE_TARGET = 15      # +5 hand-crafted = 20 mate-in-1 positions total
 _RANDOM_MATE_MAX_TRIES = 20_000  # ceiling on retries; generation aborts if hit
 
 
@@ -408,14 +438,180 @@ def _generate_random_mate_in_1_positions(count: int, seed: int) -> list[ChessGam
     return results
 
 
-# Each entry: (name, builder, difficulty). Order is stable — the trainer
-# iterates this list and pairs each entry with two color assignments.
-_ASYMMETRIC_POSITIONS: tuple[tuple[str, Callable[[], ChessGameState], Difficulty], ...] = (
-    ("K+Q vs K",                      _build_kq_vs_k,                "trivial"),
-    ("K+R vs K",                      _build_kr_vs_k,                "trivial"),
-    ("Lone king vs full army",        _build_lone_king_vs_army,      "trivial"),
-    ("K+P vs K (promotion race)",     _build_kp_vs_k_winning,        "clear"),
-    ("Up a knight (middlegame)",      _build_up_a_knight_middlegame, "clear"),
+# --- Technique-heavy endgame positions -------------------------------------
+#
+# Second tier of endgame tests: not overwhelming material, but well-known
+# positions that test specific endgame techniques. Unlike the asymmetric
+# set above, these can be drawn (defender holding) rather than always
+# won — that's the point. The challenger/champion split on these tells
+# you whether the model has learned the technique, not just the material.
+
+
+def _build_rook_endgame_winning() -> ChessGameState:
+    """R+P vs R, pawn on 7th supported by king — Lucena-like winning.
+
+    White K on c8 shelters from checks along the 8th; pawn on d7 one
+    square from promotion; rook on a1 ready for the 'bridge' technique.
+    Black king on f6 is cut off from the pawn's queening square by
+    distance; rook on h2 is the only defender. White wins by lifting
+    the rook to build a shield and walking the king out.
+    """
+    b = _empty_board()
+    _place(b, "white", "king", "c8")
+    _place(b, "white", "pawn", "d7")
+    _place(b, "white", "rook", "a1")
+    _place(b, "black", "king", "f6")
+    _place(b, "black", "rook", "h2")
+    return _state_from_board(b, "white")
+
+
+def _build_rook_endgame_drawn() -> ChessGameState:
+    """R+P vs R with defender's king in front of the pawn — Philidor-
+    like drawing position.
+
+    White king on d5, pawn on d4, rook on a7 (attacker). Black king on
+    d7 (front-of-pawn defense), rook on h6 (sixth-rank defense pattern).
+    A correctly-played defender holds; this tests whether the model
+    knows the Philidor method (and whether the attacker can find wins
+    that aren't actually there).
+    """
+    b = _empty_board()
+    _place(b, "white", "king", "d5")
+    _place(b, "white", "pawn", "d4")
+    _place(b, "white", "rook", "a7")
+    _place(b, "black", "king", "d7")
+    _place(b, "black", "rook", "h6")
+    return _state_from_board(b, "white")
+
+
+def _build_opposite_color_bishops() -> ChessGameState:
+    """Opposite-color bishops with W up a pawn — classic drawing tendency.
+
+    White has light-square bishop + extra pawn vs. Black's dark-square
+    bishop. In opposite-color bishop endgames, up-a-pawn often can't
+    win because the defender's bishop covers all the squares the
+    attacker's bishop can't. Tests endgame evaluation subtlety: a
+    value head that always rewards extra material will overestimate
+    White here.
+    """
+    b = _empty_board()
+    _place(b, "white", "king", "e4")
+    _place(b, "white", "bishop", "d3")   # light-square
+    _place(b, "white", "pawn", "e5")
+    _place(b, "white", "pawn", "f4")
+    _place(b, "black", "king", "e7")
+    _place(b, "black", "bishop", "g7")   # dark-square
+    _place(b, "black", "pawn", "f5")
+    return _state_from_board(b, "white")
+
+
+def _build_two_bishops_mate() -> ChessGameState:
+    """K+2B vs K — winning but requires bishop coordination.
+
+    Two bishops controlling adjacent diagonals drive the enemy king
+    to a corner. Mate takes ~20-30 moves with perfect play. Tests
+    whether the model understands long-horizon mate forcing, not
+    just "if mate available, play it" tactical patterns.
+    """
+    b = _empty_board()
+    _place(b, "white", "king", "e4")
+    _place(b, "white", "bishop", "d3")   # light-square
+    _place(b, "white", "bishop", "e3")   # dark-square
+    _place(b, "black", "king", "e6")
+    return _state_from_board(b, "white")
+
+
+def _build_rook_plus_two_pawns() -> ChessGameState:
+    """R+2P vs R — clearly winning extra-pawn rook endgame.
+
+    White has two connected passed pawns on the queenside and an
+    active rook. Conversion requires standard technique (shoulder-
+    barging, creating a passed pawn front). Easier than Lucena but
+    not trivially winning — tests basic endgame conversion skill.
+    """
+    b = _empty_board()
+    _place(b, "white", "king", "e3")
+    _place(b, "white", "rook", "a1")
+    _place(b, "white", "pawn", "b4")
+    _place(b, "white", "pawn", "c4")
+    _place(b, "black", "king", "e6")
+    _place(b, "black", "rook", "a8")
+    return _state_from_board(b, "white")
+
+
+# Each entry: (name, builder, difficulty). All endgame-category now;
+# the old "trivial" / "clear" split collapsed because their statistical
+# power is the same (both test conversion under known technique).
+_ENDGAME_POSITIONS: tuple[tuple[str, Callable[[], ChessGameState], Difficulty], ...] = (
+    ("K+Q vs K",                      _build_kq_vs_k,                  "endgame"),
+    ("K+R vs K",                      _build_kr_vs_k,                  "endgame"),
+    ("Lone king vs full army",        _build_lone_king_vs_army,        "endgame"),
+    ("K+P vs K (promotion race)",     _build_kp_vs_k_winning,          "endgame"),
+    ("Up a knight (middlegame)",      _build_up_a_knight_middlegame,   "endgame"),
+    ("R+P vs R (Lucena-like)",        _build_rook_endgame_winning,     "endgame"),
+    ("R+P vs R (Philidor-like)",      _build_rook_endgame_drawn,       "endgame"),
+    ("Opposite-color bishops +1P",    _build_opposite_color_bishops,   "endgame"),
+    ("K+2B vs K (two-bishop mate)",   _build_two_bishops_mate,         "endgame"),
+    ("R+2P vs R",                     _build_rook_plus_two_pawns,      "endgame"),
+)
+
+
+# --- Middlegame tabiya sequences -------------------------------------------
+#
+# Deeper opening → middlegame transitions, reached via well-known
+# mainline move sequences. Each position embodies a characteristic
+# structural theme (IQP, minority attack, opposite-side castling, etc.)
+# so the eval tests whether the model has learned positional patterns
+# beyond opening memorization. All sequences are standard theory; any
+# engine-logic bug that makes a move illegal will be caught by
+# test_eval_positions_are_non_terminal.
+
+_MIDDLEGAME_SEQUENCES: tuple[tuple[str, str], ...] = (
+    ("IQP (Tarrasch)",
+     "d2d4 d7d5 c2c4 e7e6 b1c3 c7c5 c4d5 e6d5 g1f3 b8c6 g2g3 g8f6 "
+     "f1g2 f8e7 e1g1 e8g8"),
+    ("Minority attack (QGD Exchange)",
+     "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c4d5 e6d5 c1g5 f8e7 e2e3 e8g8 "
+     "f1d3 b8d7 d1c2 f8e8"),
+    ("Najdorf English Attack",
+     "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1e3 e7e6 "
+     "f2f3 b7b5 d1d2 c8b7"),
+    ("King's Indian Classical",
+     "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8 f1e2 e7e5 "
+     "e1g1 b8c6 d4d5 c6e7"),
+    ("Sveshnikov Sicilian",
+     "e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e5 d4b5 d7d6 "
+     "c1g5 a7a6 b5a3 b7b5"),
+    ("French Advance (blocked)",
+     "e2e4 e7e6 d2d4 d7d5 e4e5 c7c5 c2c3 b8c6 g1f3 d8b6 f1e2 c5d4 "
+     "c3d4 c8d7"),
+    ("Caro-Kann Advance",
+     "e2e4 c7c6 d2d4 d7d5 e4e5 c8f5 g1f3 e7e6 f1e2 c6c5 c1e3 b8c6 "
+     "e1g1 c5d4"),
+    ("Nimzo-Indian Classical",
+     "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 d1c2 e8g8 a2a3 b4c3 c2c3 b7b6 "
+     "g1f3 c8b7 e2e3 d7d6"),
+    ("QGA main line",
+     "d2d4 d7d5 c2c4 d5c4 g1f3 g8f6 e2e3 e7e6 f1c4 c7c5 e1g1 a7a6 "
+     "b1c3 b7b5 c4d3"),
+    ("English symmetric",
+     "c2c4 c7c5 b1c3 b8c6 g2g3 g7g6 f1g2 f8g7 g1f3 g8f6 e1g1 e8g8 "
+     "d2d3 d7d6 a1b1 a7a6"),
+    ("Grünfeld Exchange",
+     "d2d4 g8f6 c2c4 g7g6 b1c3 d7d5 c4d5 f6d5 e2e4 d5c3 b2c3 f8g7 "
+     "f1c4 c7c5 g1e2 b8c6"),
+    ("Slav Main",
+     "d2d4 d7d5 c2c4 c7c6 b1c3 g8f6 g1f3 d5c4 a2a4 c8f5 e2e3 e7e6 "
+     "f1c4 f8b4"),
+    ("Benoni Modern",
+     "d2d4 g8f6 c2c4 c7c5 d4d5 e7e6 b1c3 e6d5 c4d5 d7d6 e2e4 g7g6 "
+     "g1f3 f8g7 f1e2 e8g8"),
+    ("Catalan",
+     "d2d4 g8f6 c2c4 e7e6 g2g3 d7d5 f1g2 f8e7 g1f3 e8g8 e1g1 d5c4 "
+     "d1c2 a7a6"),
+    ("Dragon Yugoslav (pre-castling)",
+     "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 g7g6 c1e3 f8g7 "
+     "f2f3 e8g8"),
 )
 
 
@@ -428,10 +624,14 @@ _CACHE: list[EvalPosition] | None = None
 def build_eval_positions() -> list[EvalPosition]:
     """Return all curated eval positions. Cached after first call.
 
-    Order: mate-in-1 positions first (fastest failure signal if the value
-    head is broken), then asymmetric-material endgames, then balanced
-    openings. The eval loop iterates this list and pairs each position
-    with two color assignments, so each entry yields exactly two games.
+    Order: mate-in-1 (fastest failure signal if the value head is
+    broken), then endgame (technique-heavy conversions), then
+    middlegame (structural themes), then opening (standard repertoire).
+    The eval loop pairs each position with two color assignments, so
+    each entry yields exactly two games.
+
+    Mix: 20 mate-in-1 + 10 endgame + 15 middlegame + 15 opening = 60
+    positions = 120 games at eval_games=120.
     """
     global _CACHE
     if _CACHE is not None:
@@ -449,12 +649,19 @@ def build_eval_positions() -> list[EvalPosition]:
             state=state,
             difficulty="mate-in-1",
         ))
-    # Asymmetric-material endgames.
-    for name, builder, difficulty in _ASYMMETRIC_POSITIONS:
+    # Endgame positions (asymmetric material + technique-heavy).
+    for name, builder, difficulty in _ENDGAME_POSITIONS:
         positions.append(EvalPosition(name=name, state=builder(), difficulty=difficulty))
-    # Mainline openings.
+    # Themed middlegame tabiyas reached via deep move sequences.
+    for name, seq in _MIDDLEGAME_SEQUENCES:
+        positions.append(EvalPosition(
+            name=name, state=_play_sequence(seq), difficulty="middlegame",
+        ))
+    # Opening-phase positions (4-10 moves deep).
     for name, seq in _OPENING_SEQUENCES:
-        positions.append(EvalPosition(name=name, state=_play_sequence(seq), difficulty="balanced"))
+        positions.append(EvalPosition(
+            name=name, state=_play_sequence(seq), difficulty="opening",
+        ))
 
     _CACHE = positions
     return positions
