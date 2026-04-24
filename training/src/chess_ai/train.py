@@ -117,6 +117,16 @@ class TrainConfig:
     # Typical: 1.3–1.6 when recovering from a collapsed policy; 1.0
     # (no-op) otherwise.
     self_play_policy_softening_temperature: float = 1.0
+    # Policy-loss weight for samples from TB-adjudicated games. In those
+    # games MCTS never found a forcing line — Syzygy rescued the value
+    # label, but the move choices during play reflect "best guess while
+    # lost," not "this is the right plan." Training policy to imitate
+    # those distributions teaches meandering play. 1.0 = no discount;
+    # 0.5 halves their policy-gradient influence. Value loss is
+    # unaffected (the value label is correct regardless). Matters most
+    # early in training when 30–40% of games go to TB adjudication;
+    # the effect shrinks naturally as the model learns to finish games.
+    tb_policy_weight: float = 0.5
     # Mixed-precision training on CUDA: forward/backward in fp16 with a
     # GradScaler. 2-3x speedup on Pascal (1080 Ti) with no measurable
     # quality loss. No-op on CPU/MPS.
@@ -349,6 +359,7 @@ class Trainer:
                 rewards=self.config.rewards,
                 value_ply_decay=self.config.value_ply_decay,
                 policy_softening_temperature=self.config.self_play_policy_softening_temperature,
+                tb_policy_weight=self.config.tb_policy_weight,
             )
             self._mp_self_play = MultiprocessingSelfPlay(
                 arch=ModelArch.from_model(self.model),
@@ -370,6 +381,7 @@ class Trainer:
                     rewards=self.config.rewards,
                     value_ply_decay=self.config.value_ply_decay,
                     policy_softening_temperature=self.config.self_play_policy_softening_temperature,
+                    tb_policy_weight=self.config.tb_policy_weight,
                 ),
                 rng=self.rng,
             )
@@ -474,8 +486,8 @@ class Trainer:
         self.model.train()
 
         t0 = time.perf_counter()
-        boards_np, policies_np, values_np, outcome_known_np = self.buffer.sample(
-            self.config.batch_size, self.rng
+        boards_np, policies_np, values_np, outcome_known_np, policy_weights_np = (
+            self.buffer.sample(self.config.batch_size, self.rng)
         )
         if self.config.mirror_augment_prob > 0:
             # Use numpy's random state so we don't reseed from a Python
@@ -496,6 +508,7 @@ class Trainer:
         policy_target = torch.from_numpy(policies_np).to(self.device)
         wdl_target = torch.from_numpy(values_to_wdl_targets(values_np)).to(self.device)
         outcome_known = torch.from_numpy(outcome_known_np).to(self.device)
+        policy_sample_weight = torch.from_numpy(policy_weights_np).to(self.device)
         self._device_sync()
         t2 = time.perf_counter()
 
@@ -510,7 +523,16 @@ class Trainer:
             h = self.model.trunk_features(x)
             pred_policy, pred_wdl = self.model.heads(h)
             # Cross-entropy losses (targets sum to 1; pred outputs are softmax-normalized).
-            policy_loss = -(policy_target * torch.log(pred_policy.clamp(min=1e-8))).sum(dim=1).mean()
+            # Policy loss is a per-sample-weighted mean so TB-adjudicated games
+            # contribute a fraction (tb_policy_weight, default 0.5) of a regular
+            # sample's gradient — their MCTS distributions reflect meandering
+            # play. Weighted-mean normalization keeps the loss scale stable
+            # across batches regardless of how many TB samples are drawn.
+            per_sample_policy = -(
+                policy_target * torch.log(pred_policy.clamp(min=1e-8))
+            ).sum(dim=1)
+            pw_sum = policy_sample_weight.sum().clamp_min(1e-8)
+            policy_loss = (per_sample_policy * policy_sample_weight).sum() / pw_sum
 
             per_sample_value = -(wdl_target * torch.log(pred_wdl.clamp(min=1e-8))).sum(dim=1)
             draw_w = self.config.value_draw_weight

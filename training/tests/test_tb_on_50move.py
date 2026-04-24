@@ -137,6 +137,38 @@ def test_50move_draw_no_tb_signal_stays_draw_50():
     assert captured[1].value == 0.0
 
 
+def test_tb_adjudicated_samples_get_discounted_policy_weight():
+    """TB-adjudicated games should propagate the configured discount
+    (default 0.5) to every TrainingExample's policy_weight. Non-TB games
+    (e.g. natural 50-move draw when the tb is unavailable) keep 1.0 so
+    their MCTS visit distributions train the policy head at full weight.
+    """
+    captured: list = []
+    engine = SelfPlayEngine(
+        evaluator=_null_evaluator,
+        example_sink=captured.append,
+        config=SelfPlayConfig(
+            num_concurrent_games=1, mcts_simulations=1,
+            tb_policy_weight=0.3,  # non-default so we can see it land
+        ),
+        rng=random.Random(0),
+    )
+    # Case 1: TB rescued the outcome → both examples get 0.3
+    with mock.patch("chess_ai.selfplay.tablebase.probe_outcome", return_value=1):
+        engine._finish_game(_slot_50move(stm="white"))
+    assert len(captured) == 2
+    assert captured[0].policy_weight == 0.3
+    assert captured[1].policy_weight == 0.3
+
+    # Case 2: no TB signal → examples keep policy_weight=1.0
+    captured.clear()
+    with mock.patch("chess_ai.selfplay.tablebase.probe_outcome", return_value=None):
+        engine._finish_game(_slot_50move(stm="white"))
+    assert len(captured) == 2
+    assert captured[0].policy_weight == 1.0
+    assert captured[1].policy_weight == 1.0
+
+
 def test_stalemate_is_not_overridden_by_tb():
     """Stalemate is a forced legal draw — the side to move genuinely has
     no moves. We don't tb-override it, because the game is ALREADY over

@@ -49,6 +49,14 @@ class TrainingExample:
     # computation so the value head isn't pulled toward "predict draw"
     # by noise. Policy signal (MCTS visit distribution) is still used.
     outcome_known: bool = True
+    # Per-sample weight applied to the policy loss. 1.0 for normal
+    # self-play samples; lower for samples from games where the MCTS
+    # visit distribution is less trustworthy. Currently used to
+    # down-weight TB-adjudicated games (MCTS was meandering — Syzygy
+    # rescued the value label but the move choices during play reflect
+    # "best guess while lost," not a found forcing line). Value loss
+    # weighting is handled separately via outcome_known.
+    policy_weight: float = 1.0
 
 
 @dataclass
@@ -107,6 +115,10 @@ class ReplayBuffer:
         # timeout we couldn't adjudicate. Stored as float32 for direct
         # multiplication into the weighted value loss.
         self._outcome_known = np.ones((capacity,), dtype=np.float32)
+        # Per-sample weight for the policy loss. 1.0 for regular samples,
+        # lower for samples where the MCTS visit distribution is known
+        # to be less informative (TB-adjudicated games).
+        self._policy_weights = np.ones((capacity,), dtype=np.float32)
         self._size = 0
         self._head = 0
 
@@ -119,19 +131,25 @@ class ReplayBuffer:
         self._policies[i] = ex.policy
         self._values[i] = ex.value
         self._outcome_known[i] = 1.0 if ex.outcome_known else 0.0
+        self._policy_weights[i] = float(ex.policy_weight)
         self._head = (self._head + 1) % self.capacity
         if self._size < self.capacity:
             self._size += 1
 
     def sample(
         self, batch_size: int, rng: random.Random | None = None
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Returns (boards, policies, values, outcome_known_mask).
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Returns (boards, policies, values, outcome_known_mask, policy_weights).
 
-        The mask is 1.0 for samples where the value label is real and
-        0.0 for cap-timeout samples where the value was a no-signal
-        guess. Callers should multiply the per-sample value loss by
-        this mask to ignore unreliable labels.
+        outcome_known_mask is 1.0 for samples where the value label is
+        real and 0.0 for cap-timeout samples where the value was a
+        no-signal guess. Callers should multiply the per-sample value
+        loss by this mask to ignore unreliable labels.
+
+        policy_weights is a per-sample float in [0, 1] — 1.0 for regular
+        samples, lower (e.g. 0.5) for TB-adjudicated games where the
+        MCTS visit distribution is noisier than usual. Callers should
+        multiply the per-sample policy loss by this weight.
         """
         rng = rng or random
         if self._size == 0:
@@ -142,6 +160,7 @@ class ReplayBuffer:
             self._policies[idx],
             self._values[idx],
             self._outcome_known[idx],
+            self._policy_weights[idx],
         )
 
 
@@ -447,6 +466,15 @@ class SelfPlayConfig:
     # Training target (visit distribution) is unchanged; eval callers
     # leave this at 1.0 so the sharp trained policy is used verbatim.
     policy_softening_temperature: float = 1.0
+    # Per-sample policy-loss weight applied to training examples from
+    # TB-adjudicated games. In those games MCTS never found a forcing
+    # line — Syzygy rescued the value label, but the move distribution
+    # at each ply reflects "best guess while lost," not "this is the
+    # right plan." Down-weighting the policy signal from those samples
+    # stops the policy head from imitating meandering play. 1.0 = no
+    # discount; 0.5 halves their influence. Does not affect value loss
+    # (that's correct regardless of how it was discovered).
+    tb_policy_weight: float = 1.0
 
 
 # A "sink" accepts completed training examples one at a time. The single-process
@@ -627,6 +655,14 @@ class SelfPlayEngine:
         # (mate, stalemate, 50-move, tb_*) has a real label; flag it as
         # such so the trainer weights its value loss accordingly.
         outcome_known = outcome != "cap"
+        # Policy-loss weight: discount TB-adjudicated games because their
+        # MCTS visit distributions came from play that never found a
+        # forcing line (Syzygy labeled the outcome post-hoc). See config
+        # docstring. Applied per-game (every example in a TB-adjudicated
+        # game shares the same discount).
+        policy_weight = (
+            self.config.tb_policy_weight if tb_adjudicated else 1.0
+        )
 
         # Per-ply value decay: positions close to terminal get magnitude
         # ≈1, positions further away decay toward 0. Teaches the value
@@ -646,6 +682,7 @@ class SelfPlayEngine:
             self.example_sink(TrainingExample(
                 board=ex.board, policy=ex.policy, value=value,
                 outcome_known=outcome_known,
+                policy_weight=policy_weight,
             ))
 
         self.games_completed += 1

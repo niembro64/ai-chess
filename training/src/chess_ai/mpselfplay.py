@@ -85,6 +85,9 @@ class MultiprocessingConfig:
     # Soften NN policy priors in self-play MCTS (>1.0 = flatter prior).
     # See SelfPlayConfig.policy_softening_temperature.
     policy_softening_temperature: float = 1.0
+    # Per-sample policy-loss weight for TB-adjudicated games. See
+    # SelfPlayConfig.tb_policy_weight. 1.0 = no discount.
+    tb_policy_weight: float = 1.0
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -261,6 +264,7 @@ def _worker_main(
             rewards=config.rewards,
             value_ply_decay=config.value_ply_decay,
             policy_softening_temperature=config.policy_softening_temperature,
+            tb_policy_weight=config.tb_policy_weight,
         ),
         rng=rng,
     )

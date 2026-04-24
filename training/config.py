@@ -168,6 +168,16 @@ def build_config() -> TrainConfig:
         # actually get visited. Only applied at self-play time;
         # eval keeps the trained policy's sharpness intact.
         self_play_policy_softening_temperature=1.5,
+        # Down-weight policy loss on TB-adjudicated game samples. Those
+        # games went to cap/50-move without MCTS finding a forcing line;
+        # Syzygy rescued the value label (correct, kept at full weight),
+        # but the visit distributions reflect "best guess while lost,"
+        # not "this is the right plan." At gen ~570, 35% of games are
+        # TB-adjudicated — without this discount a third of the policy
+        # gradient trains the network to imitate meandering play.
+        # 0.5 halves their contribution; drops to near-no-op as the
+        # model learns to finish games on its own.
+        tb_policy_weight=0.5,
         # Disabled. aux_material_weight feeds material-balance signal
         # through the shared trunk, which can bias trunk features
         # toward material-changing moves (captures, pushes) and away

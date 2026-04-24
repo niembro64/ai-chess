@@ -52,13 +52,18 @@ def test_selfplay_produces_examples(tiny_model: ChessNet):
     assert len(buffer) > 0, "Replay buffer should be populated once games finish"
 
     # Verify replay sample() works and returns the expected shapes.
-    # Sample now returns (boards, policies, values, outcome_known_mask)
-    # — the mask lets the trainer ignore cap-timeout noise in the
-    # value loss while still using the policy signal.
-    boards, policies, values, outcome_known = buffer.sample(batch_size=8)
+    # Sample returns (boards, policies, values, outcome_known_mask,
+    # policy_weights). The mask lets the trainer ignore cap-timeout
+    # noise in the value loss; policy_weights lets it down-weight
+    # policy gradient from TB-adjudicated games.
+    boards, policies, values, outcome_known, policy_weights = buffer.sample(batch_size=8)
     assert boards.shape == (8, 8 * 8 * 20)
     assert policies.shape == (8, 4096)
     assert values.shape == (8,)
     assert outcome_known.shape == (8,)
+    assert policy_weights.shape == (8,)
     assert (values >= -1.0).all() and (values <= 1.0).all()
     assert ((outcome_known == 0.0) | (outcome_known == 1.0)).all()
+    # Weights must be in [0, 1] — 1.0 for regular samples, some
+    # fraction (e.g. 0.5) for TB-adjudicated ones.
+    assert (policy_weights >= 0.0).all() and (policy_weights <= 1.0).all()
