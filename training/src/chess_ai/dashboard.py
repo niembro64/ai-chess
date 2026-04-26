@@ -1096,13 +1096,20 @@ class DashboardLogger:
                  color="yellow")
         plt.plot(gens, scores, label="score", color="cyan", marker="braille")
         if promo_gens:
-            plt.scatter(promo_gens, promo_scores, label="★ promoted",
+            # No label on the scatter: plotext's legend renderer indexes
+            # marker[s][i] for i in 0..2 and crashes on single-char markers
+            # like ♥. The green hearts on the line are obvious without a
+            # legend entry, and the tail line below names the promotion gens.
+            plt.scatter(promo_gens, promo_scores,
                         color="green", marker="heart")
         plt.plotsize(plot_w, plot_h)
         plt.ylim(y_lo, y_hi)
         plt.xlabel("gen")
         plt.ylabel("score")
-        chart = plt.build()
+        try:
+            chart = plt.build()
+        except Exception as e:  # plotext is fragile; never let it kill training
+            chart = f"(chart unavailable: {type(e).__name__}: {e})"
 
         # Tail summary line: latest score, delta, direction arrow.
         latest = hist[-1]
