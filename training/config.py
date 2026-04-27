@@ -287,7 +287,7 @@ def build_config() -> TrainConfig:
         # eval; otherwise every early match drifts to "draw at cap" and the
         # plateau detector misfires while the model is genuinely learning.
         eval_move_cap=400,
-        eval_score_threshold=0.54,   # ≈ +30 Elo
+        eval_score_threshold=0.51,   # ≈ +30 Elo
         # Plateau grace period. Early evals are mostly draws (noise, not
         # signal) so we need a long buffer before stop-training fires.
         # ~10 failed evals × 1000 gens ≈ 10k gens of headroom.
