@@ -236,14 +236,26 @@ function rankLabel(rank: number): string {
 }
 
 .square {
-  width: min(72px, calc((100dvw - 56px) / 8));
-  height: min(72px, calc((100dvw - 56px) / 8));
+  /* Size by min of: design max, width budget, height budget. The width
+     budget reserves space for sidebars + page padding (desktop sidebars
+     take ~448px); the height budget reserves space for status bar +
+     controls + gaps so the board never forces a scroll. The mobile
+     overrides below relax the width budget once sidebars are hidden. */
+  --sq: min(72px, calc((100dvw - 488px) / 8), calc((100dvh - 200px) / 8));
+  width: var(--sq);
+  height: var(--sq);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   position: relative;
   transition: background-color 0.1s ease;
+}
+
+@media (max-width: 900px) {
+  .square {
+    --sq: min(72px, calc((100dvw - 56px) / 8), calc((100dvh - 180px) / 8));
+  }
 }
 
 .square.light {
@@ -275,7 +287,8 @@ function rankLabel(rank: number): string {
 }
 
 .piece {
-  font-size: min(48px, calc((100dvw - 56px) / 12));
+  /* Track the square's --sq variable: pieces should be ~2/3 of the square. */
+  font-size: calc(var(--sq) * 0.66);
   line-height: 1;
   pointer-events: none;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);

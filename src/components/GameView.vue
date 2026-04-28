@@ -459,23 +459,27 @@ onUnmounted(() => {
   display: flex;
   align-items: safe center;
   justify-content: safe center;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* No scrollbars: the board sizing in ChessBoard.vue is height-aware,
+     and the mobile breakpoint hides nice-to-have panels so everything
+     fits in the viewport. */
+  overflow: hidden;
 }
 
 .game-layout {
   display: flex;
   gap: 24px;
-  align-items: flex-start;
+  align-items: stretch;
   padding: 20px;
+  max-height: 100dvh;
+  box-sizing: border-box;
 }
 
 @media (max-width: 900px) {
   .game-layout {
     flex-direction: column;
     align-items: center;
-    gap: 12px;
-    padding: 10px;
+    gap: 8px;
+    padding: 8px;
     max-width: 100dvw;
     box-sizing: border-box;
   }
@@ -486,19 +490,16 @@ onUnmounted(() => {
   background: rgba(20, 20, 35, 0.95);
   border: 1px solid #333;
   border-radius: 8px;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 @media (max-width: 900px) {
+  /* Mobile: drop both sidebars entirely so the board, status bar, and
+     controls fit on a single screen with no scroll. */
   .sidebar {
-    width: 100%;
-    max-width: 400px;
-  }
-  .sidebar:first-child {
-    order: 2;
-  }
-  .sidebar:last-child {
-    order: 3;
+    display: none;
   }
   .board-area {
     order: 1;
@@ -522,8 +523,17 @@ onUnmounted(() => {
 
 .move-list {
   padding: 10px 14px;
-  max-height: 500px;
+  flex: 1;
+  min-height: 0;
+  /* Wheel/touch scrolling stays available, but the scrollbar chrome
+     is hidden so the desktop layout reads as a single fixed screen. */
   overflow-y: auto;
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* IE/Edge legacy */
+}
+.move-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .move-line {
@@ -548,6 +558,12 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+@media (max-width: 900px) {
+  .board-area {
+    gap: 6px;
+  }
+}
+
 .status-bar {
   display: flex;
   align-items: center;
@@ -558,6 +574,13 @@ onUnmounted(() => {
   border-radius: 8px;
   min-width: min(400px, 90dvw);
   justify-content: center;
+}
+
+@media (max-width: 900px) {
+  .status-bar {
+    padding: 6px 12px;
+    gap: 10px;
+  }
 }
 
 .status-text {
@@ -638,6 +661,15 @@ onUnmounted(() => {
   font-size: 15px;
 }
 
+@media (max-width: 900px) {
+  /* Drop the "you are playing as ___" line on mobile — board orientation
+     already conveys color, and the vertical space is needed for the
+     board to fit without scrolling. */
+  .player-info {
+    display: none;
+  }
+}
+
 .game-controls {
   display: flex;
   gap: 12px;
@@ -715,17 +747,4 @@ onUnmounted(() => {
   background: #1a1a2e;
 }
 
-/* Scrollbar styling for move list */
-.move-list::-webkit-scrollbar {
-  width: 6px;
-}
-
-.move-list::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.2);
-}
-
-.move-list::-webkit-scrollbar-thumb {
-  background: #444;
-  border-radius: 3px;
-}
 </style>
