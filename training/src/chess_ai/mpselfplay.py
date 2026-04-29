@@ -92,6 +92,11 @@ class MultiprocessingConfig:
     # Per-sample policy-loss weight for TB-adjudicated games. See
     # SelfPlayConfig.tb_policy_weight. 1.0 = no discount.
     tb_policy_weight: float = 1.0
+    # Resignation knobs — see TrainConfig.resign_*. Mirrored to each
+    # worker's SelfPlayConfig.
+    resign_threshold: float = -0.85
+    resign_disabled_prob: float = 0.10
+    resign_min_plies: int = 20
     # Queue size bounds. Bounded queues apply backpressure if one side
     # pulls ahead; None = unbounded.
     request_q_maxsize: int = 0
@@ -303,6 +308,9 @@ def _worker_main(
             value_ply_decay=config.value_ply_decay,
             policy_softening_temperature=config.policy_softening_temperature,
             tb_policy_weight=config.tb_policy_weight,
+            resign_threshold=config.resign_threshold,
+            resign_disabled_prob=config.resign_disabled_prob,
+            resign_min_plies=config.resign_min_plies,
         ),
         rng=rng,
     )

@@ -183,6 +183,18 @@ def build_config() -> TrainConfig:
         # 0.5 halves their contribution; drops to near-no-op as the
         # model learns to finish games on its own.
         tb_policy_weight=0.5,
+        # Resignation: end self-play games early when the side-to-move's
+        # MCTS root_value is at or below `resign_threshold` after at least
+        # `resign_min_plies` plies. Saves the cost of running already-
+        # decided games to mate / cap — direct attack on the GPU
+        # starvation bottleneck. AZ-standard knobs: -0.85 / 0.10 / 20.
+        # `resign_disabled_prob` is a held-back fraction of would-be
+        # resignations that play on, so the threshold can be calibrated
+        # against actual outcomes (engine.resign_truth_checks counter).
+        # Set `resign_threshold <= -1.0` to disable.
+        resign_threshold=-0.85,
+        resign_disabled_prob=0.10,
+        resign_min_plies=20,
         # Disabled. aux_material_weight feeds material-balance signal
         # through the shared trunk, which can bias trunk features
         # toward material-changing moves (captures, pushes) and away

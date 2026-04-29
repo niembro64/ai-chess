@@ -134,6 +134,23 @@ class TrainConfig:
     # early in training when 30–40% of games go to TB adjudication;
     # the effect shrinks naturally as the model learns to finish games.
     tb_policy_weight: float = 0.5
+    # Resignation in self-play. When the side-to-move's MCTS root_value
+    # falls at or below `resign_threshold` after `resign_min_plies` plies,
+    # end the game with that side losing — saves the cost of running
+    # already-decided games to mate / move-cap. Standard AZ practice;
+    # roughly halves wall time on lopsided games which directly attacks
+    # the GPU starvation bottleneck without changing the algorithm.
+    #
+    # `resign_disabled_prob` is a truth-check sample: that fraction of
+    # would-be resignations is held back and the game plays on, so we
+    # could later measure false-resign rate (true negatives in
+    # diagnostics). 0.0 = always resign on threshold; AZ used 0.10.
+    # `resign_min_plies` skips the noisy opening where the value head
+    # is least reliable.
+    # Set `resign_threshold` to a value <= -1 (or use `0.0`) to disable.
+    resign_threshold: float = -0.85
+    resign_disabled_prob: float = 0.10
+    resign_min_plies: int = 20
     # Mixed-precision training on CUDA: forward/backward in fp16 with a
     # GradScaler. 2-3x speedup on Pascal (1080 Ti) with no measurable
     # quality loss. No-op on CPU/MPS.
@@ -391,6 +408,9 @@ class Trainer:
                 value_ply_decay=self.config.value_ply_decay,
                 policy_softening_temperature=self.config.self_play_policy_softening_temperature,
                 tb_policy_weight=self.config.tb_policy_weight,
+                resign_threshold=self.config.resign_threshold,
+                resign_disabled_prob=self.config.resign_disabled_prob,
+                resign_min_plies=self.config.resign_min_plies,
             )
             self._mp_self_play = MultiprocessingSelfPlay(
                 arch=ModelArch.from_model(self.model),
@@ -413,6 +433,9 @@ class Trainer:
                     value_ply_decay=self.config.value_ply_decay,
                     policy_softening_temperature=self.config.self_play_policy_softening_temperature,
                     tb_policy_weight=self.config.tb_policy_weight,
+                    resign_threshold=self.config.resign_threshold,
+                    resign_disabled_prob=self.config.resign_disabled_prob,
+                    resign_min_plies=self.config.resign_min_plies,
                 ),
                 rng=self.rng,
             )

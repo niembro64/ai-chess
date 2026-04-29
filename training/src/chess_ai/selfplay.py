@@ -91,6 +91,9 @@ class GameSlot:
     # and insufficient-material is FIDE rules glue layered on top of
     # legal-move generation.
     early_termination: str | None = None
+    # Set when the side-to-move resigns (MCTS root_value <= threshold).
+    # The named color loses; opponent gets the win. None = no resign.
+    resigned_color: str | None = None
 
 
 def _position_key(state: ChessGameState) -> bytes:
@@ -564,6 +567,18 @@ class SelfPlayConfig:
     # discount; 0.5 halves their influence. Does not affect value loss
     # (that's correct regardless of how it was discovered).
     tb_policy_weight: float = 1.0
+    # Resignation: end games early when the side-to-move's MCTS root_value
+    # falls at or below this threshold (typical: -0.85 ≈ "near-certain
+    # loss"). Saves the cost of running already-decided games to mate or
+    # the move cap. The resigning side is recorded as losing.
+    # `resign_disabled_prob` skips the resign decision that fraction of the
+    # time so we have a truth-check sample of would-be resignations that
+    # play on (used to verify the threshold isn't false-positiving).
+    # `resign_min_plies` skips the noisy opening where value head is
+    # least reliable. Set threshold <= -1.0 to disable resign entirely.
+    resign_threshold: float = -0.85
+    resign_disabled_prob: float = 0.10
+    resign_min_plies: int = 20
 
 
 # A "sink" accepts completed training examples one at a time. The single-process
@@ -599,6 +614,12 @@ class SelfPlayEngine:
         # tablebase is giving. Included as a tag in GameResult.
         self.tb_adjudications = 0
         self.recent_game_lengths: list[int] = []
+        # Resignation counters: total plies where threshold was hit and
+        # the side actually resigned (resigns), and total plies where
+        # threshold was hit but the truth-check sample held the resign
+        # back (resign_truth_checks). Useful for tuning the threshold.
+        self.resigns: int = 0
+        self.resign_truth_checks: int = 0
 
     def step(self) -> list[GameResult]:
         """Advance every active game by one move. Returns results for games that ended this step."""
@@ -648,6 +669,38 @@ class SelfPlayEngine:
                 )
             )
 
+            # Resignation: the MCTS root_value is from the side-to-move's
+            # perspective. If it's at or below the threshold and we're
+            # past the noisy opening, this side is essentially lost. End
+            # the game now (saves the cost of playing it out to mate /
+            # cap), unless we're sampled into the truth-check holdout
+            # (resign_disabled_prob fraction). The resigning side loses;
+            # the opponent gets the win in `_finish_game`.
+            #
+            # The training example for this position is already recorded
+            # above — its value label will be propagated as a normal loss
+            # for the resigning side via the per-ply value-decay logic.
+            rt = self.config.resign_threshold
+            if (
+                rt > -1.0
+                and slot.move_count >= self.config.resign_min_plies
+                and mcts_results[i].root_value <= rt
+            ):
+                if self.rng.random() < self.config.resign_disabled_prob:
+                    # Truth-check sample — do not resign; play on so we
+                    # can later compare predicted-loss to actual outcome.
+                    self.resign_truth_checks += 1
+                else:
+                    self.resigns += 1
+                    slot.resigned_color = slot.state.currentTurn
+                    finished.append(self._finish_game(slot))
+                    self.games[i] = _make_game_slot(
+                        self.rng,
+                        self.config.random_start_prob,
+                        self.config.endgame_start_prob,
+                    )
+                    continue
+
             # Apply the move.
             slot.state = apply_move(slot.state, move)
             slot.move_count += 1
@@ -690,7 +743,23 @@ class SelfPlayEngine:
         )
         tb_adjudicated = False
 
-        if status == "checkmate":
+        if slot.resigned_color is not None:
+            # Resign branch — short-circuits all the natural-end logic.
+            # Resigning side loses; opponent wins. Folded into mate_w /
+            # mate_b for the outcome buckets so the value-head training
+            # signal matches a checkmate (the training labels are
+            # identical). Diagnostic split lives on engine.resigns.
+            if slot.resigned_color == "white":
+                outcome = "mate_b"
+                label = "white resigns"
+                white_outcome = -1.0
+                self.black_wins += 1
+            else:
+                outcome = "mate_w"
+                label = "black resigns"
+                white_outcome = 1.0
+                self.white_wins += 1
+        elif status == "checkmate":
             # Winner = player who just moved = opposite of currentTurn.
             winner = "white" if slot.state.currentTurn == "black" else "black"
             white_outcome = 1.0 if winner == "white" else -1.0
