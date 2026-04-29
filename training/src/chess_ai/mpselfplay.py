@@ -30,6 +30,8 @@ fresh `state_dict()` over `weights_q` and the inference server hot-swaps.
 
 from __future__ import annotations
 
+import logging
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -157,6 +159,28 @@ def _inference_server_main(
     model = arch.build().to(device).eval()
     model.load_state_dict(initial_state_dict)
 
+    # torch.compile the inference forward pass on CUDA. Inference batch
+    # sizes vary (sum of pending requests), so use dynamic=True to avoid
+    # a recompile per shape. We keep `model` as the raw nn.Module — that
+    # way load_state_dict still works directly, and the compiled graph
+    # picks up new weights through the module's parameter references.
+    # Falls back silently if torch.compile is missing or fails.
+    forward_fn = model
+    if (
+        device.type == "cuda"
+        and os.environ.get("CHESS_AI_NO_COMPILE") != "1"
+        and hasattr(torch, "compile")
+    ):
+        try:
+            forward_fn = torch.compile(model, dynamic=True)
+            logging.getLogger("chess_ai.train").info(
+                "torch.compile: inference server forward compiled (dynamic=True)"
+            )
+        except Exception as e:
+            logging.getLogger("chess_ai.train").warning(
+                "torch.compile failed (inference): %s; falling back to eager", e
+            )
+
     wait_s = batch_wait_ms / 1000.0
 
     # Track some stats for diagnosis (can be read by parent via a different
@@ -203,7 +227,7 @@ def _inference_server_main(
         with torch.no_grad():
             x_flat = torch.from_numpy(merged).to(device)
             x = encoded_to_nchw(x_flat, NUM_PLANES)
-            policy, wdl = model(x)
+            policy, wdl = forward_fn(x)
         pol = policy.cpu().numpy()
         w = wdl.cpu().numpy()
         values = (w[:, 0] - w[:, 2]).astype(np.float32)

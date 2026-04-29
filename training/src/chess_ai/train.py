@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import time
 from collections import deque
@@ -441,6 +442,27 @@ class Trainer:
         self._amp_enabled = self._is_cuda and self.config.use_amp
         self._scaler = torch.amp.GradScaler("cuda") if self._amp_enabled else None
 
+        # torch.compile on CUDA narrows the gap between forward and backward
+        # (3090 telemetry showed forward 33ms / backward 76ms, ratio 2.3× —
+        # well above the ~1.5× expected on Ampere with AMP). Compile the
+        # trunk and the heads as bound methods so train_step can keep
+        # calling them separately (the aux material head needs `h`).
+        # State-dict ops still work through `self.model`.
+        # Disable with `CHESS_AI_NO_COMPILE=1` if it ever causes issues.
+        self._trunk_features = self.model.trunk_features
+        self._heads = self.model.heads
+        if (
+            self._is_cuda
+            and os.environ.get("CHESS_AI_NO_COMPILE") != "1"
+            and hasattr(torch, "compile")
+        ):
+            try:
+                self._trunk_features = torch.compile(self.model.trunk_features)
+                self._heads = torch.compile(self.model.heads)
+                log.info("torch.compile: training trunk + heads compiled")
+            except Exception as e:
+                log.warning("torch.compile failed (training): %s; falling back to eager", e)
+
     def _device_sync(self) -> None:
         """Block until pending GPU work is done. No-op on CPU/MPS."""
         if self._is_cuda:
@@ -544,8 +566,8 @@ class Trainer:
             else _nullcontext()
         )
         with amp_ctx:
-            h = self.model.trunk_features(x)
-            pred_policy, pred_wdl = self.model.heads(h)
+            h = self._trunk_features(x)
+            pred_policy, pred_wdl = self._heads(h)
             # Cross-entropy losses (targets sum to 1; pred outputs are softmax-normalized).
             # Policy loss is a per-sample-weighted mean so TB-adjudicated games
             # contribute a fraction (tb_policy_weight, default 0.5) of a regular
