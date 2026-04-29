@@ -78,6 +78,20 @@ const turnIndicator = computed(() => {
   return (gameState.value.currentTurn === 'white' ? 'White to move' : 'Black to move') + extra;
 });
 
+// Player chips: opponent shown above the board, local player below.
+// Color reflects the piece color each side is actually playing, regardless
+// of board orientation — the chip on top of the screen is the side you
+// look at across the board, which is always the opponent.
+const opponentColor = computed<PieceColor>(() => localColor.value === 'white' ? 'black' : 'white');
+const opponentName = computed(() => {
+  if (playingVsBot.value) return 'Bot';
+  if (networkRole.value) return 'Opponent';
+  return 'Player 2';
+});
+const localName = computed(() => 'You');
+const isOpponentTurn = computed(() => gameState.value.currentTurn === opponentColor.value);
+const isLocalTurn = computed(() => gameState.value.currentTurn === localColor.value);
+
 const moveHistoryDisplay = computed(() => {
   const moves = gameState.value.moveHistory;
   const display: string[] = [];
@@ -383,20 +397,27 @@ onUnmounted(() => {
             <button class="draw-btn decline" @click="handleDeclineDraw">Decline</button>
           </div>
 
+          <!-- Opponent chip: shown above the board, since the board is
+               flipped to put the local player on the bottom edge. -->
+          <div class="player-chip" :class="{ 'is-active': isOpponentTurn && !isGameOver }">
+            <span class="chip-swatch" :class="opponentColor"></span>
+            <span class="chip-name">{{ opponentName }}</span>
+            <span class="chip-color">{{ opponentColor === 'white' ? 'White' : 'Black' }}</span>
+            <span v-if="isOpponentTurn && !isGameOver" class="chip-turn-dot"></span>
+          </div>
+
           <ChessBoard
             :game-state="gameState"
             :local-player-id="localPlayerId"
             @move="handleMove"
           />
 
-          <!-- Player info -->
-          <div class="player-info">
-            <span class="player-label">
-              You are playing as
-              <strong :style="{ color: localColor === 'white' ? '#fff' : '#aaa' }">
-                {{ localColor === 'white' ? 'White' : 'Black' }}
-              </strong>
-            </span>
+          <!-- Local player chip: always below the board. -->
+          <div class="player-chip is-local" :class="{ 'is-active': isLocalTurn && !isGameOver }">
+            <span class="chip-swatch" :class="localColor"></span>
+            <span class="chip-name">{{ localName }}</span>
+            <span class="chip-color">{{ localColor === 'white' ? 'White' : 'Black' }}</span>
+            <span v-if="isLocalTurn && !isGameOver" class="chip-turn-dot"></span>
           </div>
 
           <!-- Game controls -->
@@ -707,24 +728,91 @@ onUnmounted(() => {
   border-color: rgba(255, 255, 255, 0.3);
 }
 
-.player-info {
+/* Player chips above + below the board: leave no doubt who is which
+   color, and highlight whose turn it is with an accent border + a
+   pulsing dot. The chip on top is always the opponent because the
+   board is flipped for the local player. */
+.player-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: linear-gradient(165deg, rgba(40, 38, 70, 0.55), rgba(20, 19, 38, 0.7));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
   font-family: 'Inter', system-ui, sans-serif;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.player-chip.is-active {
+  border-color: rgba(94, 234, 212, 0.65);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.4),
+              0 0 18px rgba(94, 234, 212, 0.3);
+}
+
+.chip-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.chip-swatch.white {
+  background: linear-gradient(155deg, #ffffff, #d4d4d4);
+  border: 1.5px solid rgba(0, 0, 0, 0.15);
+}
+
+.chip-swatch.black {
+  background: linear-gradient(155deg, #2c2c2c, #0a0a0a);
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+}
+
+.chip-name {
   font-size: 13px;
-  color: #94a3b8;
+  font-weight: 600;
+  color: #f1f5f9;
   letter-spacing: 0.3px;
 }
 
-.player-label strong {
-  font-size: 14px;
-  letter-spacing: 0.5px;
+.chip-color {
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.chip-turn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5ae3d8;
+  box-shadow: 0 0 10px rgba(94, 234, 212, 0.85);
+  animation: turn-dot-pulse 1.4s ease-in-out infinite;
+  margin-left: 2px;
+}
+
+@keyframes turn-dot-pulse {
+  0%, 100% { opacity: 0.5; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.15); }
 }
 
 @media (max-width: 900px) {
-  /* Drop the "you are playing as ___" line on mobile — board orientation
-     already conveys color, and the vertical space is needed for the
-     board to fit without scrolling. */
-  .player-info {
-    display: none;
+  .player-chip {
+    padding: 4px 12px;
+    gap: 8px;
+  }
+  .chip-name {
+    font-size: 12px;
+  }
+  .chip-color {
+    font-size: 10px;
+    padding-left: 6px;
   }
 }
 

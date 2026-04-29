@@ -249,9 +249,10 @@ function rankLabel(rank: number): string {
   /* Size by min of: design max, width budget, height budget. The width
      budget reserves space for sidebars + page padding (desktop sidebars
      take ~448px); the height budget reserves space for status bar +
-     controls + gaps so the board never forces a scroll. The mobile
-     overrides below relax the width budget once sidebars are hidden. */
-  --sq: min(72px, calc((100dvw - 488px) / 8), calc((100dvh - 200px) / 8));
+     opponent chip + local chip + controls + gaps so the board never
+     forces a scroll. The mobile overrides below relax the width budget
+     once sidebars are hidden. */
+  --sq: min(72px, calc((100dvw - 488px) / 8), calc((100dvh - 250px) / 8));
   width: var(--sq);
   height: var(--sq);
   display: flex;
@@ -264,16 +265,16 @@ function rankLabel(rank: number): string {
 
 @media (max-width: 900px) {
   .square {
-    --sq: min(72px, calc((100dvw - 56px) / 8), calc((100dvh - 180px) / 8));
+    --sq: min(72px, calc((100dvw - 56px) / 8), calc((100dvh - 220px) / 8));
   }
 }
 
 .square.light {
-  background: linear-gradient(155deg, #f1dfbf 0%, #e3cca6 100%);
+  background: #ead7b5;
 }
 
 .square.dark {
-  background: linear-gradient(155deg, #c19470 0%, #a87650 100%);
+  background: #b58863;
 }
 
 /* Selected: warm gold inset ring instead of a harsh yellow flood. The
