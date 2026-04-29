@@ -1,14 +1,19 @@
 """Single-source training config.
 
 Edit this file to change anything about training. Launch with the
-hardware-specific entrypoint for your box:
+hardware-specific entrypoint for your box, choosing between *_new
+(fresh run) and *_continue (warm-start from runs/latest/latest.pt):
 
-    python scripts/train_ubuntu.py     # 4-core + RTX 3090
-    python scripts/train_windows.py    # 9900K + 1080 Ti
+    python scripts/train_ubuntu_new.py        # 4-core + RTX 3090, fresh
+    python scripts/train_ubuntu_continue.py   # 4-core + RTX 3090, resume
+    python scripts/train_windows_new.py       # 9900K + 1080 Ti, fresh
+    python scripts/train_windows_continue.py  # 9900K + 1080 Ti, resume
+    python scripts/train_mac_new.py           # Apple Silicon (MPS), fresh
+    python scripts/train_mac_continue.py      # Apple Silicon (MPS), resume
 
-The two entrypoints share `scripts/_launcher.py` and differ only in
+All six entrypoints share `scripts/_launcher.py` and differ only in
 their hardware-specific overrides (num_workers, games_per_worker,
-batch_size). Every other knob lives here.
+batch_size, mp_batch_wait_ms). Every other knob lives here.
 """
 
 from __future__ import annotations

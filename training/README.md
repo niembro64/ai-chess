@@ -26,8 +26,12 @@ training/
 │   └── train.py         # Main training loop + checkpoints
 ├── scripts/
 │   ├── _launcher.py                 # Shared config-driven training launcher
-│   ├── train_ubuntu.py              # Entrypoint: 4-core + RTX 3090
-│   ├── train_windows.py             # Entrypoint: 9900K + 1080 Ti
+│   ├── train_ubuntu_new.py          # Entrypoint: 4-core + RTX 3090, fresh
+│   ├── train_ubuntu_continue.py     #             same, warm-start latest.pt
+│   ├── train_windows_new.py         # Entrypoint: 9900K + 1080 Ti, fresh
+│   ├── train_windows_continue.py    #             same, warm-start latest.pt
+│   ├── train_mac_new.py             # Entrypoint: Apple Silicon (MPS), fresh
+│   ├── train_mac_continue.py        #             same, warm-start latest.pt
 │   ├── make_roundtrip_fixture.py    # Generates PyTorch round-trip fixture
 │   └── deploy_to_browser.py         # Copies weights JSON into the browser preset
 └── tests/
@@ -78,12 +82,18 @@ tmux new -s train
 # Checkpoints land in runs/latest/ (single fixed spot — re-running
 # overwrites the previous checkpoint; there is no v1/v2 scheme).
 # Everything (MCTS depth, lr schedule, eval cadence, arch) lives in
-# training/config.py. Pick the entrypoint matching your hardware:
-python scripts/train_ubuntu.py        # 4-core + RTX 3090
-# or
-python scripts/train_windows.py       # 9900K + 1080 Ti
+# training/config.py. Pick the entrypoint matching your hardware AND
+# whether you're starting fresh or continuing from latest.pt:
+python scripts/train_ubuntu_new.py            # 4-core + RTX 3090, fresh
+python scripts/train_ubuntu_continue.py       # same, resume runs/latest/latest.pt
+python scripts/train_windows_new.py           # 9900K + 1080 Ti, fresh
+python scripts/train_windows_continue.py      # same, resume
+python scripts/train_mac_new.py               # Apple Silicon, fresh
+python scripts/train_mac_continue.py          # same, resume
 # Detach with Ctrl-b d; re-attach with `tmux a -t train`.
-# Use --resume runs/latest/latest.pt to continue a saved checkpoint.
+# `*_continue.py` errors out if runs/latest/latest.pt is missing —
+# never silently bootstraps. Use --resume <path> on any entrypoint
+# to override with an archived checkpoint.
 
 # 4. Ship the weights to the browser preset slot
 python scripts/deploy_to_browser.py runs/latest/latest.json

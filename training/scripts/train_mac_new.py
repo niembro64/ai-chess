@@ -1,11 +1,10 @@
-"""Training entrypoint for the Mac (Apple Silicon, MPS backend).
+"""Fresh training run on the Mac (Apple Silicon, MPS backend).
 
-Reads everything from `training/config.py` except the hardware-specific
-knobs set below. Use `--resume <ckpt>` to continue from a saved
-checkpoint.
+Wipes any stale champion.pt / eval.csv so previous results don't
+pollute the new trajectory; bootstraps a random-init champion at gen 0.
+For warm-starting from the existing latest.pt, use train_mac_continue.py.
 
-    python scripts/train_mac.py                    # fresh run
-    python scripts/train_mac.py --resume runs/latest/latest.pt
+    python scripts/train_mac_new.py
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ if __name__ == "__main__":
     #   before firing a forward pass. On CUDA we run 12ms; MPS needs
     #   ~2× that window to build batches that justify the kernel cost.
     launch(
+        mode="new",
         num_workers=20,
         games_per_worker=16,
         batch_size=1024,

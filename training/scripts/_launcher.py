@@ -1,8 +1,8 @@
 """Shared launcher for the hardware-specific training entrypoints.
 
-`train_ubuntu.py` and `train_windows.py` each call `launch(...)` with
-their own hardware-tuned overrides. Everything else — MCTS depth,
-eval cadence, architecture, lr schedule, etc. — is read from
+Each platform has two entrypoints — `*_new.py` and `*_continue.py` —
+that both call `launch(..., mode=...)`. Everything else (MCTS depth,
+eval cadence, architecture, lr schedule, etc.) is read from
 `training/config.py`. Edit that file to change training behavior.
 """
 
@@ -61,6 +61,7 @@ log = logging.getLogger("chess_ai.train")
 
 def launch(
     *,
+    mode: str,
     num_workers: int,
     games_per_worker: int,
     batch_size: int,
@@ -69,13 +70,27 @@ def launch(
 ) -> None:
     """Run training using `config.py` + the caller's hardware overrides.
 
-    The first three overrides tune workload for the specific machine
+    `mode` is "new" or "continue":
+      * "new" starts a fresh run, clearing any stale champion.pt and
+        eval.csv so previous results don't pollute the new trajectory.
+      * "continue" auto-resumes from `<CHECKPOINT_DIR>/latest.pt`. If
+        no checkpoint is found there, it errors out — callers asking
+        for "continue" never silently fall through to a fresh run
+        (avoids the "I was on the wrong box and started over" foot-gun).
+
+    `--resume <path>` is still accepted as an explicit override for
+    picking up from an archive checkpoint, regardless of mode.
+
+    The next three overrides tune workload for the specific machine
     (core count, VRAM). The last two are optional inference/gradient
     cadence knobs — Mac (MPS) benefits from much larger inference
     batches than Ubuntu (CUDA) because MPS has higher kernel-launch
     overhead, so those boxes pass them; Ubuntu/Windows inherit the
     config.py defaults.
     """
+    if mode not in ("new", "continue"):
+        raise ValueError(f"mode must be 'new' or 'continue', got {mode!r}")
+
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] %(message)s",
@@ -84,7 +99,9 @@ def launch(
 
     parser = argparse.ArgumentParser(description="Train ChessNet (config-driven).")
     parser.add_argument("--resume", type=str, default=None,
-                        help="Path to a .pt checkpoint to resume from.")
+                        help="Explicit checkpoint path (overrides mode-based "
+                             "auto-detection). Use this to warm-start from "
+                             "an archived gen-N.pt.")
     args = parser.parse_args()
 
     torch.manual_seed(cfg.SEED)
@@ -115,9 +132,9 @@ def launch(
     )
 
     config = cfg.build_config()
-    # Hardware overrides from the caller (train_ubuntu / train_windows).
-    # These three values are the only machine-specific knobs; everything
-    # else is shared across boxes via config.py.
+    # Hardware overrides from the caller. These three values are the only
+    # machine-specific knobs; everything else is shared across boxes via
+    # config.py.
     config.num_workers = num_workers
     config.games_per_worker = games_per_worker
     config.batch_size = batch_size
@@ -135,9 +152,27 @@ def launch(
     trainer = Trainer(model=model, device=device, config=config,
                       rng=random.Random(cfg.SEED))
 
+    # Resolve resume path:
+    #   --resume <path>     → explicit override (any mode)
+    #   mode == "continue"  → auto-detect <CHECKPOINT_DIR>/latest.pt
+    #   mode == "new"       → no resume; fresh-run housekeeping
+    auto_latest = cfg.CHECKPOINT_DIR / "latest.pt"
     if args.resume:
-        log.info("Resuming from %s", args.resume)
-        trainer.load_checkpoint(args.resume)
+        resume_path: Path | None = Path(args.resume)
+    elif mode == "continue":
+        if not auto_latest.exists():
+            raise FileNotFoundError(
+                f"continue mode requires {auto_latest} to exist. "
+                f"Either start with the *_new.py entrypoint, or pass "
+                f"--resume <path> to specify a different checkpoint."
+            )
+        resume_path = auto_latest
+    else:
+        resume_path = None
+
+    if resume_path is not None:
+        log.info("Resuming from %s", resume_path)
+        trainer.load_checkpoint(str(resume_path))
     else:
         # Fresh run — nuke any stale champion.pt left over from a
         # previous training session. A leftover champion acts as an
