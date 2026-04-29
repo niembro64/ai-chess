@@ -968,7 +968,8 @@ class Trainer:
         weights. Cached on self._champion_model for reuse across evals.
         """
         path = ckpt_dir / "champion.pt"
-        state = torch.load(path, map_location=self.device)
+        # weights_only=False: see Trainer.load_checkpoint comment.
+        state = torch.load(path, map_location=self.device, weights_only=False)
         arch = state["model_arch"]
         champ = ChessNet(**arch).to(self.device)
         champ.load_state_dict(state["model_state_dict"])
@@ -1240,7 +1241,10 @@ class Trainer:
     def _champion_gen_on_disk(self, ckpt_dir: Path) -> int:
         """Peek at champion.pt's champion_gen without loading weights."""
         try:
-            state = torch.load(ckpt_dir / "champion.pt", map_location="cpu")
+            # weights_only=False: see Trainer.load_checkpoint comment.
+            state = torch.load(
+                ckpt_dir / "champion.pt", map_location="cpu", weights_only=False,
+            )
             return int(state.get("champion_gen", 0))
         except Exception:
             return 0
@@ -1340,7 +1344,15 @@ class Trainer:
                 pass
 
     def load_checkpoint(self, path: str | Path) -> None:
-        state = torch.load(Path(path), map_location=self.device)
+        # PyTorch 2.6 flipped torch.load's weights_only default to True,
+        # which refuses to unpickle dataclasses like our TrainConfig /
+        # RewardWeights stored alongside the model state. These checkpoints
+        # are produced by our own training process — never untrusted input
+        # — so weights_only=False is safe and avoids a maintenance tax of
+        # allowlisting every dataclass we attach to the checkpoint.
+        state = torch.load(
+            Path(path), map_location=self.device, weights_only=False,
+        )
         self.model.load_state_dict(state["model_state_dict"])
         if self.aux_material is not None and "aux_material_state_dict" in state:
             self.aux_material.load_state_dict(state["aux_material_state_dict"])

@@ -70,7 +70,9 @@ def _infer_arch_from_state_dict(sd: dict) -> dict:
 
 def _load_model(path: Path, device: torch.device) -> ChessNet:
     """Reconstruct a ChessNet matching the saved arch, then load the state dict."""
-    state = torch.load(path, map_location=device)
+    # weights_only=False because our checkpoints embed dataclasses
+    # (TrainConfig, RewardWeights). PyTorch 2.6+ default refuses those.
+    state = torch.load(path, map_location=device, weights_only=False)
     arch = state.get("model_arch")
     if arch is None:
         # Legacy checkpoint — infer from tensor shapes.
