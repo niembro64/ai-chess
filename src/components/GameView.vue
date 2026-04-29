@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, computed, onUnmounted, watch, nextTick } from 'vue';
 import type { PlayerId, Move, ChessGameState, PieceColor } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
 import type { NetworkGameSnapshot, LobbyPlayer, NetworkRole } from '@/types/network';
@@ -91,6 +91,20 @@ const opponentName = computed(() => {
 const localName = computed(() => 'You');
 const isOpponentTurn = computed(() => gameState.value.currentTurn === opponentColor.value);
 const isLocalTurn = computed(() => gameState.value.currentTurn === localColor.value);
+
+const moveListEl = ref<HTMLElement | null>(null);
+
+// Keep the latest move visible: pin the move list to the bottom whenever
+// the move count changes.
+watch(
+  () => gameState.value.moveHistory.length,
+  () => {
+    nextTick(() => {
+      const el = moveListEl.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  },
+);
 
 const moveHistoryDisplay = computed(() => {
   const moves = gameState.value.moveHistory;
@@ -360,7 +374,7 @@ onUnmounted(() => {
           <div class="sidebar-header">
             <h2 class="sidebar-title">Moves</h2>
           </div>
-          <div class="move-list">
+          <div class="move-list" ref="moveListEl">
             <div
               v-for="(line, i) in moveHistoryDisplay"
               :key="i"
@@ -556,18 +570,35 @@ onUnmounted(() => {
 }
 
 .move-list {
-  padding: 10px 14px;
-  flex: 1;
+  padding: 10px 6px 10px 14px;
+  flex: 1 1 0;
   min-height: 0;
-  /* Wheel/touch scrolling stays available, but the scrollbar chrome
-     is hidden so the desktop layout reads as a single fixed screen. */
-  overflow-y: auto;
-  scrollbar-width: none;        /* Firefox */
-  -ms-overflow-style: none;     /* IE/Edge legacy */
+  /* `scroll` (not `auto`) reserves the gutter even when content fits,
+     so the layout never shifts when a new move pushes it past the
+     overflow boundary. */
+  overflow-y: scroll;
+  /* Firefox scrollbar styling. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.65) rgba(255, 255, 255, 0.04);
 }
+/* WebKit / Blink: a slim glassy track with an indigo→teal gradient thumb
+   that matches the rest of the UI accent palette. */
 .move-list::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  width: 8px;
+}
+.move-list::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+  margin: 6px 0;
+}
+.move-list::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.75), rgba(94, 234, 212, 0.6));
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.35);
+}
+.move-list::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(124, 127, 245, 0.95), rgba(110, 240, 229, 0.85));
 }
 
 .move-line {
