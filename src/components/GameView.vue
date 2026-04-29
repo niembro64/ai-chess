@@ -198,7 +198,11 @@ function handlePlayBot(): void {
   isConnecting.value = true;
   lobbyError.value = null;
 
-  aiPlayer = AIPlayer.create(PRESET_WEIGHTS, 50);
+  // 400 sims at play time. The training run's eval cadence uses 100,
+  // and self-play uses 100, but those are tuned for throughput; play
+  // strength scales meaningfully with deeper search. The aiThinking
+  // spinner covers the extra latency.
+  aiPlayer = AIPlayer.create(PRESET_WEIGHTS, 400);
   playingVsBot.value = true;
   networkRole.value = null;
   localPlayerId.value = 1;
