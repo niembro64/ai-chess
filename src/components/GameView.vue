@@ -450,7 +450,10 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   position: relative;
-  background: #1a1a2e;
+  /* Inherit the layered ambient gradient from index.html — no opaque
+     fill here so the body background shows through. */
+  background: transparent;
+  color: #e2e8f0;
 }
 
 .game-area {
@@ -486,13 +489,21 @@ onUnmounted(() => {
 }
 
 .sidebar {
-  width: 200px;
-  background: rgba(20, 20, 35, 0.95);
-  border: 1px solid #333;
-  border-radius: 8px;
+  width: 220px;
+  /* Glassmorphic surface: blurred backdrop + faint accent border + soft
+     drop shadow so the panels read as floating cards over the gradient. */
+  background: linear-gradient(165deg, rgba(40, 38, 70, 0.55), rgba(20, 19, 38, 0.7));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 24px rgba(0, 0, 0, 0.35);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 @media (max-width: 900px) {
@@ -507,18 +518,20 @@ onUnmounted(() => {
 }
 
 .sidebar-header {
-  background: rgba(68, 68, 170, 0.2);
-  border-bottom: 1px solid #333;
-  padding: 10px 14px;
+  /* Subtle accent gradient with a 1px gold-ish underline. */
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.18), rgba(94, 234, 212, 0.10));
+  border-bottom: 1px solid rgba(212, 175, 95, 0.25);
+  padding: 12px 16px;
 }
 
 .sidebar-title {
-  font-family: monospace;
-  font-size: 14px;
-  color: #aaa;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  color: #cbd5e1;
   margin: 0;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 2px;
 }
 
 .move-list {
@@ -537,18 +550,32 @@ onUnmounted(() => {
 }
 
 .move-line {
-  font-family: monospace;
-  font-size: 13px;
-  color: #ccc;
-  padding: 3px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 12.5px;
+  color: #d1d5db;
+  padding: 5px 4px;
+  border-radius: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  letter-spacing: 0.3px;
+}
+
+.move-line:nth-child(odd) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.move-line:last-child {
+  background: rgba(99, 102, 241, 0.18);
+  color: #f1f5f9;
+  border-bottom: none;
+  font-weight: 500;
 }
 
 .no-moves {
-  font-family: monospace;
-  font-size: 13px;
-  color: #555;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 12.5px;
+  color: #64748b;
   font-style: italic;
+  padding: 4px 0;
 }
 
 .board-area {
@@ -568,12 +595,17 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 10px 20px;
-  background: rgba(20, 20, 35, 0.95);
-  border: 1px solid #333;
-  border-radius: 8px;
-  min-width: min(400px, 90dvw);
+  padding: 12px 24px;
+  background: linear-gradient(165deg, rgba(40, 38, 70, 0.55), rgba(20, 19, 38, 0.7));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  min-width: min(440px, 92dvw);
   justify-content: center;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
 @media (max-width: 900px) {
@@ -584,81 +616,107 @@ onUnmounted(() => {
 }
 
 .status-text {
-  font-family: monospace;
-  font-size: 16px;
-  color: #888;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  color: #94a3b8;
+  letter-spacing: 0.3px;
 }
 
 .status-text.my-turn {
-  color: #4a9eff;
-  font-weight: bold;
+  color: #5ae3d8;
+  font-weight: 600;
+  text-shadow: 0 0 14px rgba(94, 234, 212, 0.5);
 }
 
 .status-text.game-over {
-  color: #ffaa00;
-  font-weight: bold;
+  color: #f7c058;
+  font-weight: 600;
+  text-shadow: 0 0 14px rgba(247, 192, 88, 0.5);
 }
 
 .status-text.in-check {
-  color: #ff4444;
-  font-weight: bold;
+  color: #ff7777;
+  font-weight: 600;
+  text-shadow: 0 0 14px rgba(255, 80, 80, 0.55);
+  animation: check-text-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes check-text-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 .turn-indicator {
-  font-family: monospace;
-  font-size: 12px;
-  color: #666;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  letter-spacing: 0.5px;
+  padding-left: 16px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .draw-offer-banner {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 16px;
-  background: rgba(255, 170, 0, 0.15);
-  border: 1px solid rgba(255, 170, 0, 0.4);
-  border-radius: 8px;
-  font-family: monospace;
+  padding: 10px 18px;
+  background: linear-gradient(90deg, rgba(247, 192, 88, 0.15), rgba(247, 192, 88, 0.06));
+  border: 1px solid rgba(247, 192, 88, 0.4);
+  border-radius: 10px;
+  font-family: 'Inter', system-ui, sans-serif;
   font-size: 13px;
-  color: #ffaa00;
+  font-weight: 500;
+  color: #f7c058;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 0 24px rgba(247, 192, 88, 0.2);
 }
 
 .draw-btn {
-  font-family: monospace;
+  font-family: 'Inter', system-ui, sans-serif;
   font-size: 12px;
-  padding: 4px 12px;
-  border: none;
-  border-radius: 4px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .draw-btn.accept {
-  background: #44aa44;
-  color: white;
+  background: linear-gradient(165deg, #5ae3d8, #34c4b8);
+  color: #0f0d1f;
+  font-weight: 600;
 }
 
 .draw-btn.accept:hover {
-  background: #55cc55;
+  background: linear-gradient(165deg, #6ef0e5, #46d4c8);
+  box-shadow: 0 0 16px rgba(94, 234, 212, 0.5);
 }
 
 .draw-btn.decline {
-  background: #666;
-  color: white;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #cbd5e1;
 }
 
 .draw-btn.decline:hover {
-  background: #777;
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .player-info {
-  font-family: monospace;
-  font-size: 14px;
-  color: #888;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  color: #94a3b8;
+  letter-spacing: 0.3px;
 }
 
 .player-label strong {
-  font-size: 15px;
+  font-size: 14px;
+  letter-spacing: 0.5px;
 }
 
 @media (max-width: 900px) {
@@ -676,75 +734,101 @@ onUnmounted(() => {
 }
 
 .control-btn {
-  font-family: monospace;
+  font-family: 'Inter', system-ui, sans-serif;
   font-size: 13px;
-  padding: 8px 20px;
-  background: rgba(60, 60, 60, 0.8);
-  border: 1px solid #555;
-  border-radius: 6px;
-  color: #ccc;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  padding: 9px 22px;
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: #cbd5e1;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, border-color 0.15s ease,
+              background 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
 }
 
 .control-btn:hover:not(:disabled) {
-  background: rgba(80, 80, 80, 0.9);
-  border-color: #777;
-  color: white;
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  border-color: rgba(99, 102, 241, 0.6);
+  color: #f1f5f9;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.4),
+              0 0 18px rgba(99, 102, 241, 0.3);
+  transform: translateY(-1px);
+}
+
+.control-btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .control-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
 .resign-btn {
-  border-color: rgba(255, 80, 80, 0.3);
-  color: #ff6666;
+  border-color: rgba(255, 80, 80, 0.35);
+  color: #ff7c7c;
 }
 
-.resign-btn:hover {
-  background: rgba(255, 40, 40, 0.2) !important;
-  border-color: rgba(255, 80, 80, 0.6) !important;
+.resign-btn:hover:not(:disabled) {
+  background: linear-gradient(165deg, rgba(255, 60, 60, 0.18), rgba(255, 60, 60, 0.06)) !important;
+  border-color: rgba(255, 100, 100, 0.7) !important;
+  color: #ff9999 !important;
+  box-shadow: 0 0 0 1px rgba(255, 80, 80, 0.5),
+              0 0 18px rgba(255, 80, 80, 0.35) !important;
 }
 
 .lobby-btn {
-  background: #4444aa;
-  border-color: #5555cc;
+  background: linear-gradient(165deg, #6366f1, #4f46e5);
+  border-color: rgba(99, 102, 241, 0.7);
   color: white;
+  font-weight: 600;
 }
 
-.lobby-btn:hover {
-  background: #5555cc !important;
+.lobby-btn:hover:not(:disabled) {
+  background: linear-gradient(165deg, #7c7ff5, #5d56e8) !important;
+  border-color: rgba(124, 127, 245, 0.9) !important;
+  box-shadow: 0 0 0 1px rgba(124, 127, 245, 0.5),
+              0 0 24px rgba(99, 102, 241, 0.5) !important;
 }
 
 .game-info-content {
-  padding: 10px 14px;
+  padding: 12px 16px;
 }
 
 .info-row {
   display: flex;
   justify-content: space-between;
-  padding: 4px 0;
+  align-items: center;
+  padding: 7px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.info-row:last-child {
+  border-bottom: none;
+}
+
 .info-label {
-  font-family: monospace;
-  font-size: 12px;
-  color: #666;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .info-value {
-  font-family: monospace;
-  font-size: 12px;
-  color: #aaa;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 12.5px;
+  color: #e2e8f0;
+  font-weight: 500;
 }
 
 .empty-bg {
   width: 100%;
   height: 100%;
-  background: #1a1a2e;
+  background: transparent;
 }
 
 </style>

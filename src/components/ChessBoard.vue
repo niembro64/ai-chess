@@ -214,9 +214,11 @@ function rankLabel(rank: number): string {
   align-items: center;
   justify-content: center;
   width: 24px;
-  font-family: monospace;
-  font-size: 13px;
-  color: #888;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+  letter-spacing: 0.5px;
 }
 
 .board-and-files {
@@ -225,10 +227,18 @@ function rankLabel(rank: number): string {
 }
 
 .chess-board {
-  border: 3px solid #4444aa;
-  border-radius: 4px;
+  /* Layered border: outer 3px purple frame, inner 1px gold inlay, plus
+     a soft ambient glow and a heavy drop shadow to lift the board off
+     the page. */
+  border: 3px solid transparent;
+  border-radius: 6px;
   overflow: hidden;
-  box-shadow: 0 0 30px rgba(68, 68, 170, 0.3);
+  background-clip: padding-box;
+  box-shadow:
+    0 0 0 1px rgba(212, 175, 95, 0.35),
+    0 0 0 4px rgba(99, 102, 241, 0.85),
+    0 0 40px rgba(99, 102, 241, 0.35),
+    0 14px 36px rgba(0, 0, 0, 0.55);
 }
 
 .board-row {
@@ -259,31 +269,53 @@ function rankLabel(rank: number): string {
 }
 
 .square.light {
-  background: #e8d5b5;
+  background: linear-gradient(155deg, #f1dfbf 0%, #e3cca6 100%);
 }
 
 .square.dark {
-  background: #b58863;
+  background: linear-gradient(155deg, #c19470 0%, #a87650 100%);
 }
 
+/* Selected: warm gold inset ring instead of a harsh yellow flood. The
+   piece stays clearly visible. */
 .square.selected {
-  background: rgba(255, 255, 100, 0.6) !important;
+  box-shadow: inset 0 0 0 4px rgba(247, 192, 88, 0.95),
+              inset 0 0 16px rgba(247, 192, 88, 0.35);
 }
 
-.square.last-move.light {
-  background: #cdd26a;
-}
-
-.square.last-move.dark {
-  background: #aaa23a;
+/* Last-move tint: cool teal layered on top of the wood, instead of the
+   muddy yellow-green that fought with the warm board palette. */
+.square.last-move::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(94, 234, 212, 0.32);
+  pointer-events: none;
 }
 
 .square.king-check {
-  background: rgba(255, 50, 50, 0.6) !important;
+  animation: king-check-pulse 1.2s ease-in-out infinite;
 }
 
-.square:hover {
-  filter: brightness(1.1);
+@keyframes king-check-pulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 0 0 3px rgba(255, 80, 80, 0.85),
+      inset 0 0 24px rgba(255, 80, 80, 0.5);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 4px rgba(255, 120, 120, 1),
+      inset 0 0 36px rgba(255, 80, 80, 0.85);
+  }
+}
+
+.square:hover::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
 }
 
 .piece {
@@ -291,15 +323,19 @@ function rankLabel(rank: number): string {
   font-size: calc(var(--sq) * 0.66);
   line-height: 1;
   pointer-events: none;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  /* Layered shadow gives the pieces visible weight against the board. */
+  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.4))
+          drop-shadow(0 2px 4px rgba(0, 0, 0, 0.55));
+  z-index: 1;
 }
 
 .move-dot {
   position: absolute;
-  width: 25%;
-  height: 25%;
+  width: 28%;
+  height: 28%;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.25);
+  background: rgba(94, 234, 212, 0.85);
+  box-shadow: 0 0 12px rgba(94, 234, 212, 0.5);
   pointer-events: none;
 }
 
@@ -308,7 +344,9 @@ function rankLabel(rank: number): string {
   width: 88%;
   height: 88%;
   border-radius: 50%;
-  border: 5px solid rgba(0, 0, 0, 0.25);
+  border: 4px solid rgba(94, 234, 212, 0.85);
+  box-shadow: 0 0 18px rgba(94, 234, 212, 0.45),
+              inset 0 0 12px rgba(94, 234, 212, 0.35);
   pointer-events: none;
 }
 
@@ -319,14 +357,16 @@ function rankLabel(rank: number): string {
 .file-label {
   flex: 1;
   text-align: center;
-  font-family: monospace;
-  font-size: min(13px, 3dvw);
-  color: #888;
-  padding-top: 4px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: min(12px, 3dvw);
+  font-weight: 500;
+  color: #94a3b8;
+  padding-top: 6px;
+  letter-spacing: 0.5px;
 }
 
 .rank-label {
-  font-size: min(13px, 3dvw) !important;
+  font-size: min(12px, 3dvw) !important;
 }
 
 /* Promotion dialog */
@@ -344,43 +384,53 @@ function rankLabel(rank: number): string {
 }
 
 .promotion-dialog {
-  background: rgba(20, 20, 35, 0.98);
-  border: 2px solid #4444aa;
-  border-radius: 12px;
-  padding: 20px 30px;
+  background: linear-gradient(165deg, rgba(40, 38, 70, 0.95), rgba(22, 21, 42, 0.97));
+  border: 1px solid rgba(99, 102, 241, 0.45);
+  border-radius: 16px;
+  padding: 24px 32px;
   text-align: center;
-  box-shadow: 0 0 40px rgba(68, 68, 170, 0.4);
+  backdrop-filter: blur(14px) saturate(1.4);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  box-shadow:
+    0 0 0 1px rgba(212, 175, 95, 0.2) inset,
+    0 0 60px rgba(99, 102, 241, 0.45),
+    0 18px 40px rgba(0, 0, 0, 0.55);
 }
 
 .promotion-dialog h3 {
-  font-family: monospace;
-  color: #ccc;
-  margin: 0 0 16px 0;
-  font-size: 16px;
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #e2e8f0;
+  margin: 0 0 18px 0;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
 }
 
 .promotion-choices {
   display: flex;
-  gap: 8px;
+  gap: 10px;
 }
 
 .promotion-btn {
   width: 64px;
   height: 64px;
   font-size: 42px;
-  background: rgba(60, 60, 60, 0.8);
-  border: 2px solid #666;
-  border-radius: 8px;
+  background: linear-gradient(155deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   display: flex;
   align-items: center;
   justify-content: center;
+  color: #f1f5f9;
 }
 
 .promotion-btn:hover {
-  background: rgba(68, 68, 170, 0.4);
-  border-color: #4444aa;
-  transform: scale(1.1);
+  border-color: rgba(99, 102, 241, 0.7);
+  box-shadow:
+    0 0 0 1px rgba(99, 102, 241, 0.5),
+    0 0 24px rgba(99, 102, 241, 0.4);
+  transform: scale(1.08);
 }
 </style>
