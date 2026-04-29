@@ -1171,6 +1171,28 @@ class DashboardLogger:
             "backward", fmt("t_backward_ms"),
             "optim", fmt("t_optim_ms"),
         )
+
+        # Inference-server batching health. Avg batch = mean batch size
+        # the GPU saw per dispatch; peak = all-time max; wait = mean
+        # time between first request received and dispatch. Low avg vs
+        # peak with low wait → server fires too eagerly. High wait near
+        # batch_wait_ms → workers can't fill the window fast enough.
+        if stats is not None and getattr(stats, "inf_avg_batch", 0.0) > 0:
+            avg_b = getattr(stats, "inf_avg_batch", 0.0)
+            peak = getattr(stats, "inf_peak_batch", 0)
+            wait_ms = getattr(stats, "inf_avg_wait_ms", 0.0)
+            disp_pm = getattr(stats, "inf_dispatches_per_min", 0.0)
+            table.add_row(
+                "inf-batch avg", f"{avg_b:,.1f}",
+                "inf-peak", f"{peak:,d}",
+                "inf-wait", f"{wait_ms:,.2f} ms",
+            )
+            table.add_row(
+                "inf disp/min", f"{disp_pm:,.0f}",
+                "", "",
+                "", "",
+            )
+
         return Panel(table, title="timings (EMA, per loop/step)", border_style="yellow")
 
     def _hardware_panel(self) -> Panel:

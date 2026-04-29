@@ -147,6 +147,7 @@ def _inference_server_main(
     weights_q: "mp.Queue",
     stop_event: Any,
     batch_wait_ms: float,
+    inf_stats: Any,  # mp.Array('q', 4) — see snapshot_inf_stats()
 ) -> None:
     """Own the GPU, serve batched inference requests.
 
@@ -183,8 +184,6 @@ def _inference_server_main(
 
     wait_s = batch_wait_ms / 1000.0
 
-    # Track some stats for diagnosis (can be read by parent via a different
-    # channel if wanted; for now just left accessible for future extension).
     while not stop_event.is_set():
         # Opportunistic weight swap (non-blocking).
         try:
@@ -200,9 +199,10 @@ def _inference_server_main(
             first = request_q.get(timeout=0.05)
         except Empty:
             continue
+        first_recv_t = time.monotonic()
 
         pending: list[tuple[int, np.ndarray]] = [first]
-        deadline = time.monotonic() + wait_s
+        deadline = first_recv_t + wait_s
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -222,6 +222,17 @@ def _inference_server_main(
             offset += n
             boards_blocks.append(boards)
         merged = np.concatenate(boards_blocks, axis=0)
+
+        # Update shared stats BEFORE the GPU forward — gives the trainer
+        # a fresher view of batch fill even when forward is slow.
+        # Slots: 0=dispatches, 1=sum_batch, 2=peak_batch, 3=sum_wait_us.
+        wait_us = int((time.monotonic() - first_recv_t) * 1e6)
+        with inf_stats.get_lock():
+            inf_stats[0] += 1
+            inf_stats[1] += merged.shape[0]
+            if merged.shape[0] > inf_stats[2]:
+                inf_stats[2] = merged.shape[0]
+            inf_stats[3] += wait_us
 
         # Forward on GPU.
         with torch.no_grad():
@@ -356,6 +367,15 @@ class MultiprocessingSelfPlay:
         self._results_q: mp.Queue = self._ctx.Queue(maxsize=config.example_q_maxsize)
         # weights_q: bounded to 1 so stale updates are auto-evicted.
         self._weights_q: mp.Queue = self._ctx.Queue(maxsize=1)
+        # Inference-server stats. Four signed int64 counters, lock-protected
+        # by mp.Array's built-in lock. Slots:
+        #   0 = n_dispatches            (cumulative)
+        #   1 = sum_batch_size          (cumulative — divide by [0] for avg)
+        #   2 = peak_batch_size         (running max, never reset)
+        #   3 = sum_wait_us             (cumulative wait between first req and
+        #                                dispatch — divide by [0] for avg ms)
+        # Read+reset via snapshot_inf_stats() to compute window-rate metrics.
+        self._inf_stats = self._ctx.Array("q", 4)
 
         self._inference_proc = None
         self._worker_procs: list[mp.Process] = []
@@ -372,6 +392,7 @@ class MultiprocessingSelfPlay:
                 self._weights_q,
                 self._stop_event,
                 self.config.batch_wait_ms,
+                self._inf_stats,
             ),
             daemon=True,
         )
@@ -434,6 +455,21 @@ class MultiprocessingSelfPlay:
         # size is tiny (~12 MB for 3M params) so just ship CPU tensors.
         cpu_state = {k: v.detach().cpu() for k, v in state_dict.items()}
         self._weights_q.put(cpu_state)
+
+    def snapshot_inf_stats(self) -> dict:
+        """Read the inference server's cumulative counters atomically.
+
+        Returns a dict with keys: dispatches, sum_batch, peak_batch,
+        sum_wait_us. Reading is cheap (lock + 4 int64 reads); the trainer
+        calls this once per main-loop iter and computes deltas itself.
+        """
+        with self._inf_stats.get_lock():
+            return {
+                "dispatches": self._inf_stats[0],
+                "sum_batch": self._inf_stats[1],
+                "peak_batch": self._inf_stats[2],
+                "sum_wait_us": self._inf_stats[3],
+            }
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop_event.set()

@@ -244,6 +244,12 @@ class TrainStats:
     t_forward_ms: float = 0.0        # forward pass
     t_backward_ms: float = 0.0       # backward pass
     t_optim_ms: float = 0.0          # optimizer step
+    # Inference-server batching health (window-averaged from
+    # MultiprocessingSelfPlay.snapshot_inf_stats deltas).
+    inf_avg_batch: float = 0.0       # mean batch size dispatched per forward
+    inf_peak_batch: int = 0          # all-time peak batch size
+    inf_avg_wait_ms: float = 0.0     # mean time from first-req to dispatch
+    inf_dispatches_per_min: float = 0.0
     # Aux head losses (0 when the head isn't active).
     aux_material_loss: float = 0.0
 
@@ -463,6 +469,11 @@ class Trainer:
             except Exception as e:
                 log.warning("torch.compile failed (training): %s; falling back to eager", e)
 
+        # Inference-server stats deltas: stored so we can compute "since
+        # last loop iter" rate metrics. Initialized to zeros and refreshed
+        # once self-play actually starts. Tuple of (mono_t, snapshot_dict).
+        self._prev_inf_stats: tuple[float, dict] | None = None
+
     def _device_sync(self) -> None:
         """Block until pending GPU work is done. No-op on CPU/MPS."""
         if self._is_cuda:
@@ -496,6 +507,33 @@ class Trainer:
         """Exponential moving average update on a TrainStats timing field."""
         prev = getattr(self.stats, attr)
         setattr(self.stats, attr, prev + self._timing_alpha * (sample_ms - prev) if prev > 0 else sample_ms)
+
+    def _refresh_inf_stats(self) -> None:
+        """Read the inference server's cumulative counters and store
+        window-rate metrics on TrainStats. Called once per main-loop iter
+        from `_run_mp`. Cheap (one lock + 4 int64 reads in the parent).
+        """
+        if self._mp_self_play is None:
+            return
+        cur = self._mp_self_play.snapshot_inf_stats()
+        now = time.monotonic()
+        if self._prev_inf_stats is None:
+            self._prev_inf_stats = (now, cur)
+            self.stats.inf_peak_batch = int(cur["peak_batch"])
+            return
+        prev_t, prev = self._prev_inf_stats
+        d_n = cur["dispatches"] - prev["dispatches"]
+        d_sum = cur["sum_batch"] - prev["sum_batch"]
+        d_us = cur["sum_wait_us"] - prev["sum_wait_us"]
+        d_t = max(now - prev_t, 1e-6)
+        # Need both elapsed time AND at least one dispatch in the window
+        # to compute meaningful averages.
+        if d_n > 0:
+            self.stats.inf_avg_batch = d_sum / d_n
+            self.stats.inf_avg_wait_ms = (d_us / d_n) / 1000.0
+            self.stats.inf_dispatches_per_min = (d_n / d_t) * 60.0
+        self.stats.inf_peak_batch = int(cur["peak_batch"])
+        self._prev_inf_stats = (now, cur)
 
     def _update_rates(self) -> None:
         """Recompute gen/min + games/min over the last `rate_window_seconds`.
@@ -825,6 +863,7 @@ class Trainer:
                 self.stats.step = step
                 self.stats.replay_size = len(self.buffer)
                 self._update_rates()
+                self._refresh_inf_stats()
                 self._ema("t_iter_ms", (time.perf_counter() - iter_start) * 1000.0)
 
                 if on_step is not None:
