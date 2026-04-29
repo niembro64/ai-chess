@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue';
 import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
-import { getLegalMovesForSquare, getPieceSymbol } from '@/game/chess/ChessEngine';
+import { getLegalMovesForSquare, getFilledPieceGlyph } from '@/game/chess/ChessEngine';
 
 const props = defineProps<{
   gameState: ChessGameState;
@@ -152,8 +152,12 @@ function rankLabel(rank: number): string {
               ]"
               @click="handleSquareClick(rank, file)"
             >
-              <span v-if="gameState.board[rank][file]" class="piece">
-                {{ getPieceSymbol(gameState.board[rank][file]!) }}
+              <span
+                v-if="gameState.board[rank][file]"
+                class="piece"
+                :class="gameState.board[rank][file]!.color"
+              >
+                {{ getFilledPieceGlyph(gameState.board[rank][file]!.type) }}
               </span>
               <span v-if="isLegalTarget(rank, file) && !gameState.board[rank][file]" class="move-dot"></span>
               <span v-if="isLegalTarget(rank, file) && gameState.board[rank][file]" class="capture-ring"></span>
@@ -179,9 +183,10 @@ function rankLabel(rank: number): string {
             v-for="pt in (['queen', 'rook', 'bishop', 'knight'] as PieceType[])"
             :key="pt"
             class="promotion-btn"
+            :class="localColor"
             @click="handlePromotion(pt)"
           >
-            {{ getPieceSymbol({ color: localColor, type: pt }) }}
+            {{ getFilledPieceGlyph(pt) }}
           </button>
         </div>
       </div>
@@ -324,10 +329,37 @@ function rankLabel(rank: number): string {
   font-size: calc(var(--sq) * 0.66);
   line-height: 1;
   pointer-events: none;
-  /* Layered shadow gives the pieces visible weight against the board. */
-  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.4))
-          drop-shadow(0 2px 4px rgba(0, 0, 0, 0.55));
   z-index: 1;
+  /* Drop shadow gives pieces weight against the board. Outline (the
+     contrasting edge) is done via text-shadow on the color variants below
+     so it stays crisp regardless of board color. */
+  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.5));
+}
+
+/* White pieces: cream fill, dark outline. Eight-direction text-shadow
+   simulates a hard 1px stroke around the glyph. */
+.piece.white {
+  color: #f6efde;
+  text-shadow:
+    -1px -1px 0 #1a1410,
+     1px -1px 0 #1a1410,
+    -1px  1px 0 #1a1410,
+     1px  1px 0 #1a1410,
+     0   -1.2px 0 #1a1410,
+     0    1.2px 0 #1a1410,
+    -1.2px 0 0 #1a1410,
+     1.2px 0 0 #1a1410;
+}
+
+/* Black pieces: deep charcoal fill with a thin warm-cream rim so they
+   read clearly even on the dark squares. */
+.piece.black {
+  color: #15110d;
+  text-shadow:
+    -1px -1px 0 rgba(246, 239, 222, 0.55),
+     1px -1px 0 rgba(246, 239, 222, 0.55),
+    -1px  1px 0 rgba(246, 239, 222, 0.55),
+     1px  1px 0 rgba(246, 239, 222, 0.55);
 }
 
 .move-dot {
@@ -424,7 +456,28 @@ function rankLabel(rank: number): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #f1f5f9;
+}
+
+.promotion-btn.white {
+  color: #f6efde;
+  text-shadow:
+    -1px -1px 0 #1a1410,
+     1px -1px 0 #1a1410,
+    -1px  1px 0 #1a1410,
+     1px  1px 0 #1a1410,
+     0   -1.2px 0 #1a1410,
+     0    1.2px 0 #1a1410,
+    -1.2px 0 0 #1a1410,
+     1.2px 0 0 #1a1410;
+}
+
+.promotion-btn.black {
+  color: #15110d;
+  text-shadow:
+    -1px -1px 0 rgba(246, 239, 222, 0.6),
+     1px -1px 0 rgba(246, 239, 222, 0.6),
+    -1px  1px 0 rgba(246, 239, 222, 0.6),
+     1px  1px 0 rgba(246, 239, 222, 0.6);
 }
 
 .promotion-btn:hover {

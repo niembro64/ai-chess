@@ -526,6 +526,21 @@ export function getPieceSymbol(piece: Piece): string {
   return symbols[piece.color][piece.type];
 }
 
+// Always-filled (silhouette) glyph for board rendering. Both colors use the
+// same shape, then CSS colors them \u2014 yields a much clearer light/dark
+// distinction than the default outline-vs-filled Unicode pair.
+export function getFilledPieceGlyph(type: PieceType): string {
+  const glyphs: Record<PieceType, string> = {
+    king: '\u265A',
+    queen: '\u265B',
+    rook: '\u265C',
+    bishop: '\u265D',
+    knight: '\u265E',
+    pawn: '\u265F',
+  };
+  return glyphs[type];
+}
+
 // Convert position to algebraic notation
 export function posToAlgebraic(pos: Position): string {
   const file = String.fromCharCode(97 + pos.file); // a-h
