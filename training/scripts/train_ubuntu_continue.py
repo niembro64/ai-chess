@@ -19,9 +19,10 @@ from _launcher import launch  # noqa: E402
 
 
 if __name__ == "__main__":
+    # See train_ubuntu_new.py for the tuning history on these knobs.
     launch(
         mode="continue",
-        num_workers=8,
-        games_per_worker=24,
+        num_workers=12,
+        games_per_worker=32,
         batch_size=1024,
     )
