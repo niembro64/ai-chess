@@ -1358,6 +1358,27 @@ class Trainer:
             self.aux_material.load_state_dict(state["aux_material_state_dict"])
         if "optimizer_state_dict" in state:
             self.optimizer.load_state_dict(state["optimizer_state_dict"])
+        # Restore TrainStats — CRITICAL for the LR schedule.
+        #
+        # Without this, every resume reset stats.generation to 0 and
+        # _maybe_update_lr walked the schedule back to its initial high
+        # rate (e.g. 1e-3). For weights that had already trained through
+        # the schedule's tail (e.g. 3e-5 at gen 85k+), that 30× LR jump
+        # destroyed the converged features — diagnosed when a 105k-gen
+        # resume started losing eval games to its own gen-95k champion.
+        #
+        # Display counters (games_completed, mate_w/b, etc.) also round-
+        # trip for continuity. Forward-compat: only restore fields that
+        # exist on the current TrainStats class.
+        saved_stats = state.get("stats")
+        if isinstance(saved_stats, dict):
+            for k, v in saved_stats.items():
+                if hasattr(self.stats, k):
+                    setattr(self.stats, k, v)
+        # Re-apply the LR schedule from the now-correct gen counter so
+        # the optimizer's lr matches the schedule (and not whatever the
+        # restored optimizer state happened to have).
+        self._maybe_update_lr()
 
 
 def pick_device(preferred: str = "auto") -> torch.device:
