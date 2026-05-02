@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
 import { getLegalMovesForSquare, getFilledPieceGlyph } from '@/game/chess/ChessEngine';
@@ -121,6 +121,75 @@ function fileLabel(file: number): string {
 function rankLabel(rank: number): string {
   return String(8 - rank);
 }
+
+// Smooth piece slide on every move (FLIP technique).
+//
+// After Vue commits the new gameState to the DOM, the moved piece is
+// already at its destination square. We:
+//   1. Find the destination square by data-square attribute.
+//   2. Compute the visual offset back to its origin (in pixels).
+//   3. Set a synchronous transform that places the piece visually back
+//      at the origin square, with no transition.
+//   4. Force a layout reflow so the browser commits that transform.
+//   5. Animate transform → translate(0, 0) with ease-in-out.
+//
+// Works for captures (the captured piece disappears instantly when the
+// state updates; the capturing piece slides on top), and for promotions
+// (the new queen glyph slides; minor cosmetic that the pawn-glyph isn't
+// shown during travel — acceptable). Castling animates the king; the
+// rook teleports — fine for a first cut.
+const boardRef = ref<HTMLElement | null>(null);
+
+const SLIDE_MS = 280;
+const SLIDE_EASING = 'cubic-bezier(0.4, 0, 0.2, 1)';
+
+watch(
+  () => props.gameState.lastMove,
+  async (newMove, oldMove) => {
+    if (!newMove) return;
+    // Same logical move — skip (e.g. parent re-render with no real change).
+    if (
+      oldMove &&
+      oldMove.from.rank === newMove.from.rank &&
+      oldMove.from.file === newMove.from.file &&
+      oldMove.to.rank === newMove.to.rank &&
+      oldMove.to.file === newMove.to.file
+    ) return;
+
+    await nextTick();
+    const board = boardRef.value;
+    if (!board) return;
+
+    const dest = board.querySelector<HTMLElement>(
+      `[data-square="${newMove.to.rank}-${newMove.to.file}"]`,
+    );
+    const piece = dest?.querySelector<HTMLElement>('.piece');
+    if (!dest || !piece) return;
+
+    const sq = dest.offsetWidth;
+    let dx = (newMove.from.file - newMove.to.file) * sq;
+    let dy = (newMove.from.rank - newMove.to.rank) * sq;
+    if (isFlipped.value) {
+      dx = -dx;
+      dy = -dy;
+    }
+
+    // FLIP: invert (place piece back at source) → play (animate to zero).
+    piece.style.transition = 'none';
+    piece.style.transform = `translate(${dx}px, ${dy}px)`;
+    // Force a reflow so the inverted transform commits before the next paint.
+    void piece.offsetHeight;
+    piece.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASING}`;
+    piece.style.transform = 'translate(0, 0)';
+
+    const cleanup = () => {
+      piece.style.transition = '';
+      piece.style.transform = '';
+      piece.removeEventListener('transitionend', cleanup);
+    };
+    piece.addEventListener('transitionend', cleanup);
+  },
+);
 </script>
 
 <template>
@@ -135,12 +204,13 @@ function rankLabel(rank: number): string {
 
       <div class="board-and-files">
         <!-- The board -->
-        <div class="chess-board">
+        <div class="chess-board" ref="boardRef">
           <div v-for="rank in displayRanks" :key="'r' + rank" class="board-row">
             <div
               v-for="file in displayFiles"
               :key="'s' + rank + '-' + file"
               class="square"
+              :data-square="`${rank}-${file}`"
               :class="[
                 getSquareColor(rank, file),
                 {

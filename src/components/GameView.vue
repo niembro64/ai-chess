@@ -421,7 +421,17 @@ onUnmounted(() => {
             <span class="chip-swatch" :class="opponentColor"></span>
             <span class="chip-name">{{ opponentName }}</span>
             <span class="chip-color">{{ opponentColor === 'white' ? 'White' : 'Black' }}</span>
-            <span v-if="isOpponentTurn && !isGameOver" class="chip-turn-dot"></span>
+            <!-- Wave-dot "thinking" indicator on the opponent chip when
+                 it's their turn — separate semantic from the local chip's
+                 turn-dot (which means "your move, go ahead"). -->
+            <span
+              v-if="isOpponentTurn && !isGameOver"
+              class="thinking-dots"
+              role="status"
+              aria-label="opponent is thinking"
+            >
+              <span></span><span></span><span></span>
+            </span>
           </div>
 
           <ChessBoard
@@ -835,6 +845,38 @@ onUnmounted(() => {
 @keyframes turn-dot-pulse {
   0%, 100% { opacity: 0.5; transform: scale(0.85); }
   50%      { opacity: 1;   transform: scale(1.15); }
+}
+
+/* Three small teal dots that wave in sequence — the canonical "AI is
+   thinking" affordance. Used on the opponent chip during their turn,
+   distinct from the local chip's turn-dot which says "your move." */
+.thinking-dots {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  margin-left: 4px;
+  height: 8px;
+}
+.thinking-dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #5ae3d8;
+  box-shadow: 0 0 6px rgba(94, 234, 212, 0.7);
+  animation: thinking-wave 1.3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.thinking-dots > span:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dots > span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes thinking-wave {
+  0%, 70%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  35% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 
 @media (max-width: 900px) {
