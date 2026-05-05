@@ -396,10 +396,6 @@ class Trainer:
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
-        # Seed live LR before any schedule step, so the dashboard's
-        # model panel shows the right value even at gen 0 (and during
-        # warmup before _maybe_update_lr first runs).
-        self.stats.current_lr = float(self.config.learning_rate)
         self.rng = rng or random.Random()
         self.buffer = ReplayBuffer(capacity=self.config.replay_buffer_capacity)
 
@@ -470,6 +466,11 @@ class Trainer:
             )
 
         self.stats = TrainStats(target_gens=self.config.target_gens)
+        # Seed live LR before any schedule step, so the dashboard's
+        # model panel shows the right value even at gen 0 (and during
+        # warmup before _maybe_update_lr first runs). load_checkpoint
+        # will overwrite this with the real value via _maybe_update_lr.
+        self.stats.current_lr = float(self.config.learning_rate)
         self._start_time = time.time()
         self._last_checkpoint_time = 0.0
         self._last_archive_gen = 0
