@@ -667,3 +667,57 @@ def build_eval_positions() -> list[EvalPosition]:
 
     _CACHE = positions
     return positions
+
+
+# --- Rotating opening slice -----------------------------------------------
+#
+# Curated positions are fixed forever; rotating positions are regenerated
+# on every eval match. They random-walk 3-8 legal plies from the standard
+# initial position, producing realistic but unique opening positions that
+# pull the eval distribution toward what self-play actually reaches in the
+# opening phase. Because the seed differs per match, the model can't be
+# over-fit to specific positions — but the *kind* of position (open game,
+# closed center, gambit pawn, …) tracks what the trainer is generating
+# right now. Exposed separately from `build_eval_positions` so the curated
+# set keeps its caching/determinism property.
+
+
+def build_rotating_opening_positions(
+    count: int, rng: random.Random,
+) -> list[EvalPosition]:
+    """Generate `count` fresh random-walk opening positions.
+
+    Each position is reached by playing 3-8 legal plies from the standard
+    starting board, picking a uniformly random move at each ply. Bails on
+    a position that ends up terminal (rare at this depth) and retries.
+    Positions are tagged `difficulty="opening"` so they fold into the
+    standard per-difficulty score bucket; the unique name keeps them
+    distinguishable in the live dashboard panel.
+    """
+    if count <= 0:
+        return []
+    out: list[EvalPosition] = []
+    attempts = 0
+    while len(out) < count and attempts < count * 20:
+        attempts += 1
+        plies = rng.randint(3, 8)
+        state = create_initial_game_state()
+        state.status = "active"
+        ok = True
+        for _ in range(plies):
+            legal = get_legal_moves(state)
+            if not legal:
+                ok = False
+                break
+            state = apply_move(state, rng.choice(legal))
+            if state.status in ("checkmate", "stalemate", "draw"):
+                ok = False
+                break
+        if not ok:
+            continue
+        out.append(EvalPosition(
+            name=f"Random opening #{len(out) + 1:02d} ({plies} plies)",
+            state=state,
+            difficulty="opening",
+        ))
+    return out

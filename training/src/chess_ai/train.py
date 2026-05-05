@@ -200,13 +200,33 @@ class TrainConfig:
     # a small tournament against the reigning "champion" checkpoint. 0
     # disables auto-eval.
     eval_every_gens: int = 0
-    eval_games: int = 20
-    eval_mcts_sims: int = 30
-    eval_move_cap: int = 200
+    # `eval_games` is no longer a free knob — the match always plays
+    # `len(positions) * 2` games (each curated/rotating position runs once
+    # per color for fairness). Left here as an *informational* upper hint;
+    # the actual game count is derived inside `_run_eval_match`. Kept for
+    # backward compat with old eval.csv readers.
+    eval_games: int = 140
+    # Match self-play sims so eval measures the model under the same
+    # search depth users / training experience. Shallower eval search
+    # systematically under-rates strong models (more sims help peaky
+    # policies more).
+    eval_mcts_sims: int = 100
+    eval_move_cap: int = 400
     # Score (wins + 0.5*draws) / total the challenger must exceed to dethrone
-    # the champion. 0.54 ≈ +30 Elo — enough to be above CI noise with 20-game
-    # evals.
+    # the champion. With 140 games, SE on the score is ~0.042, so a
+    # threshold of 0.54 corresponds to roughly a 1σ signal above 0.5
+    # (≈ +28 Elo). Loose, but tighter than a coin-flip 0.51 gate that
+    # happily promotes noise. Raise toward 0.56-0.58 for a stricter,
+    # ~+50 Elo signal at the cost of slower champion turnover.
     eval_score_threshold: float = 0.54
+    # Number of *fresh* random-walk opening positions injected into each
+    # eval match alongside the curated 60-position set. These are
+    # regenerated per match (different RNG seed each time) so they can't
+    # be over-fit to, while still pulling the eval distribution toward
+    # what self-play actually produces. 0 disables the rotating slice
+    # (eval = curated set only). Each rotating position plays both
+    # colors so eval_games grows by 2× this value.
+    eval_rotating_openings: int = 10
     # Stop training after this many consecutive evals where the challenger
     # failed to dethrone the champion. 0 disables the plateau detector
     # (training runs indefinitely). Typical: 3 — one bad eval could be
@@ -1101,11 +1121,28 @@ class Trainer:
             # Pull the curated position set. Built once per trainer and
             # cached; building plays a few moves per opening through our
             # own engine so every position is guaranteed legal.
-            from .eval_positions import build_eval_positions
-            positions = build_eval_positions()
+            from .eval_positions import (
+                build_eval_positions,
+                build_rotating_opening_positions,
+            )
+            positions = list(build_eval_positions())
+            # Append a fresh slice of random-walk opening positions. New
+            # ones every match (RNG seeded off `gen` so a given gen always
+            # plays the same rotating set across resumes — eval.csv stays
+            # comparable across a run). count=0 disables the slice.
+            rot_count = self.config.eval_rotating_openings
+            if rot_count > 0:
+                rot_rng = random.Random(0xE7A1 ^ gen)
+                positions.extend(
+                    build_rotating_opening_positions(rot_count, rot_rng)
+                )
 
             wins = draws = losses = 0
-            total = self.config.eval_games
+            # Total games is always 2 × positions (one game per color so
+            # any intrinsic imbalance averages out). `eval_games` from the
+            # config is now informational; the loop trusts the position
+            # count as the source of truth.
+            total = len(positions) * 2
             # Per-difficulty breakdown. Lets the dashboard show how the
             # match is going in each category (mate-in-1, trivial, clear,
             # balanced) separately — much more informative than one score.
@@ -1192,6 +1229,25 @@ class Trainer:
         else:
             self._plateau_counter += 1
 
+        # Per-difficulty score columns (flat, CSV-friendly). Zero games
+        # in a bucket → blank cell so old readers can still parse them
+        # as floats; the dashboard chart panel skips empty cells. Order
+        # is fixed so columns stay aligned across resumes.
+        diff_scores: dict[str, str | float] = {}
+        diff_games: dict[str, int] = {}
+        for name in ("mate-in-1", "endgame", "middlegame", "opening"):
+            stats = per_diff.get(name)
+            col = name.replace("-", "_")
+            if not stats:
+                diff_scores[f"score_{col}"] = ""
+                diff_games[f"games_{col}"] = 0
+                continue
+            n = stats["w"] + stats["d"] + stats["l"]
+            diff_scores[f"score_{col}"] = (
+                round((stats["w"] + 0.5 * stats["d"]) / n, 4) if n else ""
+            )
+            diff_games[f"games_{col}"] = n
+
         result = {
             "gen": gen,
             "champion_gen": self._champion_gen,
@@ -1208,9 +1264,16 @@ class Trainer:
             # eval regressions (e.g. a match that suddenly takes 2×
             # longer could mean MCTS is stuck exploring dead-end lines).
             "duration_s": round(time.time() - match_start, 1),
-            # Per-difficulty breakdown — lets the dashboard / event log
-            # show which bucket the challenger dominated. Excluded from
-            # eval.csv below (dict values don't fit a flat CSV).
+            # Per-difficulty score + game-count columns persisted to
+            # eval.csv so the trend across matches is visible after the
+            # fact, not just live during a match. A saturated mate-in-1
+            # score combined with a sliding endgame score is exactly the
+            # regime where the aggregate hides regressions.
+            **diff_scores,
+            **diff_games,
+            # Per-difficulty raw W/D/L breakdown — kept on the in-memory
+            # result dict for the dashboard's live panel; stripped from
+            # the CSV row below (nested dict).
             "per_diff": per_diff,
         }
         self._eval_history.append(result)

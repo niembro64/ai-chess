@@ -286,25 +286,35 @@ def build_config() -> TrainConfig:
         # eval_mcts_sims back down to 100 and the rest of the match
         # budget stable, eval wall-time fraction stays manageable.
         eval_every_gens=5_000,
-        # 120 games = 60 curated positions × 2 color assignments. The
-        # position mix is 50 mate-in-1 (5 hand-crafted + 45 random) +
-        # 5 asymmetric + 5 balanced openings. Each position plays
-        # exactly once per color so fairness is preserved end-to-end.
-        eval_games=120,
+        # eval_games is informational — the trainer derives the true
+        # game count from len(positions) * 2 (curated 60 + rotating K).
+        # See TrainConfig.eval_games / eval_rotating_openings.
+        eval_games=140,
         # Deeper search for eval than self-play (60 sims). A trained
         # model's policy can become peaky to the point where MCTS at
         # 60 sims never explores mate shots ranked low in prior. 100
-        # sims gives enough PUCT exploration budget to get past the
-        # peakiness (combined with dirichlet_epsilon=0.35 during self-
-        # play preventing the policy from going too peaky in the first
-        # place). 200 was briefly tried — 3× match time for marginal
-        # diagnostic gain; 100 is the sweet spot.
+        # sims matches the self-play search depth so eval measures the
+        # model the same way training stresses it (combined with
+        # dirichlet_epsilon=0.35 during self-play preventing the policy
+        # from going too peaky in the first place). 200 was briefly
+        # tried — 3× match time for marginal diagnostic gain; 100 is
+        # the sweet spot.
         eval_mcts_sims=100,
         # Longer cap (400 plies) lets weak models actually reach mate during
         # eval; otherwise every early match drifts to "draw at cap" and the
         # plateau detector misfires while the model is genuinely learning.
         eval_move_cap=400,
-        eval_score_threshold=0.51,   # ≈ +30 Elo
+        # Score required to dethrone the champion. 0.54 ≈ +28 Elo at
+        # 140 games (~1σ above 0.5, where SE ≈ 0.042). Tighter than
+        # the prior 0.51 gate which sat well inside noise and would
+        # routinely promote drifts that weren't real strength gains.
+        eval_score_threshold=0.54,
+        # Inject 10 fresh random-walk opening positions into each eval
+        # match (× 2 colors → 20 of the 140 games). Each match draws
+        # new positions so the eval distribution tracks current self-
+        # play without becoming gameable. Curated 60 still drive the
+        # bulk of the signal (technique / structure / mate-in-1).
+        eval_rotating_openings=10,
         # Plateau grace period. Early evals are mostly draws (noise, not
         # signal) so we need a long buffer before stop-training fires.
         # ~10 failed evals × 1000 gens ≈ 10k gens of headroom.

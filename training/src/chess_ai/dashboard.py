@@ -971,6 +971,51 @@ class DashboardLogger:
                 ),
             )
 
+        # --- Per-difficulty trend (one row per bucket, sparkline + latest)
+        # Only shown when at least two of the last few matches carry the
+        # `score_<diff>` columns (added in the per-difficulty CSV change).
+        # Older eval rows that predate the columns simply contribute no
+        # bar — the sparkline stays short rather than being faked from
+        # the aggregate. Skipped during a live match: the live panel
+        # above already shows per-bucket W/D/L for the in-flight match,
+        # and stacking another four rows would push the panel past its
+        # height budget.
+        diff_buckets: tuple[tuple[str, str], ...] = (
+            ("mate-in-1",   "score_mate_in_1"),
+            ("endgame",     "score_endgame"),
+            ("middlegame",  "score_middlegame"),
+            ("opening",     "score_opening"),
+        )
+        diff_window = list(hist)[-12:]   # most-recent slice for the sparkline
+        show_diff_trend = self._eval_progress is None
+        for label, key in (diff_buckets if show_diff_trend else ()):
+            vals: list[float] = []
+            for h in diff_window:
+                v = h.get(key)
+                if isinstance(v, (int, float)):
+                    vals.append(float(v))
+                elif isinstance(v, str) and v not in ("", None):
+                    try:
+                        vals.append(float(v))
+                    except ValueError:
+                        pass
+            if not vals:
+                continue
+            bucket_spark = "".join(to_bar(v) for v in vals)
+            latest_v = vals[-1]
+            latest_style = (
+                "bright_green" if latest_v >= 0.7
+                else "yellow" if latest_v >= 0.5
+                else "red"
+            )
+            body.add_row(
+                label,
+                Text.assemble(
+                    (bucket_spark, "cyan"),
+                    (f"   {latest_v:.2f}", latest_style),
+                ),
+            )
+
         body.add_row("", Text(""))  # spacer
 
         # --- History table (most recent first, up to what fits)
