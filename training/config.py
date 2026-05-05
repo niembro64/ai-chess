@@ -285,7 +285,14 @@ def build_config() -> TrainConfig:
         # sparse to see plateau trends before they're entrenched. With
         # eval_mcts_sims back down to 100 and the rest of the match
         # budget stable, eval wall-time fraction stays manageable.
-        eval_every_gens=5_000,
+        # 10k cadence: at ~50 gen/min and ~110 min/match, the previous
+        # 5k cadence had eval matches consuming ~50% of wall-clock
+        # (one match per ~100 min of training, each match ~110 min).
+        # Doubling the cadence cuts eval-time fraction to ~25% without
+        # giving up plateau-detection resolution: at this throughput
+        # we still get ~2 evals/day, well within the noise envelope of
+        # the 140-game match.
+        eval_every_gens=10_000,
         # eval_games is informational — the trainer derives the true
         # game count from len(positions) * 2 (curated 60 + rotating K).
         # See TrainConfig.eval_games / eval_rotating_openings.

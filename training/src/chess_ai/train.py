@@ -289,6 +289,11 @@ class TrainStats:
     inf_dispatches_per_min: float = 0.0
     # Aux head losses (0 when the head isn't active).
     aux_material_loss: float = 0.0
+    # Optimizer's live learning rate (mirrored out of param_groups[0])
+    # so the dashboard can show what the model is actually being trained
+    # at. Distinct from `config.learning_rate` which is the *initial*
+    # value before any LR-schedule steps. Updated by `_maybe_update_lr`.
+    current_lr: float = 0.0
 
     # --- Aggregate views over the granular counters ---------------------
     # These exist so CSV readers / old callers / the dashboard footer can
@@ -391,6 +396,10 @@ class Trainer:
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
+        # Seed live LR before any schedule step, so the dashboard's
+        # model panel shows the right value even at gen 0 (and during
+        # warmup before _maybe_update_lr first runs).
+        self.stats.current_lr = float(self.config.learning_rate)
         self.rng = rng or random.Random()
         self.buffer = ReplayBuffer(capacity=self.config.replay_buffer_capacity)
 
@@ -542,9 +551,11 @@ class Trainer:
         # Skip the param_group write when the value hasn't changed — avoids
         # a per-step Python-side tensor dict mutation for no reason.
         if self.optimizer.param_groups[0].get("lr") == target_lr:
+            self.stats.current_lr = float(target_lr)
             return
         for g in self.optimizer.param_groups:
             g["lr"] = target_lr
+        self.stats.current_lr = float(target_lr)
 
     def _ema(self, attr: str, sample_ms: float) -> None:
         """Exponential moving average update on a TrainStats timing field."""

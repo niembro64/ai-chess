@@ -202,10 +202,19 @@ def launch(
         trainer._save_champion(cfg.CHECKPOINT_DIR, gen=0)
         log.info("Bootstrapped champion from initial weights (gen 0)")
 
+    # In MP mode (num_workers > 0) the actual concurrent-game count is
+    # workers × games_per_worker, NOT config.num_concurrent_games (which
+    # is the single-process selfplay default). Falling back to the local
+    # default would show a stale "games=32" on the dashboard while
+    # workers actually had 384 in flight.
+    if config.num_workers > 0:
+        concurrent_games = config.num_workers * config.games_per_worker
+    else:
+        concurrent_games = config.num_concurrent_games
     model_summary = cfg.model_summary_lines(
         lr=config.learning_rate,
         param_count=param_count,
-        concurrent_games=config.num_concurrent_games,
+        concurrent_games=concurrent_games,
         sims=config.mcts_simulations,
         batch=config.batch_size,
     )

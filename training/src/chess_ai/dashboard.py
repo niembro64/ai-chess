@@ -470,7 +470,7 @@ class DashboardLogger:
         )
         layout["top"].split_row(
             Layout(self._progress_panel(stats), name="progress"),
-            Layout(self._model_panel(), name="model"),
+            Layout(self._model_panel(stats), name="model"),
         )
         layout["middle"].split_row(
             Layout(self._outcomes_panel(stats), name="outcomes"),
@@ -545,10 +545,20 @@ class DashboardLogger:
 
         return Panel(t, title="progress", border_style="blue")
 
-    def _model_panel(self) -> Panel:
+    def _model_panel(self, stats=None) -> Panel:
         t = Table.grid(padding=(0, 2))
         t.add_column(style="dim", justify="right")
         t.add_column()
+
+        # The static `model_summary` string was built once at launcher
+        # startup. Two of its fields drift over a long run: `lr` (steps
+        # down through the schedule) and `games` (which was being
+        # populated from `config.num_concurrent_games`, the local-mode
+        # default — wrong for MP runs). We override those rows live
+        # here so the panel always reflects what's actually running.
+        live_lr = getattr(stats, "current_lr", 0.0) if stats is not None else 0.0
+        if not live_lr:
+            live_lr = None  # fall back to the static string
 
         def _add_kv_lines(blob: str) -> None:
             for line in blob.split("\n"):
@@ -556,7 +566,10 @@ class DashboardLogger:
                     continue
                 if "=" in line:
                     k, _, v = line.partition("=")
-                    t.add_row(k.strip(), v.strip())
+                    key = k.strip()
+                    if key == "lr" and live_lr is not None:
+                        v = f"{live_lr:.1e}"
+                    t.add_row(key, v.strip())
                 else:
                     t.add_row("", line)
 
