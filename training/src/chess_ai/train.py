@@ -1223,6 +1223,27 @@ class Trainer:
                         )
                     except Exception:
                         pass
+                # Keep self-play moving forward during the eval match.
+                # MP workers never stop producing; without the periodic
+                # drain, examples back up in the worker→trainer queue
+                # for ~110 minutes and the buffer shows 0 / inf-stats
+                # freeze on the dashboard. Draining + refreshing stats
+                # between games is cheap (sub-millisecond per call) and
+                # keeps the buffer warm so training restarts at full
+                # throughput when the match ends — instead of paying
+                # min_buffer_for_training warmup every eval cycle.
+                if self._mp_self_play is not None:
+                    try:
+                        self._mp_self_play.drain_examples(self.buffer)
+                        for result in self._mp_self_play.drain_results():
+                            self._record_outcome(
+                                result.outcome,
+                                getattr(result, "origin", "standard"),
+                            )
+                    except Exception:
+                        pass
+                    self._refresh_inf_stats()
+                    self.stats.replay_size = len(self.buffer)
         finally:
             if was_training:
                 self.model.train()
@@ -1454,6 +1475,18 @@ class Trainer:
         # the optimizer's lr matches the schedule (and not whatever the
         # restored optimizer state happened to have).
         self._maybe_update_lr()
+        # Seed the eval cadence from the restored gen so the next eval
+        # happens at `gen + eval_every_gens`, not immediately. Without
+        # this, every restart fired an unconditional eval match before
+        # any training happened — at 110-min/match × eval_every_gens
+        # of "0 vs current gen", that's a flat ~110-min wall-time tax
+        # on every restart for an eval that compares the resumed weights
+        # to themselves (champion is ≈ challenger, score ≈ 0.5, no
+        # promotion). Plateau-detection state intentionally NOT
+        # restored: a restart resets the plateau counter, on the
+        # principle that an interrupted run shouldn't carry forward a
+        # stale "no progress" streak.
+        self._last_eval_gen = self.stats.generation
 
 
 def pick_device(preferred: str = "auto") -> torch.device:
