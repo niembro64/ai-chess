@@ -9,7 +9,8 @@
     "build": "vue-tsc && vite build",
     "preview": "vite preview --host",
     "dump-parity": "tsx scripts/dump_parity.ts",
-    "verify-weights": "tsx scripts/verify_weights.ts"
+    "verify-weights": "tsx scripts/verify_weights.ts",
+    "test-mcts-sign": "tsx scripts/test_mcts_sign.ts"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",

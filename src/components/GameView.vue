@@ -134,13 +134,14 @@ function scheduleBotMove(): void {
 
   aiThinking.value = true;
   // Let the UI update before the bot starts computing.
-  setTimeout(() => {
+  setTimeout(async () => {
     if (!aiPlayer || !currentServer || isGameOver.value) {
       aiThinking.value = false;
       return;
     }
-    const move = aiPlayer.getMove(gameState.value);
+    const move = await aiPlayer.getMove(gameState.value);
     aiThinking.value = false;
+    if (!currentServer || isGameOver.value) return;
     currentServer.receiveCommand({ type: 'move', move }, 2);
   }, 50);
 }

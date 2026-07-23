@@ -1,7 +1,7 @@
 // AIPlayer: loads trained weights and generates moves via MCTS.
 
 import { ChessNet, type NetConfig, type SerializedWeights, WDL_SIZE } from './ChessNet';
-import { runMCTS } from './MCTS';
+import { runMCTSAsync } from './MCTS';
 import type { ChessGameState, Move } from '@/types/chess';
 
 // Figure out the ChessNet architecture from the weight tensor shapes so we
@@ -28,10 +28,13 @@ function detectConfigFromWeights(weights: SerializedWeights): NetConfig {
     }
   }
 
+  // value_fc2 is the only 2-D tensor whose output dim is WDL_SIZE; its
+  // input dim is the value head width. (Matching on [64, !=WDL] instead
+  // would collide with SE fc1 on 64-filter nets.)
   let valueHeadSize = 64;
   for (const shape of weights.shapes) {
-    if (shape.length === 2 && shape[0] === 64 && shape[1] !== WDL_SIZE) {
-      valueHeadSize = shape[1];
+    if (shape.length === 2 && shape[1] === WDL_SIZE) {
+      valueHeadSize = shape[0];
       break;
     }
   }
@@ -57,8 +60,11 @@ export class AIPlayer {
     return new AIPlayer(net, sims);
   }
 
-  getMove(state: ChessGameState): Move {
-    return runMCTS(state, this.net, this.sims).move;
+  // Match-play search: no root noise, argmax move selection, and the
+  // async runner yields to the event loop so the UI stays responsive.
+  async getMove(state: ChessGameState): Promise<Move> {
+    const result = await runMCTSAsync(state, this.net, this.sims);
+    return result.move;
   }
 
   dispose(): void {
