@@ -50,9 +50,11 @@ CSV_FIELDS = (
     # granular buckets below.
     "white_wins", "black_wins", "draws", "caps", "tb_adjudications",
     # Granular end-state buckets — canonical source of truth.
-    "mate_w", "mate_b", "stalemate", "draw_50",
+    "mate_w", "mate_b", "resign_w", "resign_b", "stalemate", "draw_50",
     "draw_repetition", "draw_insufficient",
     "tb_w", "tb_b", "tb_d", "cap",
+    # Resign truth-check tallies (held-out resignations, known outcomes).
+    "resign_truth_games", "resign_truth_fp",
     "gen_per_min", "games_per_min", "replay_size",
     "eta_seconds",
     "policy_loss", "value_loss", "total_loss",
@@ -419,6 +421,10 @@ class DashboardLogger:
                 # Granular buckets.
                 "mate_w": getattr(stats, "mate_w", 0),
                 "mate_b": getattr(stats, "mate_b", 0),
+                "resign_w": getattr(stats, "resign_w", 0),
+                "resign_b": getattr(stats, "resign_b", 0),
+                "resign_truth_games": getattr(stats, "resign_truth_games", 0),
+                "resign_truth_fp": getattr(stats, "resign_truth_fp", 0),
                 "stalemate": getattr(stats, "stalemate", 0),
                 "draw_50": getattr(stats, "draw_50", 0),
                 "draw_repetition": getattr(stats, "draw_repetition", 0),
@@ -591,6 +597,7 @@ class DashboardLogger:
         """
         buckets: dict[str, int] = {
             "mate_w": 0, "mate_b": 0,
+            "resign_w": 0, "resign_b": 0,
             "stalemate": 0, "draw_50": 0,
             "draw_repetition": 0, "draw_insufficient": 0,
             "tb_w": 0, "tb_b": 0, "tb_d": 0,
@@ -679,6 +686,10 @@ class DashboardLogger:
         table.add_row(*row("W mate", buckets["mate_w"], "bright_green"))
         table.add_row(*row("B mate", buckets["mate_b"], "bright_red"))
 
+        table.add_row(*section("resigned"))
+        table.add_row(*row("W wins", buckets["resign_w"], "green"))
+        table.add_row(*row("B wins", buckets["resign_b"], "red"))
+
         table.add_row(*section("drawn"))
         table.add_row(*row("stalemate", buckets["stalemate"], "yellow"))
         table.add_row(*row("50-move", buckets["draw_50"], "yellow"))
@@ -693,7 +704,11 @@ class DashboardLogger:
         table.add_row(*section("unresolved"))
         table.add_row(*row("cap", buckets["cap"], "magenta"))
 
-        decisive = buckets["mate_w"] + buckets["mate_b"] + buckets["tb_w"] + buckets["tb_b"]
+        decisive = (
+            buckets["mate_w"] + buckets["mate_b"]
+            + buckets["resign_w"] + buckets["resign_b"]
+            + buckets["tb_w"] + buckets["tb_b"]
+        )
         decisive_frac = decisive / total * 100
         title = (
             f"outcomes  (n={total_actual:,}, decisive={decisive_frac:.1f}%)"

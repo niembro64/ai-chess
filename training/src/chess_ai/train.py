@@ -134,17 +134,21 @@ class TrainConfig:
     # early in training when 30–40% of games go to TB adjudication;
     # the effect shrinks naturally as the model learns to finish games.
     tb_policy_weight: float = 0.5
-    # Resignation in self-play. When the side-to-move's MCTS root_value
-    # falls at or below `resign_threshold` after `resign_min_plies` plies,
-    # end the game with that side losing — saves the cost of running
-    # already-decided games to mate / move-cap. Standard AZ practice;
-    # roughly halves wall time on lopsided games which directly attacks
-    # the GPU starvation bottleneck without changing the algorithm.
+    # Resignation in self-play. When the side-to-move's best VISITED
+    # root child Q (MCTSResult.best_q — "even my best move loses") falls
+    # at or below `resign_threshold` after `resign_min_plies` plies, end
+    # the game with that side losing — saves the cost of running
+    # already-decided games to mate / move-cap. Standard AZ practice.
+    # (Earlier versions triggered on root_value, the root's MEAN Q —
+    # biased pessimistic by forced exploration of the mover's own bad
+    # moves, so it over-fired.)
     #
     # `resign_disabled_prob` is a truth-check sample: that fraction of
-    # would-be resignations is held back and the game plays on, so we
-    # could later measure false-resign rate (true negatives in
-    # diagnostics). 0.0 = always resign on threshold; AZ used 0.10.
+    # would-be resignations is held back and the game plays on; the
+    # engine compares the predicted loss against the actual outcome and
+    # reports the false-positive rate via TrainStats.resign_truth_games
+    # / resign_truth_fp (also in stats.csv). Keep the FP rate under ~5%
+    # (AZ's practice) — raise the threshold toward -1 if it's higher.
     # `resign_min_plies` skips the noisy opening where the value head
     # is least reliable.
     # Set `resign_threshold` to a value <= -1 (or use `0.0`) to disable.
@@ -162,9 +166,12 @@ class TrainConfig:
     # 0.0 disables the clip (pre-commit behavior).
     grad_clip_norm: float = 1.0
     # Label smoothing on the MCTS policy target: mix a tiny uniform prior
-    # over all legal moves to prevent the policy head from collapsing
-    # probability to exactly 0 on moves the current search didn't visit.
-    # Typical: 0.0-0.03. 0 disables.
+    # over the sample's visited-move support (all visited moves are
+    # legal) so the policy head doesn't collapse probability to exactly
+    # 0 on under-visited moves. NOT spread over the full 4096 space —
+    # that reserves eps of the head's mass for illegal moves and adds a
+    # large irreducible floor to the policy loss. Typical: 0.0-0.03.
+    # 0 disables.
     policy_label_smoothing: float = 0.0
     # Auxiliary head (KataGo-style): material balance prediction. Lives
     # outside ChessNet so browser weights are unchanged. Multi-task
@@ -248,6 +255,8 @@ class TrainStats:
     # See selfplay.GameResult for the meaning of each bucket.
     mate_w: int = 0                  # over-the-board white checkmate
     mate_b: int = 0                  # over-the-board black checkmate
+    resign_w: int = 0                # black resigned → white wins
+    resign_b: int = 0                # white resigned → black wins
     stalemate: int = 0               # no legal moves, not in check
     draw_50: int = 0                 # 50-move rule
     draw_repetition: int = 0         # FIDE threefold repetition
@@ -256,6 +265,12 @@ class TrainStats:
     tb_b: int = 0                    # cap-timeout → Syzygy says black wins
     tb_d: int = 0                    # cap-timeout → Syzygy says draw
     cap: int = 0                     # cap-timeout, no tablebase signal
+    # Resign truth-check tallies (held-out would-be resignations that
+    # played on to a known outcome). fp = the would-resign side did NOT
+    # lose. fp/games is the resign false-positive rate — the number the
+    # resign_threshold must be tuned against.
+    resign_truth_games: int = 0
+    resign_truth_fp: int = 0
     # Aggregates (computed on the fly via properties) are exposed below for
     # backward compat with existing callers/CSV readers.
     policy_loss: float = 0.0
@@ -301,13 +316,13 @@ class TrainStats:
 
     @property
     def white_wins(self) -> int:
-        """All games won by white, OTB mate + tablebase-adjudicated."""
-        return self.mate_w + self.tb_w
+        """All games won by white: OTB mate + resignation + tablebase."""
+        return self.mate_w + self.resign_w + self.tb_w
 
     @property
     def black_wins(self) -> int:
-        """All games won by black, OTB mate + tablebase-adjudicated."""
-        return self.mate_b + self.tb_b
+        """All games won by black: OTB mate + resignation + tablebase."""
+        return self.mate_b + self.resign_b + self.tb_b
 
     @property
     def draws(self) -> int:
@@ -340,6 +355,7 @@ class TrainStats:
     origin_outcomes: dict[str, dict[str, int]] = field(default_factory=lambda: {
         origin: {
             "mate_w": 0, "mate_b": 0,
+            "resign_w": 0, "resign_b": 0,
             "stalemate": 0, "draw_50": 0,
             "draw_repetition": 0, "draw_insufficient": 0,
             "tb_w": 0, "tb_b": 0, "tb_d": 0,
@@ -397,6 +413,9 @@ class Trainer:
             weight_decay=self.config.weight_decay,
         )
         self.rng = rng or random.Random()
+        # Numpy generator for vectorized sampling (mirror-augment mask),
+        # seeded from the main rng so the whole run is reproducible.
+        self._np_rng = np.random.default_rng(self.rng.randrange(2**63))
         self.buffer = ReplayBuffer(capacity=self.config.replay_buffer_capacity)
 
         self._mp_self_play = None
@@ -629,17 +648,24 @@ class Trainer:
             self.buffer.sample(self.config.batch_size, self.rng)
         )
         if self.config.mirror_augment_prob > 0:
-            # Use numpy's random state so we don't reseed from a Python
-            # Random; a quick uniform-sample mask is cheap.
-            mask = np.random.random(len(boards_np)) < self.config.mirror_augment_prob
+            # Seeded generator (derived from the trainer's rng) so runs
+            # are reproducible; the old global np.random call was the
+            # one unseeded sampler in the training path.
+            mask = self._np_rng.random(len(boards_np)) < self.config.mirror_augment_prob
             boards_np, policies_np = mirror_batch(boards_np, policies_np, mask)
 
-        # Policy label smoothing: mix a small uniform over the full policy
-        # space into each target. Cheap regularizer that stops the head from
-        # collapsing to zero on unvisited moves.
+        # Policy label smoothing: mix a small uniform over each sample's
+        # visited-move SUPPORT (every visited move is legal). Smoothing
+        # over the full 4096 space — as an earlier version did — forces
+        # the head to reserve eps of its mass for illegal moves and adds
+        # an ~eps·ln(4096/k) irreducible floor to the policy loss (at
+        # eps=0.10 that floor alone was ~1.16 nats, drowning the actual
+        # learning signal in the loss curves).
         eps = self.config.policy_label_smoothing
         if eps > 0:
-            policies_np = (1 - eps) * policies_np + eps / policies_np.shape[1]
+            support = (policies_np > 0).astype(policies_np.dtype)
+            support_size = np.maximum(support.sum(axis=1, keepdims=True), 1.0)
+            policies_np = (1 - eps) * policies_np + eps * (support / support_size)
         t1 = time.perf_counter()
 
         x_flat = torch.from_numpy(boards_np).to(self.device)
@@ -677,10 +703,13 @@ class Trainer:
             draw_w = self.config.value_draw_weight
             # Base weighting: down-weight draws (class-imbalance correction).
             if draw_w != 1.0:
-                # Draw samples have wdl_target = [0, 1, 0] exactly (values
-                # from selfplay are strictly -1 / 0 / +1, so the middle
-                # column of the WDL target is 1 for every drawn sample).
-                is_draw = wdl_target[:, 1] > 0.5
+                # A drawn outcome is exactly value == 0.0. Do NOT infer
+                # draws from wdl_target[:, 1] > 0.5: with value_ply_decay
+                # enabled, decisive labels decay toward 0 and pick up
+                # majority draw mass in the WDL conversion — the earlier
+                # wdl-based test silently half-weighted every decisive
+                # sample more than ~69 plies from game end.
+                is_draw = torch.from_numpy(values_np == 0.0).to(self.device)
                 sample_w = torch.where(
                     is_draw,
                     torch.full_like(per_sample_value, draw_w),
@@ -756,9 +785,18 @@ class Trainer:
         self.model.eval()
         finished = self.engine.step()
         for r in finished:
-            self._record_outcome(r.outcome, getattr(r, "origin", "standard"))
+            self._record_outcome(
+                r.outcome,
+                getattr(r, "origin", "standard"),
+                getattr(r, "resign_truth_fp", None),
+            )
 
-    def _record_outcome(self, outcome: str, origin: str = "standard") -> None:
+    def _record_outcome(
+        self,
+        outcome: str,
+        origin: str = "standard",
+        resign_truth_fp: bool | None = None,
+    ) -> None:
         # Dispatch on the granular outcome label. See selfplay.GameResult for
         # the full set. `origin` selects which per-origin sub-bucket to
         # increment alongside the global counter.
@@ -776,6 +814,11 @@ class Trainer:
         origin_bucket = self.stats.origin_outcomes.get(origin) or self.stats.origin_outcomes["standard"]
         if outcome in origin_bucket:
             origin_bucket[outcome] += 1
+        # Resign truth-check verdicts (held-out would-be resignations).
+        if resign_truth_fp is not None:
+            self.stats.resign_truth_games += 1
+            if resign_truth_fp:
+                self.stats.resign_truth_fp += 1
         self.stats.games_completed += 1
 
     def run(
@@ -804,7 +847,11 @@ class Trainer:
             return
 
         step = 0
-        buffer_size_before = len(self.buffer)
+        # Pace gradient steps on examples ADDED (monotonic counter), not
+        # on buffer growth: len(self.buffer) stops changing once the ring
+        # buffer is full, which silently halted gradient updates for the
+        # rest of the run in an earlier version of this loop.
+        added_before = self.buffer.total_added
         examples_since_grad = 0
         while True:
             if num_steps is not None and step >= num_steps:
@@ -814,8 +861,8 @@ class Trainer:
             step += 1
 
             self.selfplay_step()
-            examples_since_grad += max(0, len(self.buffer) - buffer_size_before)
-            buffer_size_before = len(self.buffer)
+            examples_since_grad += self.buffer.total_added - added_before
+            added_before = self.buffer.total_added
 
             min_new = self.config.min_examples_between_grad_steps
             if (
@@ -883,7 +930,11 @@ class Trainer:
 
                 # Drain any completed-game outcomes and update the counters.
                 for result in self._mp_self_play.drain_results():
-                    self._record_outcome(result.outcome, getattr(result, "origin", "standard"))
+                    self._record_outcome(
+                        result.outcome,
+                        getattr(result, "origin", "standard"),
+                        getattr(result, "resign_truth_fp", None),
+                    )
                 t_b = time.perf_counter()
                 self._ema("t_drain_ms", (t_b - t_a) * 1000.0)
 
@@ -1028,11 +1079,21 @@ class Trainer:
         `starting_state`, if given, is deep-copied so repeated matches from
         the same curated position don't share mutable state. Falls back to
         the standard initial position when None (legacy behavior).
+
+        Search runs CLEAN: dirichlet_epsilon=0.0 (no root noise) and
+        argmax move selection. The first long run left the module-global
+        eps=0.35 leaking into every eval move of both players, which
+        compressed real strength differences toward 0.5 — the promotion
+        gate and plateau detector spent the run measuring noise.
+        Threefold repetition and insufficient material are adjudicated
+        here like in self-play; without them, shuffle games burned the
+        full move cap and landed in "draw", further flattening scores.
         """
         import copy
 
         from .engine import apply_move, create_initial_game_state
         from .mcts import run_batched_mcts
+        from .selfplay import _is_insufficient_material, _position_key
 
         if starting_state is None:
             state = create_initial_game_state()
@@ -1041,17 +1102,27 @@ class Trainer:
             state = copy.deepcopy(starting_state)
             state.status = "active"
         moves_played = 0
+        position_history: dict[bytes, int] = {}
         while True:
             if state.status in ("checkmate", "stalemate", "draw"):
                 break
             if moves_played >= move_cap:
                 return "draw"
+            key = _position_key(state)
+            position_history[key] = position_history.get(key, 0) + 1
+            if position_history[key] >= 3:
+                return "draw"
+            if _is_insufficient_material(state.board):
+                return "draw"
             if state.currentTurn == "white":
                 ev = challenger_eval if challenger_plays_white else champion_eval
             else:
                 ev = champion_eval if challenger_plays_white else challenger_eval
-            # Greedy play: τ=0 (argmax visits).
-            result = run_batched_mcts([state], ev, mcts_sims, self.rng, temperatures=[0.0])
+            # Greedy play: τ=0 (argmax visits), no exploration noise.
+            result = run_batched_mcts(
+                [state], ev, mcts_sims, self.rng,
+                temperatures=[0.0], dirichlet_epsilon=0.0,
+            )
             state = apply_move(state, result[0].move)
             moves_played += 1
 
@@ -1239,6 +1310,7 @@ class Trainer:
                             self._record_outcome(
                                 result.outcome,
                                 getattr(result, "origin", "standard"),
+                                getattr(result, "resign_truth_fp", None),
                             )
                     except Exception:
                         pass

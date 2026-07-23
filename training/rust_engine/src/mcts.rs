@@ -170,6 +170,32 @@ impl MctsSearch {
         self.nodes[0].is_terminal
     }
 
+    /// Q of the best VISITED root child, from the root player's
+    /// perspective: max over children of -(total_value / visit_count).
+    /// This is the resignation statistic — "even my best move loses" —
+    /// unlike the root's mean Q, which is dragged down by the forced
+    /// exploration of the mover's own bad moves and so systematically
+    /// over-triggers resignation. Falls back to the root mean Q when no
+    /// child has been visited yet.
+    fn best_child_q(&self) -> f32 {
+        let root = &self.nodes[0];
+        let mut best: Option<f32> = None;
+        for &(_, ci) in &root.children {
+            let c = &self.nodes[ci as usize];
+            if c.visit_count > 0 {
+                let q = -(c.total_value as f32) / c.visit_count as f32;
+                if best.map_or(true, |b| q > b) {
+                    best = Some(q);
+                }
+            }
+        }
+        best.unwrap_or(if root.visit_count > 0 {
+            (root.total_value / root.visit_count as f64) as f32
+        } else {
+            0.0
+        })
+    }
+
     /// NN-ready encoded board for the root position. Bit-exact with
     /// `chess_ai.encoding.encode_board`.
     fn get_root_board<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -373,10 +399,14 @@ impl MctsSearch {
 
         if legal.is_empty() {
             // Dead end reached (missed by status detection at parent).
+            // No legal moves = checkmate (-1 for the side to move) when
+            // in check, stalemate (0) otherwise — labeling both as 0.0,
+            // as an earlier version did, scores mates as draws.
+            let in_check = is_in_check(&self.states[node].board, white_to_move);
             let n = &mut self.nodes[node];
             n.is_terminal = true;
             n.is_expanded = true;
-            n.terminal_value = 0.0;
+            n.terminal_value = if in_check { -1.0 } else { 0.0 };
             return;
         }
 

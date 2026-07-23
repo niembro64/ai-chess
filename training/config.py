@@ -91,14 +91,18 @@ def build_config() -> TrainConfig:
         # gen/min stops rising with more workers.
         num_workers=6,
         games_per_worker=32,
-        # Self-play MCTS depth. 200 sims produced ~45h ETA on the 3090
-        # AND policy-head collapse — visit distributions were sharp
-        # enough to reinforce whatever biases the policy developed
-        # early, driving it toward confidently-wrong moves. 100 matches
-        # `eval_mcts_sims` so self-play and eval see the same search
-        # strength (which was the original motivation for lifting sims
-        # past 25-30 in the first place).
-        mcts_simulations=100,
+        # Self-play MCTS depth. Sims are the dominant lever on how much
+        # improvement signal the visit target carries over the raw
+        # prior: simulation of the production 100-sim stack showed the
+        # visit argmax matching the true best move only ~45% of the
+        # time vs ~64% at AZ's 800. The earlier "200 sims caused
+        # collapse" episode was misattributed — the collapse came from
+        # the target-corruption bugs since fixed (castling-plane mirror
+        # swap, value ply-decay draw labels, all-node softening), not
+        # from search depth. 200 halves game throughput vs 100 but each
+        # game teaches roughly twice as much; revisit upward if the
+        # value head is learning (value_loss well below ~0.9).
+        mcts_simulations=200,
         # Max time the inference server waits to accumulate requests before
         # dispatching a GPU batch. History: 5ms (pre-Rust, 4 workers) →
         # 8ms (Rust MCTS, 8 workers) → 12ms (once GPU hit 92% we bumped
@@ -130,25 +134,31 @@ def build_config() -> TrainConfig:
         weight_decay=1e-4,
         # Step-decay schedule — rough AlphaZero-style. Steps are gentler
         # (3× per step) than AZ's 10× because our total gen budget is
-        # smaller; sharper steps would destabilize mid-training.
+        # smaller; sharper steps would destabilize mid-training. The
+        # final entry is an explicit floor: runs routinely blow past
+        # target_gens (the first long run spent its last 309k gens —
+        # 78% of all gradient steps — parked at the previous 85k
+        # terminus), so give the schedule one more step instead of
+        # silently freezing.
         lr_schedule=(
             (0,       1e-3),
             (30_000,  3e-4),
             (60_000,  1e-4),
             (85_000,  3e-5),
+            (150_000, 1e-5),
         ),
         use_amp=True,
-        # Mix uniform probability into the MCTS visit target. Protects
-        # against the "policy becomes arbitrarily confident on wrong
-        # moves" failure mode observed at gen 32k: priors reached 0.78
-        # on non-mating moves while mating moves sat at 0.001 — a
-        # self-reinforcing collapse that MCTS alone can't undo at
-        # 100 sims. Previous 0.03 was too low to matter against a
-        # 4096-wide policy (per-move floor ~7e-6). 0.10 caps max
-        # achievable prior and gives every legal move a meaningful
-        # probability floor, bounding how peaky the policy can get
-        # regardless of what MCTS found.
-        policy_label_smoothing=0.10,
+        # Mix uniform probability into the MCTS visit target, spread over
+        # each sample's visited-move support (train.py). Keep this SMALL:
+        # the 0.10 used for most of the first long run — combined with
+        # full-4096 spreading — put the loss floor at ~3 nats and trained
+        # the head toward flatness; the model fit that corrupted target
+        # almost perfectly and plateaued. 0.03 over ~30 legal moves still
+        # gives every legal move a ~1e-3 floor (vs 7e-6 under 4096-wide
+        # spreading at the same eps), which is plenty of anti-collapse
+        # insurance now that the value head actually gets signal (see
+        # value_ply_decay) and mirror augmentation is fixed.
+        policy_label_smoothing=0.03,
         # Value-head class balancing. With the MCTS sign-fix + cap-mask
         # in place, decisive rate in self-play runs at ~60-65% and cap
         # games no longer feed noise into the value loss. That leaves
@@ -156,22 +166,28 @@ def build_config() -> TrainConfig:
         # lightly down-weight draws. (Set higher when decisive rate
         # drops, lower when it's dominated by tb_d / stalemate / etc.)
         value_draw_weight=0.5,
-        # Per-ply decay on value targets. Fixes the policy-collapse
-        # failure mode where every position in a winning game got
-        # label +1, leaving MCTS Q undifferentiated across all winning
-        # moves and the trained policy unable to prefer faster wins.
-        # 0.99 is what Leela/KataGo use; mate-in-1 ≈ 0.99, mate-in-50
-        # ≈ 0.61, mate-in-100 ≈ 0.37 — enough spread for Q to guide
-        # MCTS toward mates without terminal expansion.
-        value_ply_decay=0.99,
-        # Soften self-play MCTS priors. Diagnostic on the 32k-gen
-        # checkpoint showed a collapsed policy with prior 0.67–0.78
-        # on the wrong move vs 0.001–0.015 on the mating move — PUCT
-        # at 100 sims + c_puct=1.5 can't explore past that. Softening
-        # with T=1.5 flattens the prior (e.g. 0.78→0.67, 0.003→0.012)
-        # giving low-prior good moves enough exploration budget to
-        # actually get visited. Only applied at self-play time;
-        # eval keeps the trained policy's sharpness intact.
+        # Per-ply decay on value targets — DISABLED (1.0 = AZ convention:
+        # decisive games label ±1 at every ply). The previous 0.99 was a
+        # training-run-corrupting mistake: the WDL conversion turns label
+        # magnitude into draw probability (P(draw) = 1 - |v|), so at 0.99
+        # every position more than ~69 plies from game end in a WON game
+        # got a majority-draw target. The value head was explicitly
+        # trained to output ~0 for all openings/middlegames, leaving
+        # MCTS Q with no early-game guidance and resign unreachable.
+        # (The Leela/KataGo "0.99" being imitated does not decay the WDL
+        # outcome label — their mate-distance signal lives in separate
+        # heads.) "Prefer faster wins" should come from search terminal
+        # handling, not from corrupting outcome labels.
+        value_ply_decay=1.0,
+        # Soften self-play MCTS priors — ROOT ONLY (mcts.py). Diagnostic
+        # on the 32k-gen checkpoint showed a collapsed policy with prior
+        # 0.67–0.78 on the wrong move vs 0.001–0.015 on the mating move;
+        # root softening gives low-prior moves enough exploration budget
+        # to get visited. An earlier version softened EVERY node's priors
+        # (root + all leaf expansions), which flattened Q estimates
+        # throughout the tree and reduced the whole search to exploration
+        # noise at low sim counts. Eval keeps the trained policy's
+        # sharpness intact (softening is a self-play-only argument).
         self_play_policy_softening_temperature=1.5,
         # Down-weight policy loss on TB-adjudicated game samples. Those
         # games went to cap/50-move without MCTS finding a forcing line;
@@ -184,14 +200,18 @@ def build_config() -> TrainConfig:
         # model learns to finish games on its own.
         tb_policy_weight=0.5,
         # Resignation: end self-play games early when the side-to-move's
-        # MCTS root_value is at or below `resign_threshold` after at least
-        # `resign_min_plies` plies. Saves the cost of running already-
-        # decided games to mate / cap — direct attack on the GPU
-        # starvation bottleneck. AZ-standard knobs: -0.85 / 0.10 / 20.
+        # best visited root-child Q ("even my best move loses") is at or
+        # below `resign_threshold` after at least `resign_min_plies`
+        # plies. Saves the cost of running already-decided games to
+        # mate / cap. AZ-standard knobs: -0.85 / 0.10 / 20.
         # `resign_disabled_prob` is a held-back fraction of would-be
-        # resignations that play on, so the threshold can be calibrated
-        # against actual outcomes (engine.resign_truth_checks counter).
-        # Set `resign_threshold <= -1.0` to disable.
+        # resignations that play on; the false-positive rate they reveal
+        # is tracked in TrainStats.resign_truth_games/resign_truth_fp
+        # and written to stats.csv — keep FP under ~5%, raise the
+        # threshold toward -1.0 if it runs higher. Resigned games land
+        # in their own resign_w/resign_b outcome buckets so mate-rate
+        # diagnostics stay honest. Set `resign_threshold <= -1.0` to
+        # disable.
         resign_threshold=-0.85,
         resign_disabled_prob=0.10,
         resign_min_plies=20,
@@ -227,26 +247,27 @@ def build_config() -> TrainConfig:
 
         # ---- MCTS ----
         # Dirichlet noise at root injects exploration into self-play
-        # prior probabilities. Module default is 0.25 (AZ's setting);
-        # we bump to 0.35 because our self-play policy kept over-
-        # committing — the model collapsed into a narrow style that
-        # exploits itself but misses basic tactics in eval against
-        # differently-trained opponents (e.g. mate-in-1s the policy
-        # ranked low). More root noise = more off-policy exploration
-        # during training, which diversifies the examples that feed
-        # back into the policy head. None for the others keeps module
-        # defaults (c_puct=1.5, dirichlet_alpha=0.3).
+        # prior probabilities. Back to AZ's 0.25: the 0.35 bump (an
+        # anti-collapse patch) meant ~1/3 of every 100-sim budget chased
+        # noise moves, and at that ratio ~17% of the visit-count
+        # TRAINING TARGET was noise-following — the exploration knob was
+        # eating the improvement operator. Exploration should come from
+        # sims (raised to 200) and root softening, not from drowning
+        # the target. Noise is self-play-only; eval passes epsilon=0.
+        # None for the others keeps module defaults (c_puct=1.5,
+        # dirichlet_alpha=0.3).
         c_puct=None,
         dirichlet_alpha=None,
-        dirichlet_epsilon=0.35,
+        dirichlet_epsilon=0.25,
         # Widen PUCT at self-play only (eval keeps c_puct=1.5 default
-        # for sharp exploitation). 2.5 gives low-prior moves ~67% more
-        # exploration bonus than the 1.5 default — on a sharp prior of
-        # 0.005 at 60 visits, U goes from 0.058 to 0.097, enough to
-        # start tipping the selection when Q deltas are small. Paired
-        # with policy softening (T=1.5), this gives MCTS a real chance
-        # to escape the collapsed prior at low sim counts.
-        self_play_c_puct=2.5,
+        # for sharp exploitation). 2.0 gives low-prior moves more
+        # exploration bonus than the 1.5 default without the flattening
+        # overshoot of the earlier 2.5 (stacked with noise + softening
+        # it pushed root Q modulation of the visit distribution down to
+        # a ~2-5x tilt on a noisy prior — barely an improvement
+        # operator). AZ's own chess setting was ~2.0-2.5 at 800 sims;
+        # at our 200 sims 2.0 is the right side to err on.
+        self_play_c_puct=2.0,
         # First-Play Urgency reduction — AlphaZero/Leela-standard PUCT
         # refinement. Unvisited children get an initial Q of
         # `parent_Q - fpu_reduction` instead of 0. This pessimizes
@@ -324,7 +345,7 @@ def build_config() -> TrainConfig:
         eval_rotating_openings=10,
         # Plateau grace period. Early evals are mostly draws (noise, not
         # signal) so we need a long buffer before stop-training fires.
-        # ~10 failed evals × 1000 gens ≈ 10k gens of headroom.
+        # 10 failed evals × eval_every_gens (10k) = 100k gens of headroom.
         max_plateau_evals=10,
 
         # ---- Logging ----

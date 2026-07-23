@@ -1,11 +1,15 @@
 """Resign mechanism tests.
 
 Resignation lets self-play end games early once the side-to-move's MCTS
-root_value drops below a threshold. The training labels are identical to
-a checkmate (the resigning side gets value=-1, opponent +1), folded into
-the mate_w / mate_b outcome buckets. Diagnostic counters live on the
-engine: `resigns` (actual resigns) and `resign_truth_checks` (held-back
-sample of would-be resigns that play on for calibration).
+best visited-child Q (`MCTSResult.best_q` — "even my best move loses")
+drops below a threshold. The training labels are identical to a
+checkmate (the resigning side gets value=-1, opponent +1), but resigns
+land in their own resign_w / resign_b outcome buckets so mate-rate
+diagnostics stay honest. Diagnostic counters live on the engine:
+`resigns` (actual resigns), `resign_truth_checks` (held-back would-be
+resigns that play on), and `resign_truth_finished` / `resign_truth_fps`
+(held-back games scored against their real outcome — the resign
+false-positive rate).
 
 These tests don't run a real network — they directly poke `MCTSResult`
 returns and verify the engine takes the right branch.
@@ -58,8 +62,8 @@ def _build_engine(tiny_model: ChessNet, **cfg_kwargs):
 
 def _patched_mcts_with_value(value: float):
     """Return a function that replaces run_batched_mcts with a stub that
-    yields the given root_value (and arbitrary policy / move) for every
-    game in the batch."""
+    yields the given root_value AND best_q (the resign trigger) plus an
+    arbitrary policy / move for every game in the batch."""
     def _stub(states, evaluator, sims, rng, temperatures, policy_softening_temperature=1.0):
         results = []
         for st in states:
@@ -70,13 +74,15 @@ def _patched_mcts_with_value(value: float):
             legal = get_legal_moves(st)
             mv = legal[0]
             policy[move_to_index(mv, st.currentTurn == "white")] = 1.0
-            results.append(MCTSResult(policy=policy, move=mv, root_value=value))
+            results.append(
+                MCTSResult(policy=policy, move=mv, root_value=value, best_q=value)
+            )
         return results
     return _stub
 
 
 def test_resign_triggers_below_threshold(tiny_model: ChessNet):
-    """root_value <= threshold past min_plies → engine ends the game."""
+    """best_q <= threshold past min_plies → engine ends the game."""
     engine = _build_engine(
         tiny_model,
         resign_threshold=-0.85,
@@ -89,10 +95,42 @@ def test_resign_triggers_below_threshold(tiny_model: ChessNet):
     assert len(finished) == 2
     assert engine.resigns == 2
     assert engine.resign_truth_checks == 0
-    # Outcome is mate_w or mate_b (resigning side loses).
+    # Resigns get their own outcome buckets (resigning side loses).
     for r in finished:
-        assert r.outcome in ("mate_w", "mate_b")
+        assert r.outcome in ("resign_w", "resign_b")
         assert r.outcome_label.endswith("resigns")
+        assert r.resign_truth_fp is None
+
+
+def test_resign_trigger_uses_best_q_not_root_value(tiny_model: ChessNet):
+    """A pessimistic mean Q (root_value) must NOT trigger resignation
+    when the best child Q says the position is fine — the mean is
+    dragged down by forced exploration of the mover's own bad moves."""
+    engine = _build_engine(
+        tiny_model,
+        resign_threshold=-0.85,
+        resign_disabled_prob=0.0,
+        resign_min_plies=0,
+    )
+
+    def _stub(states, evaluator, sims, rng, temperatures, policy_softening_temperature=1.0):
+        from chess_ai.encoding import move_to_index
+        from chess_ai.engine import get_legal_moves
+        results = []
+        for st in states:
+            policy = np.zeros(4096, dtype=np.float32)
+            legal = get_legal_moves(st)
+            mv = legal[0]
+            policy[move_to_index(mv, st.currentTurn == "white")] = 1.0
+            results.append(
+                MCTSResult(policy=policy, move=mv, root_value=-0.95, best_q=0.1)
+            )
+        return results
+
+    with patch("chess_ai.selfplay.run_batched_mcts", _stub):
+        finished = engine.step()
+    assert engine.resigns == 0
+    assert len(finished) == 0
 
 
 def test_resign_skipped_above_threshold(tiny_model: ChessNet):
@@ -140,6 +178,36 @@ def test_resign_truth_check_holds_back(tiny_model: ChessNet):
     assert engine.resign_truth_checks == 2
     # Game does NOT end on this step (the move is applied normally).
     assert len(finished) == 0
+
+
+def test_resign_truth_check_measures_false_positives(tiny_model: ChessNet):
+    """A held-out would-be resignation that goes on to NOT lose must be
+    scored as a false positive on the engine counters and the
+    GameResult. Build it synthetically: mark the slot as truth-checked
+    for white, then finish via stalemate (a draw — white didn't lose)."""
+    engine = _build_engine(
+        tiny_model,
+        resign_threshold=-0.85,
+        resign_disabled_prob=1.0,
+        resign_min_plies=0,
+    )
+    slot = engine.games[0]
+    slot.resign_truth_color = "white"
+    slot.state.status = "stalemate"
+    result = engine._finish_game(slot)
+    assert result.resign_truth_fp is True
+    assert engine.resign_truth_finished == 1
+    assert engine.resign_truth_fps == 1
+
+    # And the true-positive case: white was flagged and white lost.
+    slot2 = engine.games[1]
+    slot2.resign_truth_color = "white"
+    slot2.state.status = "checkmate"
+    slot2.state.currentTurn = "white"  # white to move with no moves = white lost
+    result2 = engine._finish_game(slot2)
+    assert result2.resign_truth_fp is False
+    assert engine.resign_truth_finished == 2
+    assert engine.resign_truth_fps == 1
 
 
 def test_resign_disabled_when_threshold_below_neg1(tiny_model: ChessNet):

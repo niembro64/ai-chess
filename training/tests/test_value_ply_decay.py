@@ -99,24 +99,25 @@ def test_decay_one_reproduces_alphazero_convention():
 
 
 def test_decay_applies_per_ply():
-    """With decay < 1, position i plies from terminal gets value
-    decay**i. Last example (i=1) nearly full magnitude; first example
-    (i=n) exponentially smaller."""
+    """With decay < 1, position k plies from terminal gets value
+    decay**k. Last example (the position the winning move was played
+    from, k=0) keeps the FULL ±1 magnitude; first example (k=n-1) is
+    exponentially smaller."""
     n = 10
     decay = 0.9
     slot = _fake_slot(n, ["white"] * n)
     out = _collect_examples(slot, decay=decay)
     assert len(out) == n
 
-    # The last example was recorded 1 ply from mate (the position the
-    # winning move was played from). The first was n plies from mate.
     for i, ex in enumerate(out):
-        plies_from_end = n - i
+        plies_from_end = n - 1 - i
         expected = (decay ** plies_from_end) * 1.0  # outcome = +1
         assert ex.value == pytest.approx(expected, rel=1e-6), (
             f"example {i}: got {ex.value}, expected {expected} "
             f"(plies_from_end={plies_from_end})"
         )
+    # The winning move's position must carry the undecayed label.
+    assert out[-1].value == pytest.approx(1.0)
 
 
 def test_decay_flips_sign_by_side_to_move():
@@ -130,7 +131,7 @@ def test_decay_flips_sign_by_side_to_move():
     slot = _fake_slot(n, turn_colors)
     out = _collect_examples(slot, decay=decay)
     for i, ex in enumerate(out):
-        plies_from_end = n - i
+        plies_from_end = n - 1 - i
         mag = decay ** plies_from_end
         expected = mag if turn_colors[i] == "white" else -mag
         assert ex.value == pytest.approx(expected, rel=1e-6)

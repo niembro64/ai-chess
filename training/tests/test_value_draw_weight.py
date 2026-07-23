@@ -101,20 +101,26 @@ def test_draw_weight_reduces_loss_magnitude_for_draw_heavy_batch():
 
 
 def test_weighting_detects_draws_correctly():
-    """Construct a batch with known draw/decisive mix, check that our
-    `is_draw` detection via `wdl_target[:, 1] > 0.5` matches the input
-    values. This is the load-bearing invariant: any draw (value=0) must
-    be flagged, any decisive (value≠0) must not be.
+    """The load-bearing invariant: any draw (value=0) must be flagged,
+    any decisive (value≠0) must NOT be — including decayed decisive
+    labels like ±0.3, whose WDL target has majority draw mass. The old
+    `wdl_target[:, 1] > 0.5` heuristic failed exactly there, silently
+    half-weighting every decisive sample far from game end whenever
+    value_ply_decay < 1. Detection must key off the raw value.
     """
-    values = np.array([-1.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0], dtype=np.float32)
-    wdl = values_to_wdl_targets(values)
-    # Our detection heuristic:
-    is_draw = wdl[:, 1] > 0.5
-    expected_draw = values == 0.0
-    assert (is_draw == expected_draw).all(), (
-        f"Draw detection mismatch. values={values}, wdl[:, 1]={wdl[:, 1]}, "
-        f"detected={is_draw}, expected={expected_draw}"
+    values = np.array(
+        [-1.0, 0.0, 1.0, 0.0, -0.3, 0.3, 0.0, 0.99], dtype=np.float32
     )
+    wdl = values_to_wdl_targets(values)
+    # The detection now used in train_step:
+    is_draw = values == 0.0
+    expected_draw = np.array(
+        [False, True, False, True, False, False, True, False]
+    )
+    assert (is_draw == expected_draw).all()
+    # And document why the wdl heuristic was wrong: decayed decisive
+    # samples have majority draw mass in WDL space.
+    assert (wdl[[4, 5], 1] > 0.5).all()
 
 
 def test_weighted_loss_numerics_match_formula():

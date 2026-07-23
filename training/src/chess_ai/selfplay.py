@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from . import tablebase
-from .encoding import POLICY_SIZE, encode_board, move_to_index
+from .encoding import POLICY_SIZE, encode_board
 from .engine import (
     CastlingRights,
     ChessGameState,
@@ -91,9 +91,14 @@ class GameSlot:
     # and insufficient-material is FIDE rules glue layered on top of
     # legal-move generation.
     early_termination: str | None = None
-    # Set when the side-to-move resigns (MCTS root_value <= threshold).
+    # Set when the side-to-move resigns (MCTS best-child Q <= threshold).
     # The named color loses; opponent gets the win. None = no resign.
     resigned_color: str | None = None
+    # First color that hit the resign threshold while sampled into the
+    # truth-check holdout (resign_disabled_prob). The game plays on;
+    # _finish_game compares the predicted loss against the actual
+    # outcome to measure the resign false-positive rate.
+    resign_truth_color: str | None = None
 
 
 def _position_key(state: ChessGameState) -> bytes:
@@ -186,11 +191,22 @@ class GameResult:
     #   tb_b              — cap-timeout, Syzygy adjudicated as black win
     #   tb_d              — cap-timeout, Syzygy adjudicated as draw
     #   cap               — cap-timeout, no tablebase signal (scored 0)
+    #   resign_w          — black resigned, white wins
+    #   resign_b          — white resigned, black wins
+    # Resigns get their own buckets (value labels are identical to a
+    # mate) so "natural mate rate" diagnostics aren't inflated by games
+    # the value head merely predicted as lost.
     outcome: str
     outcome_label: str        # human string for logging
     white_outcome: float      # [-1, 1]
     tb_adjudicated: bool = False  # True iff outcome came from Syzygy
     origin: str = "standard"  # propagated from GameSlot; see above
+    # Resign truth-check verdict. None = this game had no held-out
+    # resign trigger. False = the would-resign side did lose (threshold
+    # was right). True = it did NOT lose (draw or win) — a resign
+    # false-positive that would have thrown away a half point or more.
+    # Only set when the final outcome is actually known (not cap-guess).
+    resign_truth_fp: bool | None = None
 
 
 # --- Replay buffer (ring, fixed capacity) ---
@@ -213,11 +229,17 @@ class ReplayBuffer:
         self._policy_weights = np.ones((capacity,), dtype=np.float32)
         self._size = 0
         self._head = 0
+        # Monotonic count of examples ever added. Unlike len(), this keeps
+        # growing after the ring fills — gradient-step pacing must diff
+        # this, not len(): diffing len() stops counting (and therefore
+        # stops ALL gradient steps) the moment the buffer reaches capacity.
+        self.total_added = 0
 
     def __len__(self) -> int:
         return self._size
 
     def add(self, ex: TrainingExample) -> None:
+        self.total_added += 1
         i = self._head
         self._boards[i] = ex.board
         self._policies[i] = ex.policy
@@ -467,13 +489,17 @@ def mirror_batch(
         return boards, policies
     idx = np.where(mask)[0]
 
-    # Board mirror: flip file axis, then swap the castling-rights plane pairs
-    # (own K-side <-> own Q-side, opp K-side <-> opp Q-side). Piece/EP planes
-    # are spatial so the file flip does the right thing; constant planes
-    # (bias/halfmove/fullmove) are unaffected.
+    # Board mirror: flip the file axis. Castling planes stay UNSWAPPED:
+    # because the encoder 180°-rotates for black (rank AND file), white's
+    # encoded own-kingside geometry is already the file-mirror of black's
+    # encoded own-kingside geometry — so in encoded space the file flip
+    # maps own-K-side to own-K-side. (Swapping the plane pairs here, as an
+    # earlier version did, decorrelates the castling planes from castle
+    # geometry and makes them unlearnable on 50% of samples.) Piece/EP
+    # planes are spatial so the file flip does the right thing; constant
+    # planes (bias/halfmove/fullmove) are unaffected.
     b = boards[idx].reshape(-1, 8, 8, NUM_PLANES)
     b = b[:, :, ::-1, :].copy()
-    b[:, :, :, [15, 16, 17, 18]] = b[:, :, :, [16, 15, 18, 17]]
     boards = boards.copy()
     boards[idx] = b.reshape(len(idx), -1)
 
@@ -620,6 +646,13 @@ class SelfPlayEngine:
         # back (resign_truth_checks). Useful for tuning the threshold.
         self.resigns: int = 0
         self.resign_truth_checks: int = 0
+        # Truth-check verdicts, counted per GAME with a known outcome:
+        # finished = held-out games scored, fps = the would-resign side
+        # did NOT lose (false positive — resign would have thrown away
+        # a half point or more). fps/finished is the resign FP rate the
+        # threshold must be tuned against; AZ kept it under ~5%.
+        self.resign_truth_finished: int = 0
+        self.resign_truth_fps: int = 0
 
     def step(self) -> list[GameResult]:
         """Advance every active game by one move. Returns results for games that ended this step."""
@@ -643,17 +676,12 @@ class SelfPlayEngine:
             policy = mcts_results[i].policy
             move = mcts_results[i].move
 
-            # Record training example (pre-move state).
+            # Record training example (pre-move state). MCTS places visit
+            # mass only on legal-move indices, so its returned policy IS
+            # the canonical training target — an earlier version re-derived
+            # the legal moves and copied the same entries index-by-index,
+            # a bit-identical no-op costing one get_legal_moves per ply.
             board = encode_board(slot.state)
-            legal = get_legal_moves(slot.state)
-            is_white = slot.state.currentTurn == "white"
-            canon_policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-            seen: set[int] = set()
-            for m in legal:
-                mi = move_to_index(m, is_white)
-                if mi not in seen:
-                    seen.add(mi)
-                    canon_policy[mi] = policy[mi]
 
             # Phase 1 of the reward refactor: pure-outcome value target, so we
             # no longer compute the hand-crafted positional score here.
@@ -663,19 +691,23 @@ class SelfPlayEngine:
             slot.examples.append(
                 GameSlotExample(
                     board=board,
-                    policy=canon_policy,
+                    policy=policy,
                     turn_color=slot.state.currentTurn,
                     position_score=0.0,
                 )
             )
 
-            # Resignation: the MCTS root_value is from the side-to-move's
-            # perspective. If it's at or below the threshold and we're
-            # past the noisy opening, this side is essentially lost. End
-            # the game now (saves the cost of playing it out to mate /
-            # cap), unless we're sampled into the truth-check holdout
-            # (resign_disabled_prob fraction). The resigning side loses;
-            # the opponent gets the win in `_finish_game`.
+            # Resignation: trigger on the best VISITED child's Q ("even
+            # my best move loses"), from the side-to-move's perspective.
+            # NOT on root_value — the root's mean Q averages over the
+            # forced exploration of the mover's own bad moves, which
+            # biases it pessimistic and over-fires resignation. If best_q
+            # is at or below the threshold past the noisy opening, this
+            # side is essentially lost. End the game now (saves the cost
+            # of playing it out to mate / cap), unless we're sampled into
+            # the truth-check holdout (resign_disabled_prob fraction).
+            # The resigning side loses; the opponent gets the win in
+            # `_finish_game`.
             #
             # The training example for this position is already recorded
             # above — its value label will be propagated as a normal loss
@@ -684,12 +716,15 @@ class SelfPlayEngine:
             if (
                 rt > -1.0
                 and slot.move_count >= self.config.resign_min_plies
-                and mcts_results[i].root_value <= rt
+                and mcts_results[i].best_q <= rt
             ):
                 if self.rng.random() < self.config.resign_disabled_prob:
-                    # Truth-check sample — do not resign; play on so we
-                    # can later compare predicted-loss to actual outcome.
+                    # Truth-check sample — do not resign; play on so
+                    # _finish_game can compare predicted-loss to the
+                    # actual outcome (false-positive measurement).
                     self.resign_truth_checks += 1
+                    if slot.resign_truth_color is None:
+                        slot.resign_truth_color = slot.state.currentTurn
                 else:
                     self.resigns += 1
                     slot.resigned_color = slot.state.currentTurn
@@ -745,17 +780,17 @@ class SelfPlayEngine:
 
         if slot.resigned_color is not None:
             # Resign branch — short-circuits all the natural-end logic.
-            # Resigning side loses; opponent wins. Folded into mate_w /
-            # mate_b for the outcome buckets so the value-head training
-            # signal matches a checkmate (the training labels are
-            # identical). Diagnostic split lives on engine.resigns.
+            # Resigning side loses; opponent wins. Training value labels
+            # are identical to a mate, but the outcome bucket is kept
+            # separate (resign_w/resign_b) so mate-rate diagnostics
+            # measure games the search actually finished.
             if slot.resigned_color == "white":
-                outcome = "mate_b"
+                outcome = "resign_b"
                 label = "white resigns"
                 white_outcome = -1.0
                 self.black_wins += 1
             else:
-                outcome = "mate_w"
+                outcome = "resign_w"
                 label = "black resigns"
                 white_outcome = 1.0
                 self.white_wins += 1
@@ -843,13 +878,17 @@ class SelfPlayEngine:
         # (mate, stalemate, 50-move, tb_*) has a real label; flag it as
         # such so the trainer weights its value loss accordingly.
         outcome_known = outcome != "cap"
-        # Policy-loss weight: discount TB-adjudicated games because their
-        # MCTS visit distributions came from play that never found a
-        # forcing line (Syzygy labeled the outcome post-hoc). See config
-        # docstring. Applied per-game (every example in a TB-adjudicated
-        # game shares the same discount).
+        # Policy-loss weight: discount games whose MCTS visit
+        # distributions came from play that never found a forcing line —
+        # TB-adjudicated games (Syzygy labeled the outcome post-hoc) AND
+        # unadjudicated cap games (the most meandering play of all; an
+        # earlier version discounted only the TB case, which left the
+        # least informative distributions at full weight). See config
+        # docstring. Applied per-game.
         policy_weight = (
-            self.config.tb_policy_weight if tb_adjudicated else 1.0
+            self.config.tb_policy_weight
+            if (tb_adjudicated or not outcome_known)
+            else 1.0
         )
 
         # Per-ply value decay: positions close to terminal get magnitude
@@ -857,12 +896,19 @@ class SelfPlayEngine:
         # head to rank mate-in-1 > mate-in-20 > "merely winning" —
         # otherwise MCTS Q is undifferentiated across all winning moves
         # and can't guide search toward faster wins. The last example
-        # in slot.examples is the position just before the terminal
-        # move, so plies_from_end indexes from the end.
+        # in slot.examples is the position the winning move was played
+        # from — it gets the undecayed label (decay^0 = ±1).
+        #
+        # CAUTION if re-enabling decay < 1: the WDL conversion turns
+        # decayed magnitude into draw probability (P(draw) = 1 - |v|),
+        # so aggressive decay labels early-game positions of decisive
+        # games as draws. That corrupted a full training run at 0.99
+        # (P(draw) > 0.5 beyond ~69 plies from the end). Keep any decay
+        # mild enough that |v| stays near 1 over real game lengths.
         decay = self.config.value_ply_decay
         n = len(slot.examples)
         for i, ex in enumerate(slot.examples):
-            plies_from_end = n - i
+            plies_from_end = n - 1 - i
             ply_factor = decay ** plies_from_end if decay != 1.0 else 1.0
             outcome_from_persp = white_outcome if ex.turn_color == "white" else -white_outcome
             value = outcome_from_persp * ply_factor * win_weight
@@ -878,6 +924,23 @@ class SelfPlayEngine:
         if len(self.recent_game_lengths) > 100:
             self.recent_game_lengths = self.recent_game_lengths[-100:]
 
+        # Resign truth-check: this game had a held-out resign trigger
+        # and played on. Compare the prediction ("resign_truth_color is
+        # lost") against what actually happened. Only score it when the
+        # outcome is real — cap-timeouts without adjudication are a
+        # guess, not a verdict.
+        resign_truth_fp: bool | None = None
+        if slot.resign_truth_color is not None and outcome_known:
+            lost = (
+                white_outcome < 0.0
+                if slot.resign_truth_color == "white"
+                else white_outcome > 0.0
+            )
+            resign_truth_fp = not lost
+            self.resign_truth_finished += 1
+            if resign_truth_fp:
+                self.resign_truth_fps += 1
+
         return GameResult(
             move_count=slot.move_count,
             outcome=outcome,
@@ -885,4 +948,5 @@ class SelfPlayEngine:
             white_outcome=white_outcome,
             tb_adjudicated=tb_adjudicated,
             origin=slot.origin,
+            resign_truth_fp=resign_truth_fp,
         )

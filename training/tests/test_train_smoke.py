@@ -61,7 +61,16 @@ def test_train_loop_runs_and_checkpoints(tmp_path: Path):
     )
 
     checkpoint_dir = tmp_path / "ckpt"
-    trainer.run(num_steps=40, checkpoint_dir=checkpoint_dir)
+    # 420 steps: gradient updates only start once a game FINISHES and
+    # fills the buffer to min_examples. Standard starts draw move caps
+    # in [200, 400], so 420 guarantees every slot's first game ends
+    # (mate/draw or cap) regardless of seed. The historical 40-step
+    # budget only worked because the old resign logic triggered on root
+    # MEAN Q — a random-init value head dips below the threshold almost
+    # immediately, so games "finished" by spurious resignation at
+    # ~ply 20. The fixed best-child-Q trigger doesn't fire on random
+    # nets, and games now run their full length.
+    trainer.run(num_steps=420, checkpoint_dir=checkpoint_dir)
 
     # Artifacts exist
     assert (checkpoint_dir / "latest.pt").exists()
@@ -99,7 +108,7 @@ def test_train_loop_runs_and_checkpoints(tmp_path: Path):
     assert torch.allclose(w1, w2, atol=2e-3)
 
     # Stats have sensible values
-    assert trainer.stats.step == 40
+    assert trainer.stats.step == 420
     assert trainer.stats.generation > 0
     assert trainer.stats.replay_size > 0
     # Losses are finite

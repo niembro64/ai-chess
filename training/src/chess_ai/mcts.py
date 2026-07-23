@@ -98,7 +98,13 @@ class MCTSNode:
 class MCTSResult:
     policy: np.ndarray       # [POLICY_SIZE] visit-based policy target
     move: Move               # Sampled move
-    root_value: float        # Root Q (for logging)
+    root_value: float        # Root mean Q (for logging)
+    # Q of the best VISITED root child from the mover's perspective —
+    # "the value if I play my best move." This is the resignation
+    # statistic: root_value (mean Q over all sims) is dragged down by
+    # forced exploration of the mover's own bad moves, so triggering
+    # resign on it systematically over-fires.
+    best_q: float = 0.0
 
 
 class MCTSSearch:
@@ -122,10 +128,19 @@ class MCTSSearch:
     def get_root_board(self) -> np.ndarray:
         return encode_board(self.root.state)
 
-    def init_root(self, policy: np.ndarray, value: float) -> None:
-        """Populate the root's children with priors from the NN, add Dirichlet noise."""
+    def init_root(
+        self,
+        policy: np.ndarray,
+        value: float,
+        dirichlet_epsilon: float | None = None,
+    ) -> None:
+        """Populate the root's children with priors from the NN, add Dirichlet noise.
+
+        `dirichlet_epsilon=None` uses the module-global (self-play);
+        pass 0.0 to disable root noise entirely (eval/match play).
+        """
         self._expand_with_policy(self.root, policy)
-        _add_dirichlet_noise(self.root)
+        _add_dirichlet_noise(self.root, dirichlet_epsilon)
         _backpropagate(self.root, value)
 
     def select_leaf(self) -> np.ndarray | None:
@@ -164,7 +179,13 @@ class MCTSSearch:
         root_value = (
             self.root.total_value / self.root.visit_count if self.root.visit_count > 0 else 0.0
         )
-        return MCTSResult(policy=policy, move=move, root_value=root_value)
+        visited_qs = [
+            -c.total_value / c.visit_count
+            for c in self.root.children.values()
+            if c.visit_count > 0
+        ]
+        best_q = max(visited_qs) if visited_qs else root_value
+        return MCTSResult(policy=policy, move=move, root_value=root_value, best_q=best_q)
 
     # --- internals ---
 
@@ -184,12 +205,20 @@ class MCTSSearch:
             pass
         else:
             # Root node with status "waiting" or unexpected value — fall back to
-            # the safe (but expensive) check.
+            # the safe (but expensive) check. No legal moves means checkmate
+            # when the side to move is in check (value -1 from their
+            # perspective), stalemate otherwise. (An earlier version labeled
+            # both cases 0.0, scoring mates as draws on this path.)
             moves = get_legal_moves(node.state)
             if not moves:
+                from .engine import is_in_check
                 node.is_terminal = True
                 node.is_expanded = True
-                node.terminal_value = 0.0
+                node.terminal_value = (
+                    -1.0
+                    if is_in_check(node.state.board, node.state.currentTurn)
+                    else 0.0
+                )
 
     def _expand_with_policy(self, node: MCTSNode, policy: np.ndarray) -> None:
         # `expand_children` bundles get_legal_moves + one apply_move per child
@@ -198,9 +227,14 @@ class MCTSSearch:
         # the MCTS hot path — ~30 Python/Rust crossings per expansion → 1.
         children = expand_children(node.state)
         if not children:
+            from .engine import is_in_check
             node.is_terminal = True
             node.is_expanded = True
-            node.terminal_value = 0.0
+            node.terminal_value = (
+                -1.0
+                if is_in_check(node.state.board, node.state.currentTurn)
+                else 0.0
+            )
             return
 
         is_white = node.state.currentTurn == "white"
@@ -250,8 +284,15 @@ def _select_child(node: MCTSNode) -> MCTSNode:
     best_score = -math.inf
     best_child: MCTSNode | None = None
     sqrt_parent = math.sqrt(max(node.visit_count, 1))
+    # FPU (First-Play Urgency): unvisited children start at parent_Q -
+    # FPU_REDUCTION in parent-perspective, matching the Rust search
+    # (mcts.rs select_child). Previously this path hard-coded q=0 for
+    # unvisited children, silently diverging from Rust whenever
+    # CHESS_AI_PYTHON_MCTS=1 was set.
+    parent_q = node.total_value / node.visit_count if node.visit_count > 0 else 0.0
+    q_unvisited = parent_q - FPU_REDUCTION
     for child in node.children.values():
-        q = -child.total_value / child.visit_count if child.visit_count > 0 else 0.0
+        q = -child.total_value / child.visit_count if child.visit_count > 0 else q_unvisited
         u = C_PUCT * child.prior * sqrt_parent / (1 + child.visit_count)
         score = q + u
         if score > best_score:
@@ -309,13 +350,14 @@ def _sample_move(root: MCTSNode, rng: random.Random, temperature: float = 1.0) -
     return best_child.move
 
 
-def _add_dirichlet_noise(root: MCTSNode) -> None:
+def _add_dirichlet_noise(root: MCTSNode, epsilon: float | None = None) -> None:
+    eps = DIRICHLET_EPSILON if epsilon is None else epsilon
     n = len(root.children)
-    if n == 0:
+    if n == 0 or eps <= 0.0:
         return
     noise = np.random.dirichlet([DIRICHLET_ALPHA] * n)
     for i, child in enumerate(root.children.values()):
-        child.prior = (1 - DIRICHLET_EPSILON) * child.prior + DIRICHLET_EPSILON * float(noise[i])
+        child.prior = (1 - eps) * child.prior + eps * float(noise[i])
 
 
 # --- Batched MCTS across many games ---
@@ -383,6 +425,7 @@ def _run_batched_mcts_rust(
     rng: random.Random,
     temperatures: list[float],
     policy_softening_temperature: float,
+    dirichlet_epsilon: float,
 ) -> list[MCTSResult]:
     """Rust-backed MCTS loop. Same semantics as the Python path; ~20× faster
     per-sim because the tree + PUCT + backprop live in Rust and the board
@@ -426,12 +469,13 @@ def _run_batched_mcts_rust(
         searches[gi].init_root(
             root_policies[k].tobytes(),
             float(root_values[k]),
-            DIRICHLET_EPSILON,
+            dirichlet_epsilon,
             DIRICHLET_ALPHA,
             rng.randrange(2**63),
         )
 
-    # Simulation loop.
+    # Simulation loop. Leaf priors are NOT softened — softening is
+    # root-only (see run_batched_mcts docstring).
     for _ in range(num_simulations):
         pending: list[tuple[int, bytes]] = []
         for gi in active_idx:
@@ -443,8 +487,6 @@ def _run_batched_mcts_rust(
                 [np.frombuffer(b, dtype=np.float32) for _, b in pending]
             )
             policies, values = evaluator(boards)
-            if soften:
-                policies = _soften_policy(policies, policy_softening_temperature)
             for j, (gi, _) in enumerate(pending):
                 searches[gi].supply_eval(policies[j].tobytes(), float(values[j]))
 
@@ -454,12 +496,15 @@ def _run_batched_mcts_rust(
         seed = rng.randrange(2**63)
         policy_bytes, move_tup, rv = s.get_result(temperatures[gi], seed)
         policy = np.frombuffer(policy_bytes, dtype=np.float32).copy()
+        # hasattr guard: an older compiled extension without best_child_q
+        # degrades to the mean-Q statistic instead of crashing self-play.
+        bq = s.best_child_q() if hasattr(s, "best_child_q") else rv
         if gi in active_idx:
             move = _tuple_to_move(move_tup)
         else:
             # Terminal; synthesize a placeholder (caller shouldn't use it).
             move = Move(Position(0, 0), Position(0, 0), None)
-        results[gi] = MCTSResult(policy=policy, move=move, root_value=rv)
+        results[gi] = MCTSResult(policy=policy, move=move, root_value=rv, best_q=bq)
     return results  # type: ignore[return-value]
 
 
@@ -470,6 +515,7 @@ def run_batched_mcts(
     rng: random.Random | None = None,
     temperatures: list[float] | None = None,
     policy_softening_temperature: float = 1.0,
+    dirichlet_epsilon: float | None = None,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
 
@@ -477,14 +523,17 @@ def run_batched_mcts(
     Defaults to τ=1.0 for every game (AlphaZero-style exploration). Pass a
     list of zeros to get argmax (greedy) selection for all games.
 
-    `policy_softening_temperature` flattens the priors fed to MCTS: >1.0
-    lets low-prior moves accumulate enough PUCT exploration to actually
-    get visited. Applied to every NN policy read (root + leaf expansions)
-    before priors are set. The training target (MCTS visit distribution)
-    is unchanged; this only widens search. Use at self-play time when a
-    collapsed policy head is overconfident on wrong moves and preventing
-    MCTS from escaping — the trained-policy sharpness at eval time is
-    preserved (eval callers leave this at 1.0).
+    `policy_softening_temperature` flattens the priors fed to MCTS at the
+    ROOT only: >1.0 lets low-prior root moves accumulate enough PUCT
+    exploration to actually get visited. Leaf expansions keep the raw
+    policy — softening every node (as an earlier version did) flattens
+    Q estimates throughout the tree and turns the whole search into
+    exploration noise at low sim counts. The training target (MCTS visit
+    distribution) is unchanged; this only widens root search.
+
+    `dirichlet_epsilon=None` uses the module-global set via
+    `set_mcts_params` (self-play exploration). Pass 0.0 for eval/match
+    play — gating matches must measure the model, not model+noise.
     """
     rng = rng or random
     if temperatures is None:
@@ -493,6 +542,7 @@ def run_batched_mcts(
         raise ValueError(
             f"temperatures length {len(temperatures)} != states length {len(states)}"
         )
+    eps = DIRICHLET_EPSILON if dirichlet_epsilon is None else dirichlet_epsilon
 
     if USE_RUST_MCTS:
         return _run_batched_mcts_rust(
@@ -502,6 +552,7 @@ def run_batched_mcts(
             rng,
             temperatures,
             policy_softening_temperature,
+            eps,
         )
 
     soften = policy_softening_temperature != 1.0
@@ -518,9 +569,9 @@ def run_batched_mcts(
     if soften:
         root_policies = _soften_policy(root_policies, policy_softening_temperature)
     for i, s in enumerate(active):
-        s.init_root(root_policies[i], float(root_values[i]))
+        s.init_root(root_policies[i], float(root_values[i]), eps)
 
-    # Simulation loop.
+    # Simulation loop. Leaf priors are NOT softened — root-only.
     for _ in range(num_simulations):
         pending: list[tuple[int, np.ndarray]] = []
         for i, s in enumerate(active):
@@ -531,8 +582,6 @@ def run_batched_mcts(
         if pending:
             boards = np.stack([b for _, b in pending])
             policies, values = evaluator(boards)
-            if soften:
-                policies = _soften_policy(policies, policy_softening_temperature)
             for j, (idx, _) in enumerate(pending):
                 active[idx].supply_eval(policies[j], float(values[j]))
 
