@@ -2,7 +2,8 @@
 import { ref, computed, watch, nextTick } from 'vue';
 import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
-import { getLegalMovesForSquare, getFilledPieceGlyph } from '@/game/chess/ChessEngine';
+import { getLegalMovesForSquare } from '@/game/chess/ChessEngine';
+import PieceIcon from './PieceIcon.vue';
 
 const props = defineProps<{
   gameState: ChessGameState;
@@ -227,7 +228,7 @@ watch(
                 class="piece"
                 :class="gameState.board[rank][file]!.color"
               >
-                {{ getFilledPieceGlyph(gameState.board[rank][file]!.type) }}
+                <PieceIcon :type="gameState.board[rank][file]!.type" />
               </span>
               <span v-if="isLegalTarget(rank, file) && !gameState.board[rank][file]" class="move-dot"></span>
               <span v-if="isLegalTarget(rank, file) && gameState.board[rank][file]" class="capture-ring"></span>
@@ -256,7 +257,7 @@ watch(
             :class="localColor"
             @click="handlePromotion(pt)"
           >
-            {{ getFilledPieceGlyph(pt) }}
+            <PieceIcon :type="pt" class="promo-icon" />
           </button>
         </div>
       </div>
@@ -395,41 +396,31 @@ watch(
 }
 
 .piece {
-  /* Track the square's --sq variable: pieces should be ~2/3 of the square. */
-  font-size: calc(var(--sq) * 0.66);
-  line-height: 1;
+  /* Track the square's --sq variable: pieces should be ~3/4 of the square.
+     Pieces are inline SVG (PieceIcon) — identical on every platform, unlike
+     the Unicode glyphs this replaced (iOS drew U+265F as emoji and the rest
+     from a different fallback font, so mobile looked nothing like desktop).
+     Fill comes from `color` (currentColor); the contrasting edge from
+     --piece-outline, consumed as an SVG stroke inside PieceIcon. */
+  width: calc(var(--sq) * 0.74);
+  height: calc(var(--sq) * 0.74);
   pointer-events: none;
   z-index: 1;
-  /* Drop shadow gives pieces weight against the board. Outline (the
-     contrasting edge) is done via text-shadow on the color variants below
-     so it stays crisp regardless of board color. */
+  /* Drop shadow gives pieces weight against the board. */
   filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.5));
 }
 
-/* White pieces: cream fill, dark outline. Eight-direction text-shadow
-   simulates a hard 1px stroke around the glyph. */
+/* White pieces: cream fill, dark outline. */
 .piece.white {
   color: #f6efde;
-  text-shadow:
-    -1px -1px 0 #1a1410,
-     1px -1px 0 #1a1410,
-    -1px  1px 0 #1a1410,
-     1px  1px 0 #1a1410,
-     0   -1.2px 0 #1a1410,
-     0    1.2px 0 #1a1410,
-    -1.2px 0 0 #1a1410,
-     1.2px 0 0 #1a1410;
+  --piece-outline: #1a1410;
 }
 
 /* Black pieces: deep charcoal fill with a thin warm-cream rim so they
    read clearly even on the dark squares. */
 .piece.black {
   color: #15110d;
-  text-shadow:
-    -1px -1px 0 rgba(246, 239, 222, 0.55),
-     1px -1px 0 rgba(246, 239, 222, 0.55),
-    -1px  1px 0 rgba(246, 239, 222, 0.55),
-     1px  1px 0 rgba(246, 239, 222, 0.55);
+  --piece-outline: rgba(246, 239, 222, 0.55);
 }
 
 .move-dot {
@@ -517,7 +508,6 @@ watch(
 .promotion-btn {
   width: 64px;
   height: 64px;
-  font-size: 42px;
   background: linear-gradient(155deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
@@ -528,26 +518,19 @@ watch(
   justify-content: center;
 }
 
+.promotion-btn .promo-icon {
+  width: 42px;
+  height: 42px;
+}
+
 .promotion-btn.white {
   color: #f6efde;
-  text-shadow:
-    -1px -1px 0 #1a1410,
-     1px -1px 0 #1a1410,
-    -1px  1px 0 #1a1410,
-     1px  1px 0 #1a1410,
-     0   -1.2px 0 #1a1410,
-     0    1.2px 0 #1a1410,
-    -1.2px 0 0 #1a1410,
-     1.2px 0 0 #1a1410;
+  --piece-outline: #1a1410;
 }
 
 .promotion-btn.black {
   color: #15110d;
-  text-shadow:
-    -1px -1px 0 rgba(246, 239, 222, 0.6),
-     1px -1px 0 rgba(246, 239, 222, 0.6),
-    -1px  1px 0 rgba(246, 239, 222, 0.6),
-     1px  1px 0 rgba(246, 239, 222, 0.6);
+  --piece-outline: rgba(246, 239, 222, 0.6);
 }
 
 .promotion-btn:hover {
