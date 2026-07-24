@@ -8,6 +8,10 @@ import PieceIcon from './PieceIcon.vue';
 const props = defineProps<{
   gameState: ChessGameState;
   localPlayerId: PlayerId;
+  // History-view mode: the board shows a past position. All interaction
+  // is blocked and the slide animation is suppressed — the parent owns
+  // navigation (GameView's history arrows).
+  frozen?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -64,6 +68,7 @@ function isKingInCheck(rank: number, file: number): boolean {
 }
 
 function handleSquareClick(rank: number, file: number): void {
+  if (props.frozen) return;
   if (isGameOver.value) return;
   if (promotionPending.value) return;
 
@@ -144,10 +149,26 @@ const boardRef = ref<HTMLElement | null>(null);
 const SLIDE_MS = 280;
 const SLIDE_EASING = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
+// Entering history view: drop any in-progress selection so stale legal-
+// target dots don't linger over a past position.
+watch(
+  () => props.frozen,
+  (frozen) => {
+    if (frozen) {
+      selectedSquare.value = null;
+      legalTargets.value = [];
+      promotionPending.value = null;
+    }
+  },
+);
+
 watch(
   () => props.gameState.lastMove,
   async (newMove, oldMove) => {
     if (!newMove) return;
+    // History navigation swaps whole positions; sliding the "last move"
+    // of the viewed ply is confusing when stepping backward. Snap.
+    if (props.frozen) return;
     // Same logical move — skip (e.g. parent re-render with no real change).
     if (
       oldMove &&

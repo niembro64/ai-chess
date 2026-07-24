@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import type { PlayerId, Move, ChessGameState, PieceColor } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
 import type { NetworkGameSnapshot, LobbyPlayer, NetworkRole } from '@/types/network';
 import type { GameConnection } from '@/types/game';
-import { createInitialGameState, posToAlgebraic } from '@/game/chess/ChessEngine';
+import { applyMove, createInitialGameState, posToAlgebraic } from '@/game/chess/ChessEngine';
 import { networkManager } from '@/game/network/NetworkManager';
 import { ChessServer } from '@/game/server/ChessServer';
 import { LocalGameConnection } from '@/game/server/LocalGameConnection';
@@ -28,6 +28,70 @@ const networkRole = ref<NetworkRole | null>(null);
 // Game state
 const gameState = ref<ChessGameState>(createInitialGameState());
 const drawOffer = ref<PlayerId | null>(null);
+
+// --- Move-history navigation ---
+//
+// `viewPly` selects which position the BOARD displays: null = live game,
+// N = the position after N plies (0 = starting position). Past positions
+// are reconstructed by replaying moveHistory from the initial position —
+// the game itself keeps running underneath (the bot still moves; new
+// moves append while you browse).
+const viewPly = ref<number | null>(null);
+const totalPlies = computed(() => gameState.value.moveHistory.length);
+const isViewingHistory = computed(
+  () => viewPly.value !== null && viewPly.value < totalPlies.value,
+);
+// The ply currently shown on the board (live = latest).
+const shownPly = computed(() => viewPly.value ?? totalPlies.value);
+
+const displayState = computed<ChessGameState>(() => {
+  if (viewPly.value === null || viewPly.value >= totalPlies.value) {
+    return gameState.value;
+  }
+  let s = createInitialGameState();
+  for (let i = 0; i < viewPly.value; i++) {
+    s = applyMove(s, gameState.value.moveHistory[i]);
+  }
+  return s;
+});
+
+function historyStart(): void {
+  if (totalPlies.value > 0) viewPly.value = 0;
+}
+function historyBack(): void {
+  const cur = shownPly.value;
+  if (cur > 0) viewPly.value = cur - 1;
+}
+function historyForward(): void {
+  if (viewPly.value === null) return;
+  const next = viewPly.value + 1;
+  viewPly.value = next >= totalPlies.value ? null : next;
+}
+function historyLive(): void {
+  viewPly.value = null;
+}
+function historyJumpTo(ply: number): void {
+  viewPly.value = ply >= totalPlies.value ? null : ply;
+}
+
+function handleHistoryKeys(e: KeyboardEvent): void {
+  if (!gameStarted.value || showLobby.value) return;
+  if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    historyBack();
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    historyForward();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    historyStart();
+  } else if (e.key === 'ArrowDown' || e.key === 'Escape') {
+    e.preventDefault();
+    historyLive();
+  }
+}
+onMounted(() => window.addEventListener('keydown', handleHistoryKeys));
+onUnmounted(() => window.removeEventListener('keydown', handleHistoryKeys));
 
 // Server & connection
 let currentServer: ChessServer | null = null;
@@ -106,16 +170,19 @@ watch(
   },
 );
 
+// Move list rows: one per full move, each half-move individually
+// clickable to jump the board to the position AFTER that move.
 const moveHistoryDisplay = computed(() => {
   const moves = gameState.value.moveHistory;
-  const display: string[] = [];
+  const rows: { num: number; halves: { label: string; ply: number }[] }[] = [];
   for (let i = 0; i < moves.length; i += 2) {
-    const moveNum = Math.floor(i / 2) + 1;
-    const whiteMove = formatMove(moves[i]);
-    const blackMove = i + 1 < moves.length ? formatMove(moves[i + 1]) : '';
-    display.push(`${moveNum}. ${whiteMove}${blackMove ? ' ' + blackMove : ''}`);
+    const halves = [{ label: formatMove(moves[i]), ply: i + 1 }];
+    if (i + 1 < moves.length) {
+      halves.push({ label: formatMove(moves[i + 1]), ply: i + 2 });
+    }
+    rows.push({ num: Math.floor(i / 2) + 1, halves });
   }
-  return display;
+  return rows;
 });
 
 function formatMove(move: Move): string {
@@ -254,6 +321,7 @@ function setupNetworkCallbacks(): void {
 function startGameWithPlayers(playerIds: PlayerId[]): void {
   showLobby.value = false;
   gameStarted.value = true;
+  viewPly.value = null;
 
   if (networkRole.value !== 'client') {
     currentServer = new ChessServer();
@@ -294,6 +362,7 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
 
 function handleMove(move: Move): void {
   if (!activeConnection) return;
+  if (isViewingHistory.value) return; // board is frozen; belt-and-suspenders
   activeConnection.sendCommand({ type: 'move', move });
 }
 
@@ -342,6 +411,7 @@ function returnToLobby(): void {
   isHost.value = false;
   gameState.value = createInitialGameState();
   drawOffer.value = null;
+  viewPly.value = null;
 }
 
 onUnmounted(() => {
@@ -381,11 +451,20 @@ onUnmounted(() => {
           </div>
           <div class="move-list" ref="moveListEl">
             <div
-              v-for="(line, i) in moveHistoryDisplay"
-              :key="i"
+              v-for="row in moveHistoryDisplay"
+              :key="row.num"
               class="move-line"
             >
-              {{ line }}
+              <span class="move-num">{{ row.num }}.</span>
+              <button
+                v-for="half in row.halves"
+                :key="half.ply"
+                class="mv"
+                :class="{ current: shownPly === half.ply }"
+                @click="historyJumpTo(half.ply)"
+              >
+                {{ half.label }}
+              </button>
             </div>
             <div v-if="moveHistoryDisplay.length === 0" class="no-moves">
               No moves yet
@@ -436,10 +515,25 @@ onUnmounted(() => {
           </div>
 
           <ChessBoard
-            :game-state="gameState"
+            class="board-slot"
+            :class="{ 'history-view': isViewingHistory }"
+            :game-state="displayState"
+            :frozen="isViewingHistory"
             :local-player-id="localPlayerId"
             @move="handleMove"
           />
+
+          <!-- Move-history navigation: step through past positions.
+               Also bound to arrow keys (←/→ step, ↑ start, ↓/Esc live). -->
+          <div class="history-nav">
+            <button class="nav-btn" :disabled="shownPly === 0" @click="historyStart" title="Start position (↑)">«</button>
+            <button class="nav-btn" :disabled="shownPly === 0" @click="historyBack" title="Previous move (←)">‹</button>
+            <span class="nav-pos" :class="{ viewing: isViewingHistory }">
+              {{ !isViewingHistory ? 'live' : shownPly === 0 ? 'start' : `move ${shownPly} / ${totalPlies}` }}
+            </span>
+            <button class="nav-btn" :disabled="!isViewingHistory" @click="historyForward" title="Next move (→)">›</button>
+            <button class="nav-btn" :disabled="!isViewingHistory" @click="historyLive" title="Back to live (↓)">»</button>
+          </div>
 
           <!-- Local player chip: always below the board. -->
           <div class="player-chip is-local" :class="{ 'is-active': isLocalTurn && !isGameOver }">
@@ -617,10 +711,13 @@ onUnmounted(() => {
 }
 
 .move-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-family: 'JetBrains Mono', 'SF Mono', monospace;
   font-size: 12.5px;
   color: #d1d5db;
-  padding: 5px 4px;
+  padding: 3px 4px;
   border-radius: 4px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   letter-spacing: 0.3px;
@@ -630,11 +727,34 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.015);
 }
 
-.move-line:last-child {
-  background: rgba(99, 102, 241, 0.18);
+.move-num {
+  color: #64748b;
+  min-width: 26px;
+}
+
+/* Individual half-moves are buttons: click one to jump the board to
+   the position after that move. */
+.mv {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.mv:hover {
+  background: rgba(99, 102, 241, 0.25);
   color: #f1f5f9;
-  border-bottom: none;
-  font-weight: 500;
+}
+
+.mv.current {
+  background: rgba(99, 102, 241, 0.35);
+  color: #f1f5f9;
+  font-weight: 600;
 }
 
 .no-moves {
@@ -892,6 +1012,69 @@ onUnmounted(() => {
     font-size: 10px;
     padding-left: 6px;
   }
+}
+
+/* --- Move-history navigation ------------------------------------- */
+
+/* Mute the board while a past position is shown: desaturate + dim so
+   there's no mistaking history for the live game. */
+.board-slot {
+  transition: filter 0.25s ease;
+}
+.board-slot.history-view {
+  filter: saturate(0.35) brightness(0.78);
+}
+
+.history-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-btn {
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 16px;
+  line-height: 1;
+  width: 34px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  color: #cbd5e1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+  padding: 0 0 2px;
+}
+
+.nav-btn:hover:not(:disabled) {
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  border-color: rgba(99, 102, 241, 0.6);
+  color: #f1f5f9;
+}
+
+.nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.nav-pos {
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.6px;
+  color: #64748b;
+  min-width: 96px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+/* Amber "you are in the past" accent, matching the muted board. */
+.nav-pos.viewing {
+  color: #f7c058;
+  text-shadow: 0 0 10px rgba(247, 192, 88, 0.4);
 }
 
 .game-controls {
