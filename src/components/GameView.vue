@@ -90,8 +90,48 @@ function handleHistoryKeys(e: KeyboardEvent): void {
     historyLive();
   }
 }
-onMounted(() => window.addEventListener('keydown', handleHistoryKeys));
-onUnmounted(() => window.removeEventListener('keydown', handleHistoryKeys));
+// --- Screen wake lock ---
+//
+// Keep the phone screen from dimming/sleeping while a game is open:
+// waiting through the bot's think time means long stretches with no
+// touch input, which otherwise trips the OS screen timeout mid-game.
+// Screen Wake Lock API — secure contexts (https/localhost) only;
+// supported on Android Chrome/Edge and iOS 16.4+. Silently a no-op
+// where unsupported or denied (battery saver): the game still works,
+// the screen just dims as usual.
+let wakeLock: WakeLockSentinel | null = null;
+
+async function requestWakeLock(): Promise<void> {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+  } catch {
+    wakeLock = null;
+  }
+}
+
+function releaseWakeLock(): void {
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
+}
+
+// The OS auto-releases the lock whenever the tab is hidden; re-acquire
+// when the player comes back to an in-progress game.
+function handleVisibilityChange(): void {
+  if (document.visibilityState === 'visible' && gameStarted.value) {
+    requestWakeLock();
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleHistoryKeys);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleHistoryKeys);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
+  releaseWakeLock();
+});
 
 // Server & connection
 let currentServer: ChessServer | null = null;
@@ -322,6 +362,7 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
   showLobby.value = false;
   gameStarted.value = true;
   viewPly.value = null;
+  requestWakeLock();
 
   if (networkRole.value !== 'client') {
     currentServer = new ChessServer();
@@ -412,6 +453,7 @@ function returnToLobby(): void {
   gameState.value = createInitialGameState();
   drawOffer.value = null;
   viewPly.value = null;
+  releaseWakeLock();
 }
 
 onUnmounted(() => {
