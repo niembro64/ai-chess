@@ -689,6 +689,20 @@ class DashboardLogger:
         table.add_row(*section("resigned"))
         table.add_row(*row("W wins", buckets["resign_w"], "green"))
         table.add_row(*row("B wins", buckets["resign_b"], "red"))
+        # Resign truth-check false-positive rate: held-out would-be
+        # resignations that played on and did NOT lose. The number the
+        # resign_threshold is tuned against — keep it ≤5% (AZ practice).
+        tg = getattr(stats, "resign_truth_games", 0) if stats is not None else 0
+        tf = getattr(stats, "resign_truth_fp", 0) if stats is not None else 0
+        if tg > 0:
+            fp_pct = tf / tg * 100
+            fp_style = "green" if fp_pct <= 5.0 else "bold red"
+            table.add_row(
+                Text("truth-FP", style="dim"),
+                Text(f"{tf:>6,}", style=fp_style),
+                Text(f"{fp_pct:5.1f}%", style=fp_style),
+                Text(f"of {tg:,} held-out (keep ≤5%)", style="dim"),
+            )
 
         table.add_row(*section("drawn"))
         table.add_row(*row("stalemate", buckets["stalemate"], "yellow"))
@@ -1150,18 +1164,21 @@ class DashboardLogger:
 
         # Auto-window the y-axis around the actual data range so tiny
         # swings near the threshold stay visible. Pad by 0.03 on each
-        # side, clamp to [0.35, 0.75] to avoid absurd scales on early
-        # outlier results, and make sure the threshold line is always
-        # inside the window.
+        # side and make sure the threshold line is always inside the
+        # window. Clamp only to the valid score range [0, 1]: an earlier
+        # [0.35, 0.75] clamp assumed scores near the threshold, and a
+        # fine-tune run that sat at ~0.27 put every data point OUTSIDE
+        # the window — plotext then crashed with IndexError on the empty
+        # in-window series.
         s_min = min(min(scores), self._eval_threshold)
         s_max = max(max(scores), self._eval_threshold)
-        y_lo = max(0.35, s_min - 0.03)
-        y_hi = min(0.75, s_max + 0.03)
+        y_lo = max(0.0, s_min - 0.03)
+        y_hi = min(1.0, s_max + 0.03)
         # Ensure at least a 0.08 window so short flat runs don't degenerate
         # into a single-line plot with invisible variation.
         if y_hi - y_lo < 0.08:
             mid = (y_hi + y_lo) / 2
-            y_lo, y_hi = max(0.35, mid - 0.04), min(0.75, mid + 0.04)
+            y_lo, y_hi = max(0.0, mid - 0.04), min(1.0, mid + 0.04)
 
         plt.clf()
         plt.theme("dark")

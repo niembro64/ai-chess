@@ -165,6 +165,16 @@ class TrainConfig:
     # Standard practice in modern training rigs; AlphaZero/Leela use ~1.0.
     # 0.0 disables the clip (pre-commit behavior).
     grad_clip_norm: float = 1.0
+    # LR used while a value-head-only warmup is active (see
+    # TrainStats.value_warmup_until_gen). During warmup only value_*
+    # parameters receive gradients, so this can safely sit well above
+    # the schedule LR — the trunk and policy head cannot move. Rationale:
+    # warm-starting from weights whose value head must relearn a
+    # different label regime sends enormous early value gradients
+    # through the shared trunk; the July 2026 fine-tune lost ~170 Elo
+    # in its first 10k steps exactly this way. Warmup lets the value
+    # head adapt in isolation first.
+    value_warmup_lr: float = 3e-4
     # Label smoothing on the MCTS policy target: mix a tiny uniform prior
     # over the sample's visited-move support (all visited moves are
     # legal) so the policy head doesn't collapse probability to exactly
@@ -271,6 +281,12 @@ class TrainStats:
     # resign_threshold must be tuned against.
     resign_truth_games: int = 0
     resign_truth_fp: int = 0
+    # Value-head-only warmup: while generation < this, trunk + policy
+    # parameters are frozen and only value_* params train (at
+    # config.value_warmup_lr). Set by warm_start_from_checkpoint.py;
+    # 0 = no warmup. Persisted in checkpoints so resumes mid-warmup
+    # stay frozen.
+    value_warmup_until_gen: int = 0
     # Aggregates (computed on the fly via properties) are exposed below for
     # backward compat with existing callers/CSV readers.
     policy_loss: float = 0.0
@@ -416,6 +432,9 @@ class Trainer:
         # Numpy generator for vectorized sampling (mirror-augment mask),
         # seeded from the main rng so the whole run is reproducible.
         self._np_rng = np.random.default_rng(self.rng.randrange(2**63))
+        # Tri-state so the first _update_value_warmup call always applies
+        # the correct freeze state (True/False both differ from None).
+        self._value_warmup_active: bool | None = None
         self.buffer = ReplayBuffer(capacity=self.config.replay_buffer_capacity)
 
         self._mp_self_play = None
@@ -562,12 +581,18 @@ class Trainer:
         if not schedule:
             return
         gen = self.stats.generation
-        target_lr = schedule[0][1]
-        for threshold, lr in schedule:
-            if gen >= threshold:
-                target_lr = lr
-            else:
-                break
+        if gen < self.stats.value_warmup_until_gen:
+            # Value-head-only warmup: trunk/policy are frozen (see
+            # _update_value_warmup), so a hot LR is safe and lets the
+            # value head adapt to its new label regime quickly.
+            target_lr = self.config.value_warmup_lr
+        else:
+            target_lr = schedule[0][1]
+            for threshold, lr in schedule:
+                if gen >= threshold:
+                    target_lr = lr
+                else:
+                    break
         # Skip the param_group write when the value hasn't changed — avoids
         # a per-step Python-side tensor dict mutation for no reason.
         if self.optimizer.param_groups[0].get("lr") == target_lr:
@@ -576,6 +601,40 @@ class Trainer:
         for g in self.optimizer.param_groups:
             g["lr"] = target_lr
         self.stats.current_lr = float(target_lr)
+
+    def _update_value_warmup(self) -> None:
+        """Freeze/unfreeze trunk + policy according to the warmup window.
+
+        While `generation < stats.value_warmup_until_gen`, every parameter
+        except the value head's (`value_*`) has requires_grad=False, so
+        gradient steps move ONLY the value head. AdamW skips grad-less
+        params and clip_grad_norm_ ignores them, so no other machinery
+        needs to know. Toggles exactly twice per warmup (on entry and
+        expiry); torch.compile re-traces on each toggle, which costs a
+        few seconds twice per run.
+        """
+        active = self.stats.generation < self.stats.value_warmup_until_gen
+        if active == self._value_warmup_active:
+            return
+        self._value_warmup_active = active
+        frozen = 0
+        for name, p in self.model.named_parameters():
+            if not name.startswith("value_"):
+                p.requires_grad = not active
+                frozen += 1
+        if active:
+            log.info(
+                "value-head warmup ACTIVE until gen %d: %d trunk/policy params "
+                "frozen, value head trains at lr %.1e",
+                self.stats.value_warmup_until_gen, frozen,
+                self.config.value_warmup_lr,
+            )
+        else:
+            log.info(
+                "value-head warmup complete at gen %d: all parameters unfrozen, "
+                "LR back on schedule",
+                self.stats.generation,
+            )
 
     def _ema(self, attr: str, sample_ms: float) -> None:
         """Exponential moving average update on a TrainStats timing field."""
@@ -642,6 +701,7 @@ class Trainer:
     def train_step(self) -> dict[str, float]:
         """One gradient step. Samples a batch from the replay buffer and updates weights."""
         self.model.train()
+        self._update_value_warmup()
 
         t0 = time.perf_counter()
         boards_np, policies_np, values_np, outcome_known_np, policy_weights_np = (
