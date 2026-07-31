@@ -1,6 +1,12 @@
 // ChessServer - Authoritative chess game server (runs in host's browser)
 
-import { createInitialGameState, applyMove, isLegalMove } from '../chess/ChessEngine';
+import {
+  createInitialGameState,
+  applyMove,
+  isLegalMove,
+  isInsufficientMaterial,
+  positionKey,
+} from '../chess/ChessEngine';
 import type { ChessGameState, PlayerId } from '@/types/chess';
 import { playerIdToColor, colorToPlayerId } from '@/types/chess';
 import type { ChessCommand, NetworkGameSnapshot } from '@/types/network';
@@ -9,6 +15,11 @@ import type { SnapshotCallback, GameOverCallback } from './GameConnection';
 export class ChessServer {
   private gameState: ChessGameState;
   private drawOffer: PlayerId | null = null;
+  // Occurrence count per position (placement + turn + castling + ep) for
+  // FIDE threefold repetition. The engine stays stateless per-position;
+  // repetition needs game history, so the rules glue lives here — same
+  // architecture as the Python training loop.
+  private positionCounts: Map<string, number> = new Map();
 
   private snapshotListeners: SnapshotCallback[] = [];
   private gameOverListeners: GameOverCallback[] = [];
@@ -20,6 +31,9 @@ export class ChessServer {
   // Start the game
   start(): void {
     this.gameState.status = 'active';
+    // Seed the starting position with count 1 — it can itself be the
+    // repeated position (1.Nf3 Nf6 2.Ng1 Ng8 brings it back).
+    this.positionCounts = new Map([[positionKey(this.gameState), 1]]);
     this.emitSnapshot();
   }
 
@@ -45,6 +59,24 @@ export class ChessServer {
 
         // Apply the move
         this.gameState = applyMove(this.gameState, command.move);
+
+        // Draws the stateless engine can't see: threefold repetition
+        // (needs game history) and insufficient material (rules glue on
+        // top of movegen). Engine-produced terminal statuses take
+        // precedence — a move that mates wins even if it also creates
+        // the third occurrence (FIDE 5.1).
+        if (this.gameState.status === 'active' || this.gameState.status === 'check') {
+          const key = positionKey(this.gameState);
+          const count = (this.positionCounts.get(key) ?? 0) + 1;
+          this.positionCounts.set(key, count);
+          if (count >= 3) {
+            this.gameState.status = 'draw';
+            this.gameState.drawReason = 'repetition';
+          } else if (isInsufficientMaterial(this.gameState.board)) {
+            this.gameState.status = 'draw';
+            this.gameState.drawReason = 'insufficient-material';
+          }
+        }
         this.emitSnapshot();
 
         // Check for game over
@@ -84,6 +116,7 @@ export class ChessServer {
       case 'acceptDraw': {
         if (this.drawOffer && this.drawOffer !== fromPlayerId) {
           this.gameState.status = 'draw';
+          this.gameState.drawReason = 'agreement';
           this.drawOffer = null;
           this.emitSnapshot();
           for (const listener of this.gameOverListeners) {

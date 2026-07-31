@@ -45,6 +45,10 @@ export type MCTSResult = {
   policy: Float32Array;
   move: Move;
   rootValue: number;
+  // Every root move ordered by visit count, best first. Lets callers
+  // apply post-search selection filters (e.g. the repetition veto in
+  // AIPlayer) by walking down the search's own ranking.
+  rankedMoves: { move: Move; visits: number }[];
 };
 
 // --- Batched MCTS for training (multiple games at once) ---
@@ -110,10 +114,15 @@ export class MCTSSearch {
         policy[idx] = child.visitCount / totalVisits;
       }
     }
+    const rankedMoves = [...this.root.children.values()]
+      .filter(c => c.move !== null)
+      .map(c => ({ move: c.move!, visits: c.visitCount }))
+      .sort((a, b) => b.visits - a.visits);
     return {
       policy,
       move: sampleProportional ? sampleMove(this.root) : argmaxMove(this.root),
       rootValue: this.root.visitCount > 0 ? this.root.totalValue / this.root.visitCount : 0,
+      rankedMoves,
     };
   }
 

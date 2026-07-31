@@ -30,6 +30,11 @@ export type CastlingRights = {
 
 export type GameStatus = 'waiting' | 'active' | 'check' | 'checkmate' | 'stalemate' | 'draw';
 
+// Why a given status === 'draw' happened. Kept separate from GameStatus so
+// the status union (which the Python engine mirrors and the parity fixtures
+// pin) stays untouched.
+export type DrawReason = 'fifty-move' | 'repetition' | 'insufficient-material' | 'agreement';
+
 export type ChessGameState = {
   board: Board;
   currentTurn: PieceColor;
@@ -38,6 +43,7 @@ export type ChessGameState = {
   halfMoveClock: number; // For 50-move rule
   fullMoveNumber: number;
   status: GameStatus;
+  drawReason?: DrawReason;
   winner: PieceColor | null;
   moveHistory: Move[];
   lastMove: Move | null;

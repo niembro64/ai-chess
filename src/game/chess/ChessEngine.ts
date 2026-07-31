@@ -63,10 +63,101 @@ export function cloneGameState(state: ChessGameState): ChessGameState {
     halfMoveClock: state.halfMoveClock,
     fullMoveNumber: state.fullMoveNumber,
     status: state.status,
+    drawReason: state.drawReason,
     winner: state.winner,
     moveHistory: [...state.moveHistory],
     lastMove: state.lastMove ? { ...state.lastMove } : null,
   };
+}
+
+// --- Position identity for threefold repetition (FIDE 9.2) ---
+//
+// Two positions are "the same" when piece placement, side to move,
+// castling rights, and the en passant target all match. Move clocks are
+// excluded. This mirrors training's `_position_key` byte-for-byte in
+// spirit (including its one known FIDE nit: the ep square is included
+// unconditionally, whereas FIDE only counts ep when the capture is
+// actually legal — both sides under-detect identically, so browser and
+// training adjudicate the same games the same way).
+
+export function positionKey(state: ChessGameState): string {
+  const parts: string[] = [];
+  const typeChar: Record<PieceType, string> = {
+    king: 'k', queen: 'q', rook: 'r', bishop: 'b', knight: 'n', pawn: 'p',
+  };
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const p = state.board[r][f];
+      if (!p) {
+        parts.push('.');
+      } else {
+        const ch = typeChar[p.type];
+        parts.push(p.color === 'white' ? ch.toUpperCase() : ch);
+      }
+    }
+  }
+  parts.push(state.currentTurn[0]);
+  const cr = state.castlingRights;
+  parts.push(cr.whiteKingside ? '1' : '0');
+  parts.push(cr.whiteQueenside ? '1' : '0');
+  parts.push(cr.blackKingside ? '1' : '0');
+  parts.push(cr.blackQueenside ? '1' : '0');
+  if (state.enPassantTarget) {
+    parts.push(String.fromCharCode(97 + state.enPassantTarget.file));
+    parts.push(String(state.enPassantTarget.rank));
+  } else {
+    parts.push('--');
+  }
+  return parts.join('');
+}
+
+// Rebuild the position-occurrence map for a game by replaying its
+// moveHistory from the initial position. The STARTING position seeds the
+// map with count 1 — it can itself be the repeated position (1.Nf3 Nf6
+// 2.Ng1 Ng8 brings it back). Used by the AI (which only receives a
+// snapshot); ChessServer maintains its copy incrementally instead.
+export function buildPositionCounts(state: ChessGameState): Map<string, number> {
+  const counts = new Map<string, number>();
+  let s = createInitialGameState();
+  counts.set(positionKey(s), 1);
+  for (const move of state.moveHistory) {
+    s = applyMove(s, move);
+    const key = positionKey(s);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// --- Insufficient material (FIDE 5.2.2) ---
+//
+// True when NO sequence of legal moves can produce checkmate:
+//   K vs K, K+B vs K, K+N vs K, and K+B vs K+B with both bishops on the
+//   same square color. Combinations that still allow helpmates
+//   (K+N vs K+N, K+B vs K+N, K+N+N vs K) are NOT insufficient. Ported
+//   from training's `_is_insufficient_material`.
+export function isInsufficientMaterial(board: Board): boolean {
+  const minors: { color: PieceColor; type: PieceType; squareColor: number }[] = [];
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const p = board[r][f];
+      if (!p || p.type === 'king') continue;
+      if (p.type === 'pawn' || p.type === 'rook' || p.type === 'queen') {
+        return false; // mate is reachable
+      }
+      minors.push({ color: p.color, type: p.type, squareColor: (r + f) % 2 });
+    }
+  }
+  if (minors.length === 0) return true;            // K vs K
+  if (minors.length === 1) return true;            // K+B or K+N vs K
+  if (minors.length === 2) {
+    const [a, b] = minors;
+    // Two bishops, one per side, on the same square color.
+    return (
+      a.type === 'bishop' && b.type === 'bishop' &&
+      a.color !== b.color && a.squareColor === b.squareColor
+    );
+  }
+  return false;
 }
 
 function getPieceAt(board: Board, pos: Position): Square {
@@ -497,6 +588,7 @@ export function applyMove(state: ChessGameState, move: Move): ChessGameState {
   } else if (newState.halfMoveClock >= 100) {
     // 50-move rule
     newState.status = 'draw';
+    newState.drawReason = 'fifty-move';
   } else {
     newState.status = 'active';
   }

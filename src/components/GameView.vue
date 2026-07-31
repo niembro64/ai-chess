@@ -170,7 +170,13 @@ const statusText = computed(() => {
     case 'stalemate':
       return 'Stalemate - Draw';
     case 'draw':
-      return 'Draw';
+      switch (gs.drawReason) {
+        case 'repetition': return 'Draw - threefold repetition';
+        case 'fifty-move': return 'Draw - 50-move rule';
+        case 'insufficient-material': return 'Draw - insufficient material';
+        case 'agreement': return 'Draw - by agreement';
+        default: return 'Draw';
+      }
     default:
       return '';
   }
