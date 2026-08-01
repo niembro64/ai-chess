@@ -11,15 +11,18 @@
     "dump-parity": "tsx scripts/dump_parity.ts",
     "verify-weights": "tsx scripts/verify_weights.ts",
     "test-mcts-sign": "tsx scripts/test_mcts_sign.ts",
-    "test-repetition": "tsx scripts/test_repetition.ts"
+    "test-repetition": "tsx scripts/test_repetition.ts",
+    "verify-toy": "tsx scripts/verify_toy_weights.ts"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-webgpu": "^4.22.0",
     "peerjs": "^1.5.5",
+    "three": "^0.185.1",
     "vue": "^3.4.21"
   },
   "devDependencies": {
+    "@types/three": "^0.185.3",
     "@vitejs/plugin-vue": "^5.0.4",
     "tsx": "^4.21.0",
     "typescript": "^5.4.3",

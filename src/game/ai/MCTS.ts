@@ -3,7 +3,17 @@
 
 import type { ChessGameState, Move } from '@/types/chess';
 import { getLegalMoves, applyMove } from '@/game/chess/ChessEngine';
-import { ChessNet, encodeBoard, moveToIndex, POLICY_SIZE } from './ChessNet';
+import { encodeBoard, moveToIndex, POLICY_SIZE } from './ChessNet';
+
+// The search only needs "boards in, (policy, value) out" — satisfied by
+// both ChessNet (Sage, 20 planes) and ToyNet (Toy, 6 planes).
+export interface PolicyValueNet {
+  predictBatch(boards: Float32Array[]): Array<{ policy: Float32Array; value: number }>;
+}
+
+// Board encoder matching the net's input format. Defaults to Sage's
+// 20-plane encoding; Toy passes its own 6-plane encoder.
+export type BoardEncoder = (state: ChessGameState) => Float32Array;
 
 const C_PUCT = 1.5;
 const DIRICHLET_ALPHA = 0.3;
@@ -20,6 +30,8 @@ export type MCTSOptions = {
   // Pick the move by sampling proportional to visit counts (τ=1) instead
   // of argmax. Self-play opening diversity only — off for match play.
   sampleProportional?: boolean;
+  // Board encoder matching the net (defaults to Sage's 20-plane).
+  encode?: BoardEncoder;
 };
 
 class MCTSNode {
@@ -56,9 +68,11 @@ export type MCTSResult = {
 export class MCTSSearch {
   private root: MCTSNode;
   private pendingLeaf: MCTSNode | null = null;
+  private encode: BoardEncoder;
 
-  constructor(state: ChessGameState) {
+  constructor(state: ChessGameState, encode: BoardEncoder = encodeBoard) {
     this.root = new MCTSNode(state);
+    this.encode = encode;
     this.checkTerminal(this.root);
   }
 
@@ -67,7 +81,7 @@ export class MCTSSearch {
   }
 
   getRootBoard(): Float32Array {
-    return encodeBoard(this.root.state);
+    return this.encode(this.root.state);
   }
 
   // Initialize root with NN evaluation (+ optional Dirichlet noise)
@@ -91,7 +105,7 @@ export class MCTSSearch {
     }
 
     this.pendingLeaf = node;
-    return encodeBoard(node.state);
+    return this.encode(node.state);
   }
 
   // Supply NN evaluation for the pending leaf
@@ -184,13 +198,13 @@ export class MCTSSearch {
 // Run batched MCTS across multiple games. One GPU call per simulation step.
 export function runBatchedMCTS(
   states: ChessGameState[],
-  net: ChessNet,
+  net: PolicyValueNet,
   numSimulations: number,
   options: MCTSOptions = {},
 ): MCTSResult[] {
   const addNoise = options.addRootNoise ?? false;
   const sampleProportional = options.sampleProportional ?? false;
-  const searches = states.map(s => new MCTSSearch(s));
+  const searches = states.map(s => new MCTSSearch(s, options.encode ?? encodeBoard));
 
   // Filter to non-terminal games
   const active = searches.filter(s => !s.isTerminal());
@@ -231,7 +245,7 @@ export function runBatchedMCTS(
 
 export function runMCTS(
   state: ChessGameState,
-  net: ChessNet,
+  net: PolicyValueNet,
   numSimulations: number,
   options: MCTSOptions = {},
 ): MCTSResult {
@@ -242,12 +256,12 @@ export function runMCTS(
 // simulations so a long think (e.g. 400 sims) doesn't freeze the tab.
 export async function runMCTSAsync(
   state: ChessGameState,
-  net: ChessNet,
+  net: PolicyValueNet,
   numSimulations: number,
   options: MCTSOptions = {},
   yieldEverySims = 16,
 ): Promise<MCTSResult> {
-  const search = new MCTSSearch(state);
+  const search = new MCTSSearch(state, options.encode ?? encodeBoard);
   if (search.isTerminal()) {
     return search.getResult(options.sampleProportional ?? false);
   }

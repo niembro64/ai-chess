@@ -11,7 +11,6 @@ const props = defineProps<{
   localPlayerId: PlayerId;
   error: string | null;
   isConnecting: boolean;
-  hasBotModel: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -19,7 +18,7 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
-  (e: 'playBot'): void;
+  (e: 'playBot', model: 'sage' | 'toy'): void;
 }>();
 
 const joinCode = ref('');
@@ -107,12 +106,16 @@ const canJoin = computed(() => {
             >Join</button>
           </div>
 
-          <button
-            class="lobby-btn ai-btn"
-            :disabled="!props.hasBotModel"
-            :title="props.hasBotModel ? '' : 'No trained model available. Build one with the Python trainer and copy to src/game/ai/presetWeights.txt.'"
-            @click="emit('playBot')"
-          >Play Against Bot</button>
+          <!-- Bot opponents. Weights are fetched lazily on click — only
+               the model you pick gets downloaded. -->
+          <button class="lobby-btn ai-btn" @click="emit('playBot', 'sage')">
+            <span class="bot-name">Play Sage</span>
+            <span class="bot-tag">full-strength network</span>
+          </button>
+          <button class="lobby-btn ai-btn toy-btn" @click="emit('playBot', 'toy')">
+            <span class="bot-name">Play Toy</span>
+            <span class="bot-tag">transparent mini net — watch it think</span>
+          </button>
         </div>
 
         <div v-if="error" class="error-message">{{ error }}</div>
@@ -313,11 +316,37 @@ const canJoin = computed(() => {
   color: white;
   width: 100%;
   box-shadow: 0 6px 18px rgba(168, 85, 247, 0.3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
 }
 
 .ai-btn:hover:not(:disabled) {
   background: linear-gradient(165deg, #b569f9, #8b4ef0);
   box-shadow: 0 8px 24px rgba(168, 85, 247, 0.5);
+}
+
+/* Toy gets the teal accent to read as "the other one". */
+.toy-btn {
+  background: linear-gradient(165deg, #2dd4bf, #0d9488);
+  box-shadow: 0 6px 18px rgba(45, 212, 191, 0.3);
+}
+
+.toy-btn:hover:not(:disabled) {
+  background: linear-gradient(165deg, #46e4cf, #14b8a6);
+  box-shadow: 0 8px 24px rgba(45, 212, 191, 0.5);
+}
+
+.bot-name {
+  font-weight: 700;
+}
+
+.bot-tag {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.85;
+  letter-spacing: 0.3px;
 }
 
 .preset-btn {

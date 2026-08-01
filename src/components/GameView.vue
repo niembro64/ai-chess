@@ -10,9 +10,16 @@ import { ChessServer } from '@/game/server/ChessServer';
 import { LocalGameConnection } from '@/game/server/LocalGameConnection';
 import { RemoteGameConnection } from '@/game/server/RemoteGameConnection';
 import { AIPlayer } from '@/game/ai/AIPlayer';
-import { PRESET_WEIGHTS } from '@/game/ai/presetWeights';
+import { ToyPlayer, type ToyThought } from '@/game/ai/ToyPlayer';
+import { MODELS, fetchModelJson, type ModelId } from '@/game/ai/models';
+import type { SerializedWeights } from '@/game/ai/ChessNet';
 import LobbyModal from './LobbyModal.vue';
 import ChessBoard from './ChessBoard.vue';
+import { defineAsyncComponent } from 'vue';
+
+// The Toy Mind panel pulls in three.js — lazy-load its chunk only when
+// someone actually plays Toy, so Sage games pay nothing for it.
+const ToyMindPanel = defineAsyncComponent(() => import('./ToyMindPanel.vue'));
 
 // Lobby state
 const showLobby = ref(true);
@@ -137,11 +144,16 @@ onUnmounted(() => {
 let currentServer: ChessServer | null = null;
 let activeConnection: GameConnection | null = null;
 
-// AI opponent. The bot is the single model in `PRESET_WEIGHTS`
-// (produced by the Python trainer and deployed via deploy_to_browser.py).
-let aiPlayer: AIPlayer | null = null;
+// AI opponent. Weights are fetched lazily from public/models/ when a
+// bot is picked in the lobby (see models.ts) — Sage and Toy are
+// separate downloads and only the chosen one loads.
+let aiPlayer: AIPlayer | ToyPlayer | null = null;
 const playingVsBot = ref(false);
 const aiThinking = ref(false);
+const botModelId = ref<ModelId | null>(null);
+// Toy's latest thought record, rendered by the Toy Mind panel.
+const toyThought = ref<ToyThought | null>(null);
+const showToyPanel = computed(() => botModelId.value === 'toy' && toyThought.value !== null);
 
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
@@ -194,7 +206,7 @@ const turnIndicator = computed(() => {
 // look at across the board, which is always the opponent.
 const opponentColor = computed<PieceColor>(() => localColor.value === 'white' ? 'black' : 'white');
 const opponentName = computed(() => {
-  if (playingVsBot.value) return 'Bot';
+  if (playingVsBot.value) return botModelId.value ? MODELS[botModelId.value].name : 'Bot';
   if (networkRole.value) return 'Opponent';
   return 'Player 2';
 });
@@ -304,19 +316,33 @@ async function handleJoin(code: string): Promise<void> {
   }
 }
 
-function handlePlayBot(): void {
-  if (!PRESET_WEIGHTS) {
-    lobbyError.value = 'No bot weights available. See training/README.md.';
-    return;
-  }
+async function handlePlayBot(model: ModelId): Promise<void> {
   isConnecting.value = true;
   lobbyError.value = null;
 
-  // 400 sims at play time. The training run's eval cadence uses 100,
-  // and self-play uses 100, but those are tuned for throughput; play
-  // strength scales meaningfully with deeper search. The aiThinking
-  // spinner covers the extra latency.
-  aiPlayer = AIPlayer.create(PRESET_WEIGHTS, 400);
+  let weights: unknown;
+  try {
+    weights = await fetchModelJson(model);
+  } catch (err) {
+    lobbyError.value = (err as Error).message || `Failed to load ${MODELS[model].name}`;
+    isConnecting.value = false;
+    return;
+  }
+
+  try {
+    if (model === 'toy') {
+      aiPlayer = ToyPlayer.create(weights, MODELS.toy.sims, t => { toyThought.value = t; });
+    } else {
+      aiPlayer = AIPlayer.create(weights as SerializedWeights, MODELS.sage.sims);
+    }
+  } catch (err) {
+    lobbyError.value = (err as Error).message || 'Model weights are invalid';
+    isConnecting.value = false;
+    return;
+  }
+
+  botModelId.value = model;
+  toyThought.value = null;
   playingVsBot.value = true;
   networkRole.value = null;
   localPlayerId.value = 1;
@@ -452,6 +478,8 @@ function returnToLobby(): void {
   showLobby.value = true;
   networkRole.value = null;
   playingVsBot.value = false;
+  botModelId.value = null;
+  toyThought.value = null;
   aiThinking.value = false;
   lobbyPlayers.value = [];
   roomCode.value = '';
@@ -481,7 +509,6 @@ onUnmounted(() => {
       :local-player-id="localPlayerId"
       :error="lobbyError"
       :is-connecting="isConnecting"
-      :has-bot-model="PRESET_WEIGHTS !== null"
       @host="handleHost"
       @join="handleJoin"
       @start="handleLobbyStart"
@@ -490,7 +517,8 @@ onUnmounted(() => {
     />
 
     <!-- Game UI (visible when game started) -->
-    <div v-if="gameStarted" class="game-area">
+    <div v-if="gameStarted" class="game-area" :class="{ 'has-panel': showToyPanel }">
+      <div class="game-stack">
       <div class="game-layout">
         <!-- Left sidebar: move history -->
         <div class="sidebar">
@@ -613,7 +641,7 @@ onUnmounted(() => {
           <div class="game-info-content">
             <div class="info-row">
               <span class="info-label">Mode:</span>
-              <span class="info-value">{{ playingVsBot ? 'vs Bot' : networkRole === 'host' ? 'Host' : networkRole === 'client' ? 'Client' : 'Local' }}</span>
+              <span class="info-value">{{ playingVsBot ? `vs ${opponentName}` : networkRole === 'host' ? 'Host' : networkRole === 'client' ? 'Client' : 'Local' }}</span>
             </div>
             <div v-if="!playingVsBot && roomCode" class="info-row">
               <span class="info-label">Room:</span>
@@ -629,6 +657,15 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- Toy Mind: what the toy net saw, thought, and chose. Only for
+           Toy games; desktop only (hidden by media query on mobile). -->
+      <ToyMindPanel
+        v-if="showToyPanel"
+        :thought="toyThought!"
+        class="toy-mind-row"
+      />
       </div>
     </div>
 
@@ -658,6 +695,33 @@ onUnmounted(() => {
      and the mobile breakpoint hides nice-to-have panels so everything
      fits in the viewport. */
   overflow: hidden;
+}
+
+.game-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-height: 100%;
+}
+
+/* When the Toy Mind panel is open the page is a study tool — allow
+   vertical scroll so board + panel can both be taller than the fold. */
+.game-area.has-panel {
+  overflow-y: auto;
+  align-items: safe flex-start;
+}
+
+.toy-mind-row {
+  margin: 0 20px 24px;
+  /* Never let the flex column squeeze the panel — the page scrolls
+     instead (game-area.has-panel enables overflow-y). */
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .toy-mind-row {
+    display: none;
+  }
 }
 
 .game-layout {
