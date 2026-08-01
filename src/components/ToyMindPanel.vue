@@ -1,19 +1,16 @@
 <script setup lang="ts">
-// Toy Mind — visualizes exactly what the Toy net saw, guessed, and chose.
+// Toy Mind — what the Toy net saw, guessed, and chose, laid out to
+// teach the architecture by its own structure:
 //
-// Left: the 8x8x6 input tensor as a rotatable three.js stack — six grid
-// slabs (one per piece-type channel), spheres where the tensor is
-// nonzero. Sphere COLOR follows the real game color (your pieces are
-// white spheres); sphere POSITION is the honest net frame, which is
-// rotated 180° because Toy plays black. That mismatch is the lesson.
+//   INPUT            NETWORK OUTPUT                SEARCH
+//   8x8x6 tensor  →  POLICY (64x64) + VALUE     →  every legal move,
+//   (rotatable)      one grid, one gauge           ordered by visits
 //
-// Middle: two 64x64 canvases — the net's raw softmax (with probability
-// it wasted on illegal moves tinted red) and the distribution after
-// MCTS. Watching search sharpen the fuzzy prior is the point.
-//
-// Right: scalar value gauge + top moves by visit share.
+// The SEARCH list is colorized with the exact colormap of the policy
+// grid (each entry's chip = its cell's color), and a leader line runs
+// from the top-visited move to its cell in the matrix.
 
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { ToyThought } from '@/game/ai/ToyPlayer';
@@ -21,11 +18,36 @@ import { TOY_CHANNEL_NAMES, TOY_NUM_PLANES } from '@/game/ai/ToyNet';
 
 const props = defineProps<{ thought: ToyThought }>();
 
+const bodyEl = ref<HTMLDivElement | null>(null);
 const sceneEl = ref<HTMLDivElement | null>(null);
-const rawCanvas = ref<HTMLCanvasElement | null>(null);
-const searchCanvas = ref<HTMLCanvasElement | null>(null);
+const gridCanvas = ref<HTMLCanvasElement | null>(null);
+const moveListEl = ref<HTMLDivElement | null>(null);
+const leader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+const hover = ref<{ x: number; y: number; text: string } | null>(null);
 
-// --- three.js scene ----------------------------------------------------
+// --- shared colormap: grid cells AND list chips ------------------------
+
+function maxProb(): number {
+  let m = 0;
+  const p = props.thought.rawPolicy;
+  for (let i = 0; i < p.length; i++) if (p[i] > m) m = p[i];
+  return m || 1;
+}
+
+function cellColor(p: number, maxP: number, illegal: boolean): string {
+  const t = Math.sqrt(Math.min(1, p / maxP)); // sqrt lifts the mid-range
+  return illegal
+    ? `rgba(248, 90, 90, ${0.3 + 0.7 * t})`
+    : `rgba(94, 234, 212, ${0.25 + 0.75 * t})`;
+}
+
+// Chip background for a list entry = the exact color of its grid cell.
+function chipStyle(index: number): Record<string, string> {
+  const p = props.thought.rawPolicy[index];
+  return { background: cellColor(p, maxProb(), false) };
+}
+
+// --- three.js input scene ----------------------------------------------
 
 let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
@@ -38,8 +60,8 @@ const SLAB_GAP = 1.5;
 
 function initScene(): void {
   const el = sceneEl.value!;
-  const w = el.clientWidth || 380;
-  const h = el.clientHeight || 320;
+  const w = el.clientWidth || 360;
+  const h = el.clientHeight || 300;
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -62,7 +84,6 @@ function initScene(): void {
   dir.position.set(6, 12, 8);
   scene.add(dir);
 
-  // Six channel slabs: faint 8x8 grids, one per piece type, stacked in Y.
   for (let ch = 0; ch < TOY_NUM_PLANES; ch++) {
     const grid = new THREE.GridHelper(8, 8, 0x8b8fd9, 0x4c4f86);
     (grid.material as THREE.Material).transparent = true;
@@ -102,12 +123,8 @@ function makeLabelSprite(text: string): THREE.Sprite {
   return sprite;
 }
 
-const whiteMat = new THREE.MeshLambertMaterial({
-  color: 0xf6efde, transparent: true, opacity: 0.92,
-});
-const blackMat = new THREE.MeshLambertMaterial({
-  color: 0x17131f, transparent: true, opacity: 0.92,
-});
+const whiteMat = new THREE.MeshLambertMaterial({ color: 0xf6efde, transparent: true, opacity: 0.92 });
+const blackMat = new THREE.MeshLambertMaterial({ color: 0x17131f, transparent: true, opacity: 0.92 });
 const sphereGeo = new THREE.SphereGeometry(0.34, 20, 16);
 
 function updateSpheres(): void {
@@ -119,12 +136,10 @@ function updateSpheres(): void {
       for (let ch = 0; ch < TOY_NUM_PLANES; ch++) {
         const v = planes[(r * 8 + f) * TOY_NUM_PLANES + ch];
         if (v === 0) continue;
-        // +1 = the mover's piece. Toy is the mover when this panel
-        // updates; Toy plays black in bot games — so +1 maps to a dark
-        // sphere and -1 (the human's white army) to a light one. When
-        // Toy somehow plays white, the mapping flips with it.
-        const moverIsBlack = blackToMove;
-        const isBlackPiece = (v > 0) === moverIsBlack;
+        // +1 = the mover's piece; Toy usually plays black, so +1 maps
+        // to a dark sphere and -1 (the human's white army) to a light
+        // one. Positions are the honest rotated net frame.
+        const isBlackPiece = (v > 0) === blackToMove;
         const mesh = new THREE.Mesh(sphereGeo, isBlackPiece ? blackMat : whiteMat);
         mesh.position.set(f - 3.5, ch * SLAB_GAP, r - 3.5);
         sphereGroup.add(mesh);
@@ -133,16 +148,15 @@ function updateSpheres(): void {
   }
 }
 
-// --- 2D policy canvases --------------------------------------------------
+// --- policy grid ---------------------------------------------------------
 
 const GRID = 256;   // 4px per cell
 const PAD = 18;
+const CELL = GRID / 64;
 
-function drawPolicy(
-  canvas: HTMLCanvasElement,
-  probs: Float32Array,
-  legalMask: Uint8Array | null,
-): void {
+function drawGrid(): void {
+  const canvas = gridCanvas.value;
+  if (!canvas) return;
   const ctx = canvas.getContext('2d')!;
   const size = GRID + PAD;
   canvas.width = size;
@@ -150,36 +164,27 @@ function drawPolicy(
   ctx.fillStyle = 'rgba(10, 9, 20, 0.9)';
   ctx.fillRect(0, 0, size, size);
 
-  // Normalize brightness to the strongest cell so the grid stays
-  // readable whether the distribution is a fuzzy prior (max ~1%) or a
-  // sharp post-search spike (max ~90%) — we're showing SHAPE here;
-  // absolute magnitudes live in the visits list.
-  let maxP = 0;
-  for (let i = 0; i < probs.length; i++) if (probs[i] > maxP) maxP = probs[i];
-  if (maxP <= 0) maxP = 1;
+  const { rawPolicy, legalMask } = props.thought;
+  const maxP = maxProb();
 
-  const cell = GRID / 64;
   for (let from = 0; from < 64; from++) {
     for (let to = 0; to < 64; to++) {
-      const p = probs[from * 64 + to];
+      const p = rawPolicy[from * 64 + to];
       if (p <= 1e-7) continue;
-      const t = Math.sqrt(p / maxP); // sqrt lifts the mid-range
-      const illegal = legalMask !== null && legalMask[from * 64 + to] === 0;
-      ctx.fillStyle = illegal
-        ? `rgba(248, 90, 90, ${0.3 + 0.7 * t})`
-        : `rgba(94, 234, 212, ${0.25 + 0.75 * t})`;
-      ctx.fillRect(PAD + to * cell, from * cell, Math.max(1.5, cell - 0.5), Math.max(1.5, cell - 0.5));
+      const illegal = legalMask[from * 64 + to] === 0;
+      ctx.fillStyle = cellColor(p, maxP, illegal);
+      ctx.fillRect(PAD + to * CELL, from * CELL, Math.max(1.5, CELL - 0.5), Math.max(1.5, CELL - 0.5));
     }
   }
 
-  // Axis ticks: file-rank block boundaries every 8 squares.
+  // Rank-block separators.
   ctx.strokeStyle = 'rgba(255,255,255,0.08)';
   ctx.beginPath();
   for (let i = 8; i < 64; i += 8) {
-    ctx.moveTo(PAD + i * cell, 0);
-    ctx.lineTo(PAD + i * cell, GRID);
-    ctx.moveTo(PAD, i * cell);
-    ctx.lineTo(PAD + GRID, i * cell);
+    ctx.moveTo(PAD + i * CELL, 0);
+    ctx.lineTo(PAD + i * CELL, GRID);
+    ctx.moveTo(PAD, i * CELL);
+    ctx.lineTo(PAD + GRID, i * CELL);
   }
   ctx.stroke();
 
@@ -187,27 +192,104 @@ function drawPolicy(
   ctx.font = '9px JetBrains Mono, monospace';
   ctx.textAlign = 'center';
   for (let i = 0; i < 8; i++) {
-    // Ranks of the FROM square down the left, TO blocks along the bottom.
-    ctx.fillText(String(i + 1), PAD / 2, i * 8 * cell + 4 * cell + 3);
-    ctx.fillText(String(i + 1), PAD + i * 8 * cell + 4 * cell, GRID + 12);
+    ctx.fillText(String(i + 1), PAD / 2, i * 8 * CELL + 4 * CELL + 3);
+    ctx.fillText(String(i + 1), PAD + i * 8 * CELL + 4 * CELL, GRID + 12);
+  }
+
+  // Ring the top-visited move's cell (the leader line's target).
+  const top = props.thought.moves[0];
+  if (top) {
+    const row = Math.floor(top.index / 64);
+    const col = top.index % 64;
+    ctx.strokeStyle = '#f7c058';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(PAD + col * CELL + CELL / 2, row * CELL + CELL / 2, 5.5, 0, Math.PI * 2);
+    ctx.stroke();
   }
 }
 
-function redraw(): void {
-  if (rawCanvas.value) drawPolicy(rawCanvas.value, props.thought.rawPolicy, props.thought.legalMask);
-  if (searchCanvas.value) drawPolicy(searchCanvas.value, props.thought.visitPolicy, null);
-  updateSpheres();
+// Translate a net-frame square index to a real board name ("g6").
+function squareName(netIndex: number): string {
+  let r = Math.floor(netIndex / 8);
+  let f = netIndex % 8;
+  if (props.thought.blackToMove) {
+    r = 7 - r;
+    f = 7 - f;
+  }
+  return String.fromCharCode(97 + f) + String(8 - r);
 }
 
-watch(() => props.thought, redraw);
+function onGridMove(e: MouseEvent): void {
+  const canvas = gridCanvas.value!;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left - PAD;
+  const y = e.clientY - rect.top;
+  const to = Math.floor(x / CELL);
+  const from = Math.floor(y / CELL);
+  if (to < 0 || to > 63 || from < 0 || from > 63) {
+    hover.value = null;
+    return;
+  }
+  const idx = from * 64 + to;
+  const p = props.thought.rawPolicy[idx];
+  const illegal = props.thought.legalMask[idx] === 0;
+  hover.value = {
+    x: e.clientX - bodyEl.value!.getBoundingClientRect().left + 14,
+    y: e.clientY - bodyEl.value!.getBoundingClientRect().top - 10,
+    text: `${squareName(from)}→${squareName(to)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ''}`,
+  };
+}
+
+// --- leader line: top list entry → its grid cell -------------------------
+
+function updateLeader(): void {
+  leader.value = null;
+  const body = bodyEl.value;
+  const canvas = gridCanvas.value;
+  const list = moveListEl.value;
+  const top = props.thought.moves[0];
+  if (!body || !canvas || !list || !top) return;
+  const first = list.querySelector<HTMLElement>('.tm-move');
+  if (!first) return;
+
+  const bodyRect = body.getBoundingClientRect();
+  const cellRect = canvas.getBoundingClientRect();
+  const fromRect = first.getBoundingClientRect();
+
+  const row = Math.floor(top.index / 64);
+  const col = top.index % 64;
+  // Canvas is rendered 1:1 (width attribute == CSS width), so cell
+  // coordinates map directly.
+  const x2 = cellRect.left - bodyRect.left + PAD + col * CELL + CELL / 2;
+  const y2 = cellRect.top - bodyRect.top + row * CELL + CELL / 2;
+  const x1 = fromRect.left - bodyRect.left - 6;
+  const y1 = fromRect.top - bodyRect.top + fromRect.height / 2;
+  leader.value = { x1, y1, x2, y2 };
+}
+
+// --- lifecycle ------------------------------------------------------------
+
+function refresh(): void {
+  drawGrid();
+  updateSpheres();
+  nextTick(updateLeader);
+}
+
+watch(() => props.thought, refresh);
+
+let resizeObserver: ResizeObserver | null = null;
 
 onMounted(() => {
   initScene();
-  redraw();
+  refresh();
+  resizeObserver = new ResizeObserver(() => updateLeader());
+  if (bodyEl.value) resizeObserver.observe(bodyEl.value);
 });
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(rafId);
+  resizeObserver?.disconnect();
   controls?.dispose();
   renderer?.dispose();
   sphereGeo.dispose();
@@ -227,57 +309,92 @@ function pct(x: number): string {
   <div class="toy-mind">
     <div class="tm-header">
       <span class="tm-title">Toy Mind</span>
-      <span class="tm-sub">
-        what the net saw · rotated to Toy's view, its pieces are +1 (dark spheres)
+      <span class="tm-legend">
+        <span class="lg lg-legal">■</span> probability on legal moves
+        <span class="lg lg-illegal">■</span> wasted on illegal moves (masked away)
+        <span class="lg lg-zero">■</span> ~zero
       </span>
     </div>
-    <div class="tm-body">
-      <div class="tm-col tm-scene-col">
+
+    <div ref="bodyEl" class="tm-body">
+      <!-- ============ INPUT ============ -->
+      <section class="tm-section">
+        <h3 class="tm-section-title">Input</h3>
         <div ref="sceneEl" class="tm-scene"></div>
-        <div class="tm-caption">input tensor 8×8×6 — drag to rotate</div>
-      </div>
-
-      <div class="tm-col">
-        <canvas ref="rawCanvas" class="tm-grid"></canvas>
         <div class="tm-caption">
-          raw policy (64 from × 64 to)
-          <span class="tm-illegal">■ mass on illegal moves</span>
+          8×8×6 tensor — drag to rotate<br />
+          Toy's view (rotated); its pieces are +1 (dark)
         </div>
-      </div>
+      </section>
 
-      <div class="tm-col">
-        <canvas ref="searchCanvas" class="tm-grid"></canvas>
-        <div class="tm-caption">after {{ 128 }}-sim search</div>
-      </div>
-
-      <div class="tm-col tm-stats">
-        <div class="tm-value">
-          <div class="tm-value-track">
-            <div
-              class="tm-value-fill"
-              :class="{ neg: thought.value < 0 }"
-              :style="{ height: `${Math.abs(thought.value) * 50}%` }"
-            ></div>
-            <div class="tm-value-zero"></div>
+      <!-- ============ NETWORK OUTPUT ============ -->
+      <section class="tm-section">
+        <h3 class="tm-section-title">Network output</h3>
+        <div class="tm-out">
+          <div class="tm-out-policy">
+            <canvas
+              ref="gridCanvas"
+              class="tm-grid"
+              @mousemove="onGridMove"
+              @mouseleave="hover = null"
+            ></canvas>
+            <div class="tm-caption">
+              <span class="tm-sublabel">policy</span>
+              64 from-squares × 64 to-squares · hover to decode
+            </div>
           </div>
-          <div class="tm-value-num">
-            {{ thought.value >= 0 ? '+' : '' }}{{ thought.value.toFixed(2) }}
+          <div class="tm-out-value">
+            <div class="tm-value-track">
+              <div
+                class="tm-value-fill"
+                :class="{ neg: thought.value < 0 }"
+                :style="{ height: `${Math.abs(thought.value) * 50}%` }"
+              ></div>
+              <div class="tm-value-zero"></div>
+            </div>
+            <div class="tm-value-num">
+              {{ thought.value >= 0 ? '+' : '' }}{{ thought.value.toFixed(2) }}
+            </div>
+            <div class="tm-caption"><span class="tm-sublabel">value</span></div>
           </div>
-          <div class="tm-caption">value<br />(Toy's eval)</div>
         </div>
-        <div class="tm-moves">
+      </section>
+
+      <!-- ============ SEARCH ============ -->
+      <section class="tm-section">
+        <h3 class="tm-section-title">Search</h3>
+        <div ref="moveListEl" class="tm-moves">
           <div
-            v-for="m in thought.topMoves"
+            v-for="m in thought.moves"
             :key="m.uci"
             class="tm-move"
             :class="{ chosen: m.uci === thought.chosen }"
           >
+            <span class="tm-chip" :style="chipStyle(m.index)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
             <span class="tm-move-share">{{ pct(m.share) }}</span>
           </div>
-          <div class="tm-caption">visits</div>
         </div>
-      </div>
+        <div class="tm-caption">
+          all {{ thought.moves.length }} legal moves by visit share ·
+          chip = that move's color in the policy grid
+        </div>
+      </section>
+
+      <!-- Leader line: top-visited move → its policy cell. -->
+      <svg v-if="leader" class="tm-leader" aria-hidden="true">
+        <line
+          :x1="leader.x1" :y1="leader.y1" :x2="leader.x2" :y2="leader.y2"
+          stroke="#f7c058" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.85"
+        />
+        <circle :cx="leader.x2" :cy="leader.y2" r="4" fill="none" stroke="#f7c058" stroke-width="1.4" />
+      </svg>
+
+      <div
+        v-if="hover"
+        class="tm-tooltip"
+        :style="{ left: `${hover.x}px`, top: `${hover.y}px` }"
+      >{{ hover.text }}</div>
     </div>
   </div>
 </template>
@@ -291,13 +408,15 @@ function pct(x: number): string {
   -webkit-backdrop-filter: blur(14px) saturate(1.3);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 8px 24px rgba(0, 0, 0, 0.35);
   overflow: hidden;
-  max-width: 1100px;
+  max-width: 1160px;
 }
 
 .tm-header {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   background: linear-gradient(90deg, rgba(45, 212, 191, 0.16), rgba(99, 102, 241, 0.10));
   border-bottom: 1px solid rgba(212, 175, 95, 0.25);
   padding: 10px 16px;
@@ -312,31 +431,60 @@ function pct(x: number): string {
   letter-spacing: 2px;
 }
 
-.tm-sub {
+.tm-legend {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10.5px;
-  color: #64748b;
+  color: #94a3b8;
 }
 
+.lg { margin-left: 10px; margin-right: 3px; }
+.lg-legal { color: #5ae3d8; }
+.lg-illegal { color: #f87171; }
+.lg-zero { color: #1c1a2c; text-shadow: 0 0 0 1px #444; }
+
 .tm-body {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
-  gap: 18px;
-  padding: 14px 16px 12px;
-  align-items: flex-start;
+  gap: 16px;
+  padding: 14px 16px 14px;
+  align-items: stretch;
   justify-content: center;
 }
 
-.tm-col {
+.tm-section {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.tm-section-title {
+  margin: 0;
+  align-self: flex-start;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 2.2px;
+}
+
+.tm-sublabel {
+  color: #5ae3d8;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin-right: 6px;
 }
 
 .tm-scene {
-  width: 360px;
-  height: 300px;
+  width: 340px;
+  height: 290px;
   border-radius: 10px;
   overflow: hidden;
   background: radial-gradient(ellipse at 50% 40%, rgba(60, 58, 110, 0.35), rgba(12, 11, 24, 0.6));
@@ -344,10 +492,25 @@ function pct(x: number): string {
 }
 .tm-scene:active { cursor: grabbing; }
 
+.tm-out {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.tm-out-policy,
+.tm-out-value {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
 .tm-grid {
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(10, 9, 20, 0.9);
+  cursor: crosshair;
 }
 
 .tm-caption {
@@ -356,24 +519,7 @@ function pct(x: number): string {
   color: #64748b;
   text-align: center;
   letter-spacing: 0.4px;
-}
-
-.tm-illegal {
-  color: #f87171;
-  margin-left: 6px;
-}
-
-.tm-stats {
-  flex-direction: row;
-  gap: 18px;
-  align-items: flex-start;
-}
-
-.tm-value {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
+  line-height: 1.5;
 }
 
 .tm-value-track {
@@ -419,29 +565,67 @@ function pct(x: number): string {
 .tm-moves {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: 118px;
+  gap: 3px;
+  min-width: 150px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.65) rgba(255, 255, 255, 0.04);
 }
 
 .tm-move {
   display: flex;
-  justify-content: space-between;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   color: #d1d5db;
-  padding: 3px 8px;
+  padding: 2px 8px;
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.03);
+  flex-shrink: 0;
 }
 
 .tm-move.chosen {
-  background: rgba(94, 234, 212, 0.18);
+  outline: 1px solid rgba(94, 234, 212, 0.7);
   color: #5ae3d8;
   font-weight: 600;
 }
 
+.tm-chip {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  flex-shrink: 0;
+}
+
+.tm-move-uci { flex: 1; }
+
 .tm-move-share {
   color: #94a3b8;
+}
+
+.tm-leader {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.tm-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(12, 11, 24, 0.95);
+  border: 1px solid rgba(94, 234, 212, 0.4);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  z-index: 5;
 }
 </style>

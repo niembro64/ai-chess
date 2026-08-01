@@ -29,7 +29,11 @@ export type ToyThought = {
   value: number;
   rootValue: number;
   chosen: string;                                   // e.g. "e7e5"
-  topMoves: { uci: string; share: number }[];       // top-5 by visits
+  // EVERY legal move, ordered by search visits (best first). `index`
+  // is the move's slot in the 4096 policy vector — the panel uses it
+  // to color each list entry exactly like its policy-grid cell and to
+  // anchor the leader line.
+  moves: { uci: string; share: number; index: number }[];
   // True when the tensor is in black's rotated frame (Toy plays black).
   blackToMove: boolean;
 };
@@ -83,9 +87,10 @@ export class ToyPlayer {
         value: rootEval.value,
         rootValue: result.rootValue,
         chosen: posToAlgebraic(move.from) + posToAlgebraic(move.to),
-        topMoves: result.rankedMoves.slice(0, 5).map(r => ({
+        moves: result.rankedMoves.map(r => ({
           uci: posToAlgebraic(r.move.from) + posToAlgebraic(r.move.to),
           share: r.visits / totalVisits,
+          index: moveToIndex(r.move, isWhite),
         })),
         blackToMove: !isWhite,
       });
