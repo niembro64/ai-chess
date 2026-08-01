@@ -88,7 +88,7 @@ const canJoin = computed(() => {
         <p class="subtitle">Online Multiplayer Chess</p>
 
         <div class="main-actions">
-          <button class="lobby-btn host-btn" @click="handleHost">Host Game</button>
+          <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>
 
           <div class="join-row">
             <input
@@ -109,12 +109,12 @@ const canJoin = computed(() => {
           <!-- Bot opponents. Weights are fetched lazily on click — only
                the model you pick gets downloaded. -->
           <button class="lobby-btn ai-btn" @click="emit('playBot', 'sage')">
-            <span class="bot-name">Play Sage</span>
-            <span class="bot-tag">full-strength network</span>
+            <span class="bot-name">Play Against Sage AI</span>
+            <span class="bot-tag">Strong AI - No Brain Visuals</span>
           </button>
           <button class="lobby-btn ai-btn toy-btn" @click="emit('playBot', 'toy')">
-            <span class="bot-name">Play Toy</span>
-            <span class="bot-tag">transparent mini net — watch it think</span>
+            <span class="bot-name">Play Toy Bot</span>
+            <span class="bot-tag">Weak AI - Watch Input and Output Activations</span>
           </button>
         </div>
 

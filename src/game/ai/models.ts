@@ -15,13 +15,13 @@ export const MODELS: Record<ModelId, {
 }> = {
   sage: {
     name: 'Sage',
-    tagline: 'full-strength network · 5.7M params',
+    tagline: 'Strong AI - No Brain Visuals',
     file: 'models/sage.json',
     sims: 400,
   },
   toy: {
     name: 'Toy',
-    tagline: 'transparent mini network · watch it think',
+    tagline: 'Weak AI - Watch Input and Output Activations',
     file: 'models/toy.json',
     sims: 128,
   },
