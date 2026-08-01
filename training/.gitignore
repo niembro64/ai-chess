@@ -18,3 +18,4 @@ tests/fixtures/*.json
 # Rust build artefacts
 rust_engine/target/
 rust_engine/Cargo.lock
+toy_checkpoints/
