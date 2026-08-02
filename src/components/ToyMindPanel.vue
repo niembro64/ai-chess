@@ -261,11 +261,23 @@ function updateLeader(): void {
   const col = top.index % 64;
   // Canvas is rendered 1:1 (width attribute == CSS width), so cell
   // coordinates map directly.
-  const x2 = cellRect.left - bodyRect.left + PAD + col * CELL + CELL / 2;
-  const y2 = cellRect.top - bodyRect.top + row * CELL + CELL / 2;
-  const x1 = fromRect.left - bodyRect.left - 6;
-  const y1 = fromRect.top - bodyRect.top + fromRect.height / 2;
-  leader.value = { x1, y1, x2, y2 };
+  const cx = cellRect.left - bodyRect.left + PAD + col * CELL + CELL / 2;
+  const cy = cellRect.top - bodyRect.top + row * CELL + CELL / 2;
+  const lx = fromRect.left - bodyRect.left - 4;
+  const ly = fromRect.top - bodyRect.top + fromRect.height / 2;
+  // Pull both endpoints back along the line so the arrow TIPS rest on
+  // the cell's ring and the entry's outline instead of covering them.
+  const dx = cx - lx;
+  const dy = cy - ly;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  leader.value = {
+    x1: lx + ux * 4,
+    y1: ly + uy * 4,
+    x2: cx - ux * 9,
+    y2: cy - uy * 9,
+  };
 }
 
 // --- lifecycle ------------------------------------------------------------
@@ -317,9 +329,9 @@ function pct(x: number): string {
     </div>
 
     <div ref="bodyEl" class="tm-body">
-      <!-- ============ INPUT ============ -->
+      <!-- ============ GAME STATE INPUT ============ -->
       <section class="tm-section">
-        <h3 class="tm-section-title">Input</h3>
+        <h3 class="tm-section-title">Game State Input</h3>
         <div ref="sceneEl" class="tm-scene"></div>
         <div class="tm-caption">
           8×8×6 tensor — drag to rotate<br />
@@ -339,7 +351,7 @@ function pct(x: number): string {
               @mouseleave="hover = null"
             ></canvas>
             <div class="tm-caption">
-              <span class="tm-sublabel">policy</span>
+              <span class="tm-sublabel">policy output head</span><br />
               64 from-squares × 64 to-squares · hover to decode
             </div>
           </div>
@@ -355,7 +367,7 @@ function pct(x: number): string {
             <div class="tm-value-num">
               {{ thought.value >= 0 ? '+' : '' }}{{ thought.value.toFixed(2) }}
             </div>
-            <div class="tm-caption"><span class="tm-sublabel">value</span></div>
+            <div class="tm-caption"><span class="tm-sublabel">value output head</span></div>
           </div>
         </div>
       </section>
@@ -365,10 +377,10 @@ function pct(x: number): string {
         <h3 class="tm-section-title">Search</h3>
         <div ref="moveListEl" class="tm-moves">
           <div
-            v-for="m in thought.moves"
+            v-for="(m, i) in thought.moves"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen }"
+            :class="{ chosen: m.uci === thought.chosen, top: i === 0 }"
           >
             <span class="tm-chip" :style="chipStyle(m.index)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
@@ -381,13 +393,23 @@ function pct(x: number): string {
         </div>
       </section>
 
-      <!-- Leader line: top-visited move → its policy cell. -->
+      <!-- Leader line: top-visited move ↔ its policy cell, arrowheads
+           pointing at both (the amber-outlined list entry and the
+           amber-ringed grid cell). -->
       <svg v-if="leader" class="tm-leader" aria-hidden="true">
+        <defs>
+          <marker
+            id="tm-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#f7c058" />
+          </marker>
+        </defs>
         <line
           :x1="leader.x1" :y1="leader.y1" :x2="leader.x2" :y2="leader.y2"
           stroke="#f7c058" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.85"
+          marker-start="url(#tm-arrow)" marker-end="url(#tm-arrow)"
         />
-        <circle :cx="leader.x2" :cy="leader.y2" r="4" fill="none" stroke="#f7c058" stroke-width="1.4" />
       </svg>
 
       <div
@@ -588,9 +610,15 @@ function pct(x: number): string {
 }
 
 .tm-move.chosen {
-  outline: 1px solid rgba(94, 234, 212, 0.7);
   color: #5ae3d8;
   font-weight: 600;
+}
+
+/* Top-visited move: amber outline matching the ring around its cell in
+   the policy grid — the two ends of the leader line dress alike. */
+.tm-move.top {
+  outline: 1.4px solid #f7c058;
+  outline-offset: 1px;
 }
 
 .tm-chip {
