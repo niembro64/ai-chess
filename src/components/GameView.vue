@@ -675,6 +675,7 @@ onUnmounted(() => {
       <ToyMindPanel
         v-if="showToyPanel"
         :thought="toyThought!"
+        :flipped="localColor === 'black'"
         class="toy-mind-row"
       />
       </div>

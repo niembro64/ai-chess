@@ -17,7 +17,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { ToyThought } from '@/game/ai/ToyPlayer';
 import { TOY_CHANNEL_NAMES, TOY_NUM_PLANES } from '@/game/ai/ToyNet';
 
-const props = defineProps<{ thought: ToyThought }>();
+// `flipped` mirrors the game board's orientation: when the human plays
+// black the board renders 180° rotated, and the POLICY HEAD follows so
+// both boards read the same way (h1 top-left, your pieces at bottom).
+const props = defineProps<{ thought: ToyThought; flipped?: boolean }>();
 
 const bodyEl = ref<HTMLDivElement | null>(null);
 const sceneEl = ref<HTMLDivElement | null>(null);
@@ -334,10 +337,16 @@ function netToReal(netIndex: number): { r: number; f: number } {
   return { r, f };
 }
 
+// Real board coords -> DISPLAY coords, matching the game board's
+// orientation (180° rotation when the human plays black).
+function realToDisp(s: { r: number; f: number }): { r: number; f: number } {
+  return props.flipped ? { r: 7 - s.r, f: 7 - s.f } : s;
+}
+
 // Base-coordinate pixel center of a policy entry's mini-cell.
 function cellCenter(policyIndex: number): { x: number; y: number } {
-  const from = netToReal(Math.floor(policyIndex / 64));
-  const to = netToReal(policyIndex % 64);
+  const from = realToDisp(netToReal(Math.floor(policyIndex / 64)));
+  const to = realToDisp(netToReal(policyIndex % 64));
   return {
     x: PAD_L + from.f * (OUTER + GAP) + to.f * MINI + MINI / 2,
     y: from.r * (OUTER + GAP) + to.r * MINI + MINI / 2,
@@ -381,8 +390,8 @@ function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
   }
 
   for (let i = 0; i < 4096; i++) {
-    const from = netToReal(Math.floor(i / 64));
-    const to = netToReal(i % 64);
+    const from = realToDisp(netToReal(Math.floor(i / 64)));
+    const to = realToDisp(netToReal(i % 64));
     ctx.fillStyle = cellColor(rawPolicy[i], legalMask[i] === 0);
     ctx.fillRect(
       PAD_L + from.f * (OUTER + GAP) + to.f * MINI,
@@ -392,12 +401,16 @@ function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
     );
   }
 
+  // Labels follow the display orientation, same as the game board's
+  // coordinate strips.
   ctx.fillStyle = '#94a3b8';
   ctx.font = '10px JetBrains Mono, monospace';
   ctx.textAlign = 'center';
   for (let i = 0; i < 8; i++) {
-    ctx.fillText(String.fromCharCode(97 + i), PAD_L + i * (OUTER + GAP) + OUTER / 2, BOARD + 11);
-    ctx.fillText(String(8 - i), PAD_L / 2 - 1, i * (OUTER + GAP) + OUTER / 2 + 3);
+    const fileChar = String.fromCharCode(97 + (props.flipped ? 7 - i : i));
+    const rankNum = props.flipped ? i + 1 : 8 - i;
+    ctx.fillText(fileChar, PAD_L + i * (OUTER + GAP) + OUTER / 2, BOARD + 11);
+    ctx.fillText(String(rankNum), PAD_L / 2 - 1, i * (OUTER + GAP) + OUTER / 2 + 3);
   }
 
   // Ring THE selected cell (search row or modal cell pick — one ring).
@@ -429,13 +442,17 @@ function decodeCell(
   const k = canvas.width / BASE_W;
   const x = (e.clientX - rect.left) / (scale * k) - PAD_L;
   const y = (e.clientY - rect.top) / (scale * k);
-  const fromF = Math.floor(x / (OUTER + GAP));
-  const fromR = Math.floor(y / (OUTER + GAP));
-  const toF = Math.floor((x - fromF * (OUTER + GAP)) / MINI);
-  const toR = Math.floor((y - fromR * (OUTER + GAP)) / MINI);
-  if (fromF < 0 || fromF > 7 || fromR < 0 || fromR > 7 || toF < 0 || toF > 7 || toR < 0 || toR > 7) {
+  const dFromF = Math.floor(x / (OUTER + GAP));
+  const dFromR = Math.floor(y / (OUTER + GAP));
+  const dToF = Math.floor((x - dFromF * (OUTER + GAP)) / MINI);
+  const dToR = Math.floor((y - dFromR * (OUTER + GAP)) / MINI);
+  if (dFromF < 0 || dFromF > 7 || dFromR < 0 || dFromR > 7 || dToF < 0 || dToF > 7 || dToR < 0 || dToR > 7) {
     return null;
   }
+  // Display coords -> real board coords (un-flip), then real -> net frame.
+  const flip = props.flipped ? (v: number) => 7 - v : (v: number) => v;
+  const fromR = flip(dFromR), fromF = flip(dFromF);
+  const toR = flip(dToR), toF = flip(dToF);
   const black = props.thought.blackToMove;
   const nFrom = (black ? 7 - fromR : fromR) * 8 + (black ? 7 - fromF : fromF);
   const nTo = (black ? 7 - toR : toR) * 8 + (black ? 7 - toF : toF);
