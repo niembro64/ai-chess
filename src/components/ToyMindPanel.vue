@@ -918,14 +918,17 @@ function pct(x: number): string {
     gap: 4px;
     padding: 4px;
     align-items: stretch;
-  }
-  .tm-sec-search .tm-moves {
-    max-height: 168px;
+    /* Hard budget: the strip's intrinsic height is set by the POLICY
+       HEAD's width-driven size; on short screens this cap kicks in and
+       the min-height:0 shrink chains below scale the canvases down
+       (aspect kept) instead of clipping them. */
+    max-height: 36dvh;
   }
   .tm-section {
     padding: 3px 4px 4px;
     gap: 3px;
     min-width: 0;
+    min-height: 0;
   }
   /* No section titles on mobile — the teal subtitles carry the labels.
      POLICY HEAD gets the width; GAME STATE and SEARCH cede it. */
@@ -938,15 +941,18 @@ function pct(x: number): string {
   .tm-subtitle {
     font-size: 8px;
     letter-spacing: 0.8px;
+    flex-shrink: 0;
   }
   .tm-caption {
     display: none;
   }
   /* GAME STATE strip runs 6×1 here (BoardGrid props flip at this same
-     breakpoint via matchMedia); it scales down by the section's
-     height, keeping its aspect. */
+     breakpoint via matchMedia). flex-basis 0 is load-bearing: the
+     column's tall natural canvas must never inflate the strip — it
+     takes whatever height the POLICY HEAD leaves and scales into it,
+     aspect kept, never clipped. */
   .tm-states {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-height: 0;
     align-items: center;
   }
@@ -958,9 +964,16 @@ function pct(x: number): string {
     flex-direction: column;
     gap: 3px;
     align-items: center;
+    min-height: 0;
+    width: 100%;
+  }
+  .tm-out-policy {
+    min-height: 0;
+    width: 100%;
   }
   .tm-grid {
     max-width: 100%;
+    min-height: 0;
   }
   .tm-out-value {
     display: none;
