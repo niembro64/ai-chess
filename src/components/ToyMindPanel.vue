@@ -573,7 +573,7 @@ function pct(x: number): string {
         ></div>
         <div class="tm-caption">
           8×8×6 tensor — drag to rotate, tap to expand<br />
-          Toy's view (rotated); its pieces are +1 (dark)
+          Toy's view — its pieces are +1, yours are −1
         </div>
       </section>
 

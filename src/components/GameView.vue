@@ -267,7 +267,9 @@ function scheduleBotMove(): void {
     const move = await aiPlayer.getMove(gameState.value);
     aiThinking.value = false;
     if (!currentServer || isGameOver.value) return;
-    currentServer.receiveCommand({ type: 'move', move }, 2);
+    // The bot is whichever seat the human isn't in (Toy plays white).
+    const botPlayerId: PlayerId = localPlayerId.value === 1 ? 2 : 1;
+    currentServer.receiveCommand({ type: 'move', move }, botPlayerId);
   }, 50);
 }
 
@@ -345,7 +347,10 @@ async function handlePlayBot(model: ModelId): Promise<void> {
   toyThought.value = null;
   playingVsBot.value = true;
   networkRole.value = null;
-  localPlayerId.value = 1;
+  // Toy plays WHITE and moves first, so the Toy Mind panel fills with
+  // its first thought immediately — no waiting for the human's move.
+  // Sage games keep the human on white.
+  localPlayerId.value = model === 'toy' ? 2 : 1;
   isConnecting.value = false;
 
   startGameWithPlayers([1, 2]);
