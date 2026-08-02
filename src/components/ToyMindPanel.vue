@@ -371,9 +371,9 @@ function pct(x: number): string {
       <!-- ============ NETWORK INPUT ============ -->
       <section class="tm-section">
         <h3 class="tm-section-title">Network Input</h3>
+        <div class="tm-subtitle">game state</div>
         <div ref="sceneEl" class="tm-scene"></div>
         <div class="tm-caption">
-          <span class="tm-sublabel">game state</span><br />
           8×8×6 tensor — drag to rotate<br />
           Toy's view (rotated); its pieces are +1 (dark)
         </div>
@@ -384,6 +384,7 @@ function pct(x: number): string {
         <h3 class="tm-section-title">Network output</h3>
         <div class="tm-out">
           <div class="tm-out-policy">
+            <div class="tm-subtitle">policy head</div>
             <canvas
               ref="gridCanvas"
               class="tm-grid"
@@ -391,11 +392,11 @@ function pct(x: number): string {
               @mouseleave="hover = null"
             ></canvas>
             <div class="tm-caption">
-              <span class="tm-sublabel">policy head</span><br />
               each square holds a mini-board of its destinations · hover to decode
             </div>
           </div>
           <div class="tm-out-value">
+            <div class="tm-subtitle">value head</div>
             <div class="tm-value-track">
               <div
                 class="tm-value-fill"
@@ -407,7 +408,6 @@ function pct(x: number): string {
             <div class="tm-value-num">
               {{ thought.value >= 0 ? '+' : '' }}{{ thought.value.toFixed(2) }}
             </div>
-            <div class="tm-caption"><span class="tm-sublabel">value head</span></div>
           </div>
         </div>
       </section>
@@ -551,6 +551,16 @@ function pct(x: number): string {
   text-transform: uppercase;
   letter-spacing: 1.5px;
   margin-right: 6px;
+}
+
+/* Subtitle line ABOVE each visual (game state / policy head / value head). */
+.tm-subtitle {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #5ae3d8;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
 }
 
 .tm-scene {
