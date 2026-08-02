@@ -989,20 +989,35 @@ function pct(x: number): string {
     flex-direction: column;
     gap: 3px;
     align-items: center;
+    flex: 1 1 0;
     min-height: 0;
     width: 100%;
   }
   .tm-out-policy {
+    flex: 1 1 0;
     min-height: 0;
     width: 100%;
   }
-  /* POLICY HEAD stays IN FLOW and width-driven — it anchors the
-     strip's intrinsic width (going absolute here collapses the whole
-     panel horizontally). Only the GAME STATE strip needs the absolute
-     containment, inside its left section. */
-  .tm-grid {
-    max-width: 100%;
+  /* POLICY HEAD containment — same absolute pattern as the GAME
+     STATE: scaled to fit both the section's width and height,
+     centered, never clipped (wide-short screens used to chop its
+     bottom). Absolute is safe here ONLY because .toy-mind-row
+     align-self: stretch fixes the panel's width — the section widths
+     are %-based, nothing depends on this canvas's intrinsic size. */
+  .tm-grid-wrap {
+    flex: 1 1 0;
     min-height: 0;
+    align-self: stretch;
+    position: relative;
+  }
+  .tm-grid {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
   }
   .tm-out-value {
     display: none;
