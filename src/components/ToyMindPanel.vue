@@ -374,8 +374,8 @@ function pct(x: number): string {
               class="tm-grid"
               :colors="policyColors"
               :mini="8"
-              :file-labels="fileLabels"
-              :rank-labels="rankLabels"
+              :col-labels="fileLabels"
+              :row-labels="rankLabels"
               :ring="ringDisp"
               checker
               @click="openModal('policy')"
@@ -482,8 +482,8 @@ function pct(x: number): string {
           :colors="policyColors"
           :mini="8"
           :k="2"
-          :file-labels="fileLabels"
-          :rank-labels="rankLabels"
+          :col-labels="fileLabels"
+          :row-labels="rankLabels"
           :ring="ringDisp"
           checker
           @cell-click="onModalGridClick"
