@@ -794,20 +794,40 @@ function pct(x: number): string {
 
 .tm-body {
   position: relative;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding: 14px 16px 14px;
+  /* Desktop: compact 2x2 grid sized for the side-by-side game layout —
+     GAME STATE top-left, POLICY beneath it, SEARCH as a full-height
+     right column (the one thing allowed to scroll). The mobile block
+     at the end of this file overrides back to a horizontal strip. */
+  display: grid;
+  grid-template-columns: auto minmax(165px, 195px);
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "state  search"
+    "output search";
+  gap: 10px;
+  padding: 10px 12px;
   align-items: stretch;
   justify-content: center;
+}
+
+.tm-sec-state { grid-area: state; }
+.tm-sec-output { grid-area: output; }
+.tm-sec-search {
+  grid-area: search;
+  min-height: 0;
+}
+.tm-sec-search .tm-moves {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
 }
 
 .tm-section {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px 12px;
+  gap: 6px;
+  padding: 8px 12px 10px;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.02);
@@ -834,8 +854,8 @@ function pct(x: number): string {
 }
 
 .tm-scene {
-  width: 340px;
-  height: 290px;
+  width: 260px;
+  height: 192px;
   border-radius: 10px;
   overflow: hidden;
   background: radial-gradient(ellipse at 50% 40%, rgba(60, 58, 110, 0.35), rgba(12, 11, 24, 0.6));
@@ -1098,10 +1118,14 @@ function pct(x: number): string {
     display: none;
   }
   .tm-body {
+    display: flex;
     flex-wrap: nowrap;
     gap: 4px;
     padding: 4px;
     align-items: stretch;
+  }
+  .tm-sec-search .tm-moves {
+    max-height: 168px;
   }
   .tm-section {
     padding: 3px 4px 4px;

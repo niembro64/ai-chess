@@ -742,6 +742,45 @@ onUnmounted(() => {
   max-width: calc(100vw - 16px);
 }
 
+/* Visual-bot mode sheds furniture the mode doesn't need, at EVERY
+   width: player chips and Offer Draw / Resign (the game-over Return
+   to Lobby button survives). Priority goes to the three visuals + the
+   board, mirroring the mobile philosophy. */
+.game-area.toy-mode .player-chip {
+  display: none;
+}
+.game-area.toy-mode .game-controls .control-btn:not(.lobby-btn) {
+  display: none;
+}
+
+/* Desktop Visual-bot: left/right split — Toy Mind panel on the left,
+   board column on the right, sidebars gone. (The mobile block below
+   handles the top/bottom variant.) */
+@media (min-width: 901px) {
+  .game-area.toy-mode .game-stack {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+  }
+  .game-area.toy-mode .toy-mind-row {
+    order: -1;
+    margin: 0 0 0 12px;
+  }
+  .game-area.toy-mode .sidebar {
+    display: none;
+  }
+  .game-area.has-panel {
+    align-items: safe center;
+  }
+  /* The board's size formula budgets ~488px for the sidebars, which
+     toy-mode hides — rebudget for the panel instead so panel + board
+     fit side by side down to ~1150px-wide screens. */
+  .game-area.toy-mode :deep(.square) {
+    --sq: min(72px, calc((100dvw - 810px) / 8), calc((100dvh - 250px) / 8));
+  }
+}
+
 /* --- Mobile: thumbs-first layout ----------------------------------
    The chessboard is the only thing the player touches constantly, so
    it pins to the BOTTOM of the screen (thumb zone) at full width. All
@@ -790,15 +829,6 @@ onUnmounted(() => {
   }
   .game-area.has-panel {
     overflow: hidden;
-  }
-  /* Visual-bot mode strips the furniture the mode doesn't need: player
-     chips and the Offer Draw / Resign buttons (the game-over Return to
-     Lobby button stays). Every pixel goes to the three visuals + board. */
-  .game-area.toy-mode .player-chip {
-    display: none;
-  }
-  .game-area.toy-mode .game-controls .control-btn:not(.lobby-btn) {
-    display: none;
   }
 }
 
