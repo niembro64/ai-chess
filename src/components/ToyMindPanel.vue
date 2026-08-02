@@ -116,14 +116,13 @@ function initScene(): void {
 
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 200);
-  camera.position.set(11, 8.5, 13);
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.enablePan = false;
-  controls.minDistance = 6;
-  controls.maxDistance = 40;
-  controls.target.set(0, (TOY_NUM_PLANES - 1) * SLAB_GAP * 0.5, 0);
+  controls.minDistance = 4;
+  controls.maxDistance = 60;
+  fitCamera();
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.75));
   const dir = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -153,8 +152,29 @@ function initScene(): void {
   animate();
 }
 
+// Frame the whole tensor stack (slabs + channel labels) inside the
+// current viewport, whatever its size/aspect: back the camera off along
+// a pleasing iso direction until the scene's bounding sphere fits the
+// narrower of the two view angles.
+const SCENE_RADIUS = 7.4;
+
+function fitCamera(): void {
+  if (!camera || !controls) return;
+  const target = new THREE.Vector3(0, (TOY_NUM_PLANES - 1) * SLAB_GAP * 0.5, 0);
+  const fovV = (camera.fov * Math.PI) / 180;
+  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
+  const halfMin = Math.min(fovV, fovH) / 2;
+  const dist = (SCENE_RADIUS / Math.sin(halfMin)) * 1.02;
+  const dir = new THREE.Vector3(1, 0.55, 1.15).normalize();
+  camera.position.copy(target.clone().add(dir.multiplyScalar(dist)));
+  camera.updateProjectionMatrix();
+  controls.target.copy(target);
+  controls.update();
+}
+
 // Re-home the single renderer between the inline card and the modal —
-// one scene, one WebGL context, two possible parents.
+// one scene, one WebGL context, two possible parents. Refits the
+// camera so the stack always starts fully framed in the new viewport.
 function mountSceneTo(el: HTMLElement): void {
   if (!renderer || !camera) return;
   el.appendChild(renderer.domElement);
@@ -163,6 +183,7 @@ function mountSceneTo(el: HTMLElement): void {
   renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  fitCamera();
 }
 
 function makeLabelSprite(text: string): THREE.Sprite {
@@ -235,6 +256,8 @@ function openModal(which: 'state' | 'policy'): void {
 function closeModal(): void {
   const was = expanded.value;
   expanded.value = null;
+  picked.value = null;
+  hover.value = null;
   nextTick(() => {
     if (was === 'state' && sceneEl.value) {
       mountSceneTo(sceneEl.value);
@@ -279,7 +302,12 @@ function cellCenter(policyIndex: number): { x: number; y: number } {
   };
 }
 
-function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
+// A tiny square the user picked inside the POLICY modal (click-to-
+// inspect). Ringed in white on the modal canvas, decoded in a pinned
+// line under it.
+const picked = ref<{ index: number; text: string } | null>(null);
+
+function drawGridInto(canvas: HTMLCanvasElement, k: number, showPicked = false): void {
   const ctx = canvas.getContext('2d')!;
   canvas.width = BASE_W * k;
   canvas.height = BASE_H * k;
@@ -330,16 +358,31 @@ function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
     ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
     ctx.stroke();
   }
+
+  // Ring the picked cell (modal click-to-inspect) in white.
+  if (showPicked && picked.value) {
+    const c = cellCenter(picked.value.index);
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 4.2, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 }
 
 function redrawGrids(): void {
   if (gridCanvas.value) drawGridInto(gridCanvas.value, 1);
   if (expanded.value === 'policy' && modalGridCanvas.value) {
-    drawGridInto(modalGridCanvas.value, 2);
+    drawGridInto(modalGridCanvas.value, 2, true);
   }
 }
 
-function gridHover(e: MouseEvent, canvas: HTMLCanvasElement, container: HTMLElement): void {
+// Decode a mouse/touch position on a policy canvas into a policy index
+// + human-readable text, or null when outside the cells.
+function decodeCell(
+  e: MouseEvent,
+  canvas: HTMLCanvasElement,
+): { index: number; text: string } | null {
   const rect = canvas.getBoundingClientRect();
   const scale = rect.width / canvas.width || 1;
   const k = canvas.width / BASE_W;
@@ -350,8 +393,7 @@ function gridHover(e: MouseEvent, canvas: HTMLCanvasElement, container: HTMLElem
   const toF = Math.floor((x - fromF * (OUTER + GAP)) / MINI);
   const toR = Math.floor((y - fromR * (OUTER + GAP)) / MINI);
   if (fromF < 0 || fromF > 7 || fromR < 0 || fromR > 7 || toF < 0 || toF > 7 || toR < 0 || toR > 7) {
-    hover.value = null;
-    return;
+    return null;
   }
   const black = props.thought.blackToMove;
   const nFrom = (black ? 7 - fromR : fromR) * 8 + (black ? 7 - fromF : fromF);
@@ -360,22 +402,35 @@ function gridHover(e: MouseEvent, canvas: HTMLCanvasElement, container: HTMLElem
   const p = props.thought.rawPolicy[idx];
   const illegal = props.thought.legalMask[idx] === 0;
   const name = (f: number, r: number) => String.fromCharCode(97 + f) + String(8 - r);
-  const cRect = container.getBoundingClientRect();
-  hover.value = {
-    x: e.clientX - cRect.left + 14,
-    y: e.clientY - cRect.top - 10,
-    text: `${name(fromF, fromR)}→${name(toF, toR)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ''}`,
+  return {
+    index: idx,
+    text: `${name(fromF, fromR)}→${name(toF, toR)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ' · legal'}`,
   };
 }
 
-function onGridMove(e: MouseEvent): void {
-  if (gridCanvas.value && bodyEl.value) gridHover(e, gridCanvas.value, bodyEl.value);
+// Hover decode exists only in the MODAL (desktop nicety); the inline
+// canvas is purely a "tap to expand" trigger.
+function onModalGridMove(e: MouseEvent): void {
+  if (!modalGridCanvas.value || !modalPolicyWrap.value) return;
+  const cell = decodeCell(e, modalGridCanvas.value);
+  if (!cell) {
+    hover.value = null;
+    return;
+  }
+  const cRect = modalPolicyWrap.value.getBoundingClientRect();
+  hover.value = {
+    x: e.clientX - cRect.left + 14,
+    y: e.clientY - cRect.top - 10,
+    text: cell.text,
+  };
 }
 
-function onModalGridMove(e: MouseEvent): void {
-  if (modalGridCanvas.value && modalPolicyWrap.value) {
-    gridHover(e, modalGridCanvas.value, modalPolicyWrap.value);
-  }
+// Click-to-inspect inside the modal: pin the decoded cell (white ring
+// on the canvas + persistent line below), tap-friendly.
+function onModalGridClick(e: MouseEvent): void {
+  if (!modalGridCanvas.value) return;
+  picked.value = decodeCell(e, modalGridCanvas.value);
+  redrawGrids();
 }
 
 // --- leader lines: selected list entry → its grid cell -------------------
@@ -423,8 +478,10 @@ function updateLeaders(): void {
 // --- lifecycle ------------------------------------------------------------
 
 function refresh(): void {
-  // New thought → selection resets to the search's top choice.
+  // New thought → selection resets to the search's top choice and any
+  // pinned cell inspection clears.
   selectedIdx.value = 0;
+  picked.value = null;
   redrawGrids();
   updateSpheres();
   nextTick(updateLeaders);
@@ -494,8 +551,6 @@ function pct(x: number): string {
               ref="gridCanvas"
               class="tm-grid"
               @click="openModal('policy')"
-              @mousemove="onGridMove"
-              @mouseleave="hover = null"
             ></canvas>
             <div class="tm-caption">
               each square holds a mini-board of its destinations · tap to expand
@@ -558,11 +613,6 @@ function pct(x: number): string {
         />
       </svg>
 
-      <div
-        v-if="hover && !expanded"
-        class="tm-tooltip"
-        :style="{ left: `${hover.x}px`, top: `${hover.y}px` }"
-      >{{ hover.text }}</div>
     </div>
 
     <!-- ============ Fullscreen modals ============ -->
@@ -586,9 +636,13 @@ function pct(x: number): string {
         <canvas
           ref="modalGridCanvas"
           class="tm-modal-grid"
+          @click="onModalGridClick"
           @mousemove="onModalGridMove"
           @mouseleave="hover = null"
         ></canvas>
+        <div class="tm-picked" :class="{ empty: !picked }">
+          {{ picked ? picked.text : 'tap a tiny square to inspect it' }}
+        </div>
         <div class="tm-subtitle">search</div>
         <div ref="modalMovesEl" class="tm-moves tm-modal-moves">
           <div
@@ -942,6 +996,24 @@ function pct(x: number): string {
 .tm-modal-moves {
   max-height: 24dvh;
   min-width: min(70vw, 260px);
+}
+
+.tm-picked {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e2e8f0;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.tm-picked.empty {
+  color: #64748b;
+  font-weight: 400;
+  border-color: transparent;
+  background: transparent;
 }
 
 /* --- Mobile compression — MUST stay the last block (ties the base
