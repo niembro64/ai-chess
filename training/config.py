@@ -353,6 +353,50 @@ def build_config() -> TrainConfig:
     )
 
 
+# ---------------------------------------------------------------------------
+# Toy — the teaching-sized net, trained by the SAME pipeline
+# ---------------------------------------------------------------------------
+#
+# Toy inherits every architecture-independent helper from build_config()
+# verbatim — label smoothing, draw down-weighting, cap masking, mirror
+# augmentation, resign + truth-check, Syzygy adjudication, endgame
+# curriculum, dirichlet/FPU/softening, eval gating, plateau stop — and
+# overrides only scale and throughput. Architecture lives in
+# chess_ai/toy.py (3 BN-free blocks x 32 filters, 6-plane input).
+#
+# Throughput note: the Rust MCTS and the multiprocess inference server
+# are hard-wired to the 20-plane encoding, so Toy runs single-process
+# Python MCTS with many lockstep games batching their NN calls — the
+# same architecture Sage used pre-Rust. Fine at Toy's size.
+
+CHECKPOINT_DIR_TOY = ROOT / "runs_toy" / "latest"
+
+
+def build_toy_config() -> TrainConfig:
+    cfg = build_config()
+    cfg.num_workers = 0                 # single-process (see note above)
+    cfg.num_concurrent_games = 96       # lockstep games per batched GPU call
+    cfg.mcts_simulations = 64
+    cfg.batch_size = 256
+    cfg.min_examples_between_grad_steps = 64
+    cfg.replay_buffer_capacity = 60_000
+    cfg.min_buffer_for_training = 2_000
+    # Toy converges in far fewer gens than Sage; schedule scaled down.
+    cfg.learning_rate = 1e-3
+    cfg.lr_schedule = (
+        (0,       1e-3),
+        (15_000,  3e-4),
+        (35_000,  1e-4),
+        (60_000,  3e-5),
+    )
+    cfg.target_gens = 40_000
+    cfg.eval_every_gens = 2_000
+    cfg.eval_mcts_sims = 64
+    cfg.eval_move_cap = 400
+    cfg.archive_every_gens = 1_000
+    return cfg
+
+
 # Model summary string for the dashboard "model" panel.
 def model_summary_lines(lr: float, param_count: float, concurrent_games: int, sims: int, batch: int) -> str:
     return (

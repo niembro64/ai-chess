@@ -5,7 +5,8 @@
 //           board rotated 180° when black is to move (Sage convention)
 //   trunk   conv3x3 -> 3 residual blocks (conv-relu-conv + skip), no BN
 //   policy  1x1 conv (4ch) -> flatten(256) -> FC -> softmax over 4096
-//   value   1x1 conv (2ch) -> flatten(128) -> FC(64) -> FC(1) -> tanh
+//   value   1x1 conv (2ch) -> flatten(128) -> FC(64) -> FC(3) -> softmax
+//           = WDL probabilities like Sage; scalar value = P(win) - P(loss)
 //
 // Weight JSON ("toy-v1") lists tensors by name in a fixed order, fp16
 // base64, conv filters already in TF layout [h,w,in,out] and linear
@@ -134,12 +135,14 @@ export class ToyNet {
         tf.matMul(tf.reshape(v0, [B, -1]) as tf.Tensor2D, gm('value_fc1.w')),
         gb('value_fc1.b'),
       )) as tf.Tensor2D;
-      const value = tf.tanh(tf.add(tf.matMul(v1, gm('value_fc2.w')), gb('value_fc2.b')));
-      return [policy, value];
+      const wdl = tf.softmax(
+        tf.add(tf.matMul(v1, gm('value_fc2.w')), gb('value_fc2.b')) as tf.Tensor2D,
+      );
+      return [policy, wdl];
     });
 
     const policyData = policyT.dataSync() as Float32Array;
-    const valueData = valueT.dataSync() as Float32Array;
+    const wdlData = valueT.dataSync() as Float32Array;
     policyT.dispose();
     valueT.dispose();
 
@@ -147,7 +150,8 @@ export class ToyNet {
     for (let i = 0; i < B; i++) {
       out.push({
         policy: policyData.slice(i * 4096, (i + 1) * 4096),
-        value: valueData[i],
+        // Scalar value = P(win) - P(loss), same convention as Sage.
+        value: wdlData[i * 3] - wdlData[i * 3 + 2],
       });
     }
     return out;

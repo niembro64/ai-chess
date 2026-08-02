@@ -381,6 +381,30 @@ class TrainStats:
     })
 
 
+def _model_arch_dict(model) -> dict:
+    """Self-describing checkpoint metadata. Models with an arch_dict()
+    hook (ToyNet) describe themselves; ChessNet keeps its legacy
+    five-field dict so old checkpoints stay loadable."""
+    if hasattr(model, "arch_dict"):
+        return model.arch_dict()
+    return {
+        "num_res_blocks": model.num_res_blocks,
+        "num_filters": model.num_filters,
+        "kernel_size": model.kernel_size,
+        "value_head_size": model.value_head_size,
+        "se_reduction": model.se_reduction,
+    }
+
+
+def _build_model_from_arch(arch: dict):
+    """Rebuild the right model class from checkpoint metadata. Legacy
+    dicts (no "family") are ChessNet."""
+    if arch.get("family") == "toy":
+        from .toy import ToyNet
+        return ToyNet()
+    return ChessNet(**{k: v for k, v in arch.items() if k != "family"})
+
+
 def values_to_wdl_targets(values: np.ndarray) -> np.ndarray:
     """Convert continuous values ∈ [-1, 1] to WDL targets [P(win), P(draw), P(loss)].
 
@@ -400,10 +424,21 @@ class Trainer:
         device: torch.device,
         config: TrainConfig | None = None,
         rng: random.Random | None = None,
+        board_encoder=None,
     ):
         self.config = config or TrainConfig()
         self.device = device
         self.model = model.to(device)
+        # Board encoder matching the model's input planes. None = Sage's
+        # 20-plane encode_board (Rust MCTS fast path eligible). Toy runs
+        # with chess_ai.toy.encode_toy — single-process only, since the
+        # MP inference server + Rust search are hard-wired to 20 planes.
+        self._board_encoder = board_encoder
+        if board_encoder is not None and self.config.num_workers > 0:
+            raise ValueError(
+                "custom board_encoder requires num_workers=0 (the MP worker "
+                "path encodes boards in Rust with the 20-plane layout)"
+            )
 
         # Apply MCTS hyperparam overrides before self-play starts.
         from .mcts import set_mcts_params
@@ -435,7 +470,10 @@ class Trainer:
         # Tri-state so the first _update_value_warmup call always applies
         # the correct freeze state (True/False both differ from None).
         self._value_warmup_active: bool | None = None
-        self.buffer = ReplayBuffer(capacity=self.config.replay_buffer_capacity)
+        self.buffer = ReplayBuffer(
+            capacity=self.config.replay_buffer_capacity,
+            num_planes=getattr(self.model, "num_planes", NUM_PLANES),
+        )
 
         self._mp_self_play = None
         self.engine = None
@@ -499,6 +537,7 @@ class Trainer:
                     resign_threshold=self.config.resign_threshold,
                     resign_disabled_prob=self.config.resign_disabled_prob,
                     resign_min_plies=self.config.resign_min_plies,
+                    board_encoder=self._board_encoder,
                 ),
                 rng=self.rng,
             )
@@ -712,7 +751,10 @@ class Trainer:
             # are reproducible; the old global np.random call was the
             # one unseeded sampler in the training path.
             mask = self._np_rng.random(len(boards_np)) < self.config.mirror_augment_prob
-            boards_np, policies_np = mirror_batch(boards_np, policies_np, mask)
+            boards_np, policies_np = mirror_batch(
+                boards_np, policies_np, mask,
+                num_planes=getattr(self.model, "num_planes", NUM_PLANES),
+            )
 
         # Policy label smoothing: mix a small uniform over each sample's
         # visited-move SUPPORT (every visited move is legal). Smoothing
@@ -729,7 +771,7 @@ class Trainer:
         t1 = time.perf_counter()
 
         x_flat = torch.from_numpy(boards_np).to(self.device)
-        x = encoded_to_nchw(x_flat, NUM_PLANES)
+        x = encoded_to_nchw(x_flat, getattr(self.model, "num_planes", NUM_PLANES))
         policy_target = torch.from_numpy(policies_np).to(self.device)
         wdl_target = torch.from_numpy(values_to_wdl_targets(values_np)).to(self.device)
         outcome_known = torch.from_numpy(outcome_known_np).to(self.device)
@@ -1063,13 +1105,7 @@ class Trainer:
             # Model architecture, so the checkpoint is self-describing for
             # downstream tools (compare_checkpoints, deploy_to_browser) and
             # we don't need to re-pass --num-filters etc. on the CLI.
-            "model_arch": {
-                "num_res_blocks": self.model.num_res_blocks,
-                "num_filters": self.model.num_filters,
-                "kernel_size": self.model.kernel_size,
-                "value_head_size": self.model.value_head_size,
-                "se_reduction": self.model.se_reduction,
-            },
+            "model_arch": _model_arch_dict(self.model),
         }
         # Aux heads are saved separately so they can be absent without
         # breaking ChessNet's own state-dict strictness.
@@ -1078,7 +1114,12 @@ class Trainer:
         torch.save(checkpoint, pt_path)
 
         self.model.eval()
-        weights = export_weights(self.model, learning_rate=self.config.learning_rate)
+        # Model families own their browser format (Toy's "toy-v1");
+        # ChessNet uses the TF.js-ordered exporter in weight_io.
+        if hasattr(self.model, "export_browser_json"):
+            weights = self.model.export_browser_json()
+        else:
+            weights = export_weights(self.model, learning_rate=self.config.learning_rate)
         with json_path.open("w") as f:
             json.dump(weights, f)
 
@@ -1094,13 +1135,7 @@ class Trainer:
         """
         payload = {
             "model_state_dict": self.model.state_dict(),
-            "model_arch": {
-                "num_res_blocks": self.model.num_res_blocks,
-                "num_filters": self.model.num_filters,
-                "kernel_size": self.model.kernel_size,
-                "value_head_size": self.model.value_head_size,
-                "se_reduction": self.model.se_reduction,
-            },
+            "model_arch": _model_arch_dict(self.model),
             "champion_gen": gen,
         }
         torch.save(payload, ckpt_dir / "champion.pt")
@@ -1113,8 +1148,7 @@ class Trainer:
         path = ckpt_dir / "champion.pt"
         # weights_only=False: see Trainer.load_checkpoint comment.
         state = torch.load(path, map_location=self.device, weights_only=False)
-        arch = state["model_arch"]
-        champ = ChessNet(**arch).to(self.device)
+        champ = _build_model_from_arch(state["model_arch"]).to(self.device)
         champ.load_state_dict(state["model_state_dict"])
         champ.eval()
         self._champion_gen = int(state.get("champion_gen", 0))
@@ -1182,6 +1216,7 @@ class Trainer:
             result = run_batched_mcts(
                 [state], ev, mcts_sims, self.rng,
                 temperatures=[0.0], dirichlet_epsilon=0.0,
+                board_encoder=self._board_encoder,
             )
             state = apply_move(state, result[0].move)
             moves_played += 1

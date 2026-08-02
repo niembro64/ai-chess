@@ -19,3 +19,4 @@ tests/fixtures/*.json
 rust_engine/target/
 rust_engine/Cargo.lock
 toy_checkpoints/
+runs_toy/

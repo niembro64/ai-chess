@@ -213,9 +213,9 @@ class GameResult:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int, num_planes: int = NUM_PLANES):
         self.capacity = capacity
-        self._boards = np.zeros((capacity, 8 * 8 * NUM_PLANES), dtype=np.float32)
+        self._boards = np.zeros((capacity, 8 * 8 * num_planes), dtype=np.float32)
         self._policies = np.zeros((capacity, POLICY_SIZE), dtype=np.float32)
         self._values = np.zeros((capacity,), dtype=np.float32)
         # Parallel mask: 1.0 when the value label reflects an actual
@@ -476,12 +476,18 @@ def mirror_batch(
     boards: np.ndarray,
     policies: np.ndarray,
     mask: np.ndarray,
+    num_planes: int = NUM_PLANES,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (boards, policies) with file-mirror applied to the rows where
     `mask` is True. Values are unchanged — they're outcome-relative and
     don't depend on board orientation.
 
-    boards:   [B, 8*8*NUM_PLANES]
+    Valid for any encoding that 180°-rotates for black and has no
+    file-asymmetric planes needing special handling (Sage's castling
+    planes stay UNSWAPPED per the proof in test_mirror_augment.py;
+    Toy's 6 piece planes are purely spatial).
+
+    boards:   [B, 8*8*num_planes]
     policies: [B, POLICY_SIZE]
     mask:     [B] bool
     """
@@ -498,7 +504,7 @@ def mirror_batch(
     # geometry and makes them unlearnable on 50% of samples.) Piece/EP
     # planes are spatial so the file flip does the right thing; constant
     # planes (bias/halfmove/fullmove) are unaffected.
-    b = boards[idx].reshape(-1, 8, 8, NUM_PLANES)
+    b = boards[idx].reshape(-1, 8, 8, num_planes)
     b = b[:, :, ::-1, :].copy()
     boards = boards.copy()
     boards[idx] = b.reshape(len(idx), -1)
@@ -525,7 +531,7 @@ def make_pytorch_evaluator(model: ChessNet, device: torch.device) -> PytorchEval
     def evaluate(boards: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         with torch.no_grad():
             x_flat = torch.from_numpy(boards).to(device)
-            x = encoded_to_nchw(x_flat, NUM_PLANES)
+            x = encoded_to_nchw(x_flat, getattr(model, "num_planes", NUM_PLANES))
             policy, wdl = model(x)
         pol = policy.cpu().numpy()
         w = wdl.cpu().numpy()
@@ -584,6 +590,11 @@ class SelfPlayConfig:
     # Training target (visit distribution) is unchanged; eval callers
     # leave this at 1.0 so the sharp trained policy is used verbatim.
     policy_softening_temperature: float = 1.0
+    # Board encoder for the NN inputs. None = Sage's 20-plane
+    # encode_board (and the Rust MCTS fast path stays eligible). Toy
+    # passes chess_ai.toy.encode_toy — any non-default encoder forces
+    # the Python MCTS path, whose boards are encoded per this callable.
+    board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None
     # Per-sample policy-loss weight applied to training examples from
     # TB-adjudicated games. In those games MCTS never found a forcing
     # line — Syzygy rescued the value label, but the move distribution
@@ -668,6 +679,7 @@ class SelfPlayEngine:
             self.rng,
             temperatures,
             policy_softening_temperature=self.config.policy_softening_temperature,
+            board_encoder=self.config.board_encoder,
         )
 
         finished: list[GameResult] = []
@@ -681,7 +693,7 @@ class SelfPlayEngine:
             # the canonical training target — an earlier version re-derived
             # the legal moves and copied the same entries index-by-index,
             # a bit-identical no-op costing one get_legal_moves per ply.
-            board = encode_board(slot.state)
+            board = (self.config.board_encoder or encode_board)(slot.state)
 
             # Phase 1 of the reward refactor: pure-outcome value target, so we
             # no longer compute the hand-crafted positional score here.

@@ -117,16 +117,23 @@ class MCTSSearch:
     After N sims call `search.get_result()`.
     """
 
-    def __init__(self, state: ChessGameState):
+    def __init__(
+        self,
+        state: ChessGameState,
+        board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None,
+    ):
         self.root = MCTSNode(state)
         self._pending_leaf: MCTSNode | None = None
+        # None = Sage's 20-plane encode_board. Toy passes its 6-plane
+        # encoder; the search itself is encoding-agnostic.
+        self._encode = board_encoder or encode_board
         self._check_terminal(self.root)
 
     def is_terminal(self) -> bool:
         return self.root.is_terminal
 
     def get_root_board(self) -> np.ndarray:
-        return encode_board(self.root.state)
+        return self._encode(self.root.state)
 
     def init_root(
         self,
@@ -155,7 +162,7 @@ class MCTSSearch:
             return None
 
         self._pending_leaf = node
-        return encode_board(node.state)
+        return self._encode(node.state)
 
     def supply_eval(self, policy: np.ndarray, value: float) -> None:
         if self._pending_leaf is None:
@@ -516,6 +523,7 @@ def run_batched_mcts(
     temperatures: list[float] | None = None,
     policy_softening_temperature: float = 1.0,
     dirichlet_epsilon: float | None = None,
+    board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
 
@@ -544,7 +552,9 @@ def run_batched_mcts(
         )
     eps = DIRICHLET_EPSILON if dirichlet_epsilon is None else dirichlet_epsilon
 
-    if USE_RUST_MCTS:
+    # The Rust fast path encodes boards in Rust with Sage's 20-plane
+    # layout; a custom encoder (Toy's 6 planes) forces the Python path.
+    if USE_RUST_MCTS and board_encoder is None:
         return _run_batched_mcts_rust(
             states,
             evaluator,
@@ -557,7 +567,7 @@ def run_batched_mcts(
 
     soften = policy_softening_temperature != 1.0
 
-    searches = [MCTSSearch(s) for s in states]
+    searches = [MCTSSearch(s, board_encoder) for s in states]
 
     active = [s for s in searches if not s.is_terminal()]
     if not active:

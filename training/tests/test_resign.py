@@ -64,7 +64,7 @@ def _patched_mcts_with_value(value: float):
     """Return a function that replaces run_batched_mcts with a stub that
     yields the given root_value AND best_q (the resign trigger) plus an
     arbitrary policy / move for every game in the batch."""
-    def _stub(states, evaluator, sims, rng, temperatures, policy_softening_temperature=1.0):
+    def _stub(states, evaluator, sims, rng, temperatures, **kwargs):
         results = []
         for st in states:
             policy = np.zeros(4096, dtype=np.float32)
@@ -113,7 +113,7 @@ def test_resign_trigger_uses_best_q_not_root_value(tiny_model: ChessNet):
         resign_min_plies=0,
     )
 
-    def _stub(states, evaluator, sims, rng, temperatures, policy_softening_temperature=1.0):
+    def _stub(states, evaluator, sims, rng, temperatures, **kwargs):
         from chess_ai.encoding import move_to_index
         from chess_ai.engine import get_legal_moves
         results = []
