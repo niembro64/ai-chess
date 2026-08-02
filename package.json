@@ -18,11 +18,9 @@
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-webgpu": "^4.22.0",
     "peerjs": "^1.5.5",
-    "three": "^0.185.1",
     "vue": "^3.4.21"
   },
   "devDependencies": {
-    "@types/three": "^0.185.3",
     "@vitejs/plugin-vue": "^5.0.4",
     "tsx": "^4.21.0",
     "typescript": "^5.4.3",

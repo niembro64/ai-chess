@@ -17,8 +17,8 @@ import LobbyModal from './LobbyModal.vue';
 import ChessBoard from './ChessBoard.vue';
 import { defineAsyncComponent } from 'vue';
 
-// The Toy Mind panel pulls in three.js — lazy-load its chunk only when
-// someone actually plays Toy, so Sage games pay nothing for it.
+// Lazy-load the Toy Mind panel's chunk only when someone actually
+// plays Toy, so Sage games pay nothing for it.
 const ToyMindPanel = defineAsyncComponent(() => import('./ToyMindPanel.vue'));
 
 // Lobby state

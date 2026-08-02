@@ -1,19 +1,22 @@
 <script setup lang="ts">
 // Toy Mind — visualizes what the Toy net saw, guessed, and chose.
 //
-//   NETWORK INPUT          NETWORK OUTPUT               SEARCH
-//   GAME STATE tensor  →   POLICY HEAD + VALUE HEAD  →  all legal moves
-//   (rotatable 3D)         (board of boards)            by visit share
+//   NETWORK INPUT           NETWORK OUTPUT               SEARCH
+//   GAME STATE planes   →   POLICY HEAD + VALUE HEAD  →  all legal moves
+//   (six 8×8 grids,         (board of boards)            by visit share
+//    one per piece type)
 //
 // Interactions:
-// - Tap GAME STATE  → fullscreen modal of the 3D tensor.
+// - Tap GAME STATE  → fullscreen modal of the six piece planes.
 // - Tap POLICY HEAD → fullscreen modal: big policy board + SEARCH list.
 // - Click a SEARCH row → the amber circles + leader line re-target that
 //   move (reset to the top move whenever Toy thinks again).
+//
+// Both the POLICY HEAD and the GAME STATE render through the shared
+// BoardGrid canvas component (mini=8 board-of-boards vs mini=1 plane).
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import BoardGrid from './BoardGrid.vue';
 import type { ToyThought } from '@/game/ai/ToyPlayer';
 import { TOY_CHANNEL_NAMES, TOY_NUM_PLANES } from '@/game/ai/ToyNet';
 
@@ -23,24 +26,22 @@ import { TOY_CHANNEL_NAMES, TOY_NUM_PLANES } from '@/game/ai/ToyNet';
 const props = defineProps<{ thought: ToyThought; flipped?: boolean }>();
 
 const bodyEl = ref<HTMLDivElement | null>(null);
-const sceneEl = ref<HTMLDivElement | null>(null);
-const gridCanvas = ref<HTMLCanvasElement | null>(null);
+const gridRef = ref<InstanceType<typeof BoardGrid> | null>(null);
 const moveListEl = ref<HTMLDivElement | null>(null);
 const leader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 const hover = ref<{ x: number; y: number; text: string } | null>(null);
 
 // Modals + THE selection.
 //
-// One selection for the whole panel, stored as a policy index (0-4095).
-// Clicking a SEARCH row selects that move; clicking a tiny square in
-// the policy modal selects that cell (legal or illegal). The amber
-// ring, the row highlight, the leader line, and the decode text all
-// derive from this single value; it resets to the search's top move
-// whenever Toy thinks again.
+// One selection for the whole panel, stored as a NET policy index
+// (0-4095). Clicking a SEARCH row selects that move; clicking a tiny
+// square in the policy modal selects that cell (legal or illegal). The
+// amber ring, the row highlight, the leader line, and the decode text
+// all derive from this single value; it resets to the search's top
+// move whenever Toy thinks again.
 const expanded = ref<null | 'state' | 'policy'>(null);
-const modalSceneEl = ref<HTMLDivElement | null>(null);
 const modalPolicyWrap = ref<HTMLDivElement | null>(null);
-const modalGridCanvas = ref<HTMLCanvasElement | null>(null);
+const modalGridRef = ref<InstanceType<typeof BoardGrid> | null>(null);
 const modalMovesEl = ref<HTMLDivElement | null>(null);
 const modalLeader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 const selIndex = ref<number | null>(null);
@@ -99,233 +100,10 @@ function rowStyle(share: number): Record<string, string> {
 
 function selectIndex(idx: number): void {
   selIndex.value = idx;
-  redrawGrids();
   nextTick(updateLeaders);
 }
 
-// --- three.js input scene ----------------------------------------------
-
-let renderer: THREE.WebGLRenderer | null = null;
-let scene: THREE.Scene | null = null;
-let camera: THREE.PerspectiveCamera | null = null;
-let controls: OrbitControls | null = null;
-let sphereGroup: THREE.Group | null = null;
-let rafId = 0;
-
-const SLAB_GAP = 1.5;
-
-// --- Idle auto-spin -----------------------------------------------------
-//
-// The scene drifts in a slow azimuthal rotation whenever the user isn't
-// touching it. `autoVel` EMAs toward its target each frame:
-//   - grabbing the scene → target 0 with a very short time constant, so
-//     the auto-spin gets out of the way instantly and the drag feels 1:1
-//   - releasing → target SPIN with a long time constant, so the user's
-//     fling (OrbitControls damping) decays while the idle drift ramps
-//     back up — a smooth velocity handoff, no snap
-//   - initial mount starts at 0 and eases up the same way
-const IDLE_SPIN = 0.25;      // rad/s ≈ one revolution every ~25s
-const RAMP_TAU = 1.6;        // s — gentle pickup toward idle spin
-const GRAB_TAU = 0.12;       // s — near-instant yield to the user's hand
-const SPIN_AXIS = new THREE.Vector3(0, 1, 0);
-let autoVel = 0;
-let userHolding = false;
-let lastFrameT = 0;
-
-function initScene(): void {
-  const el = sceneEl.value!;
-  const w = el.clientWidth || 340;
-  const h = el.clientHeight || 290;
-
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-  renderer.setSize(w, h);
-  el.appendChild(renderer.domElement);
-
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 200);
-
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.enablePan = false;
-  controls.minDistance = 4;
-  controls.maxDistance = 60;
-  controls.addEventListener('start', () => { userHolding = true; });
-  controls.addEventListener('end', () => { userHolding = false; });
-  fitCamera();
-
-  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-  const dir = new THREE.DirectionalLight(0xffffff, 1.1);
-  dir.position.set(6, 12, 8);
-  scene.add(dir);
-
-  for (let ch = 0; ch < TOY_NUM_PLANES; ch++) {
-    const grid = new THREE.GridHelper(8, 8, 0x8b8fd9, 0x4c4f86);
-    (grid.material as THREE.Material).transparent = true;
-    (grid.material as THREE.Material).opacity = 0.4;
-    grid.position.y = ch * SLAB_GAP;
-    scene.add(grid);
-
-    const label = makeLabelSprite(TOY_CHANNEL_NAMES[ch]);
-    label.position.set(-5.4, ch * SLAB_GAP, 0);
-    scene.add(label);
-  }
-
-  sphereGroup = new THREE.Group();
-  scene.add(sphereGroup);
-
-  lastFrameT = performance.now();
-  const animate = () => {
-    rafId = requestAnimationFrame(animate);
-    const now = performance.now();
-    const dt = Math.min(0.05, (now - lastFrameT) / 1000);
-    lastFrameT = now;
-
-    // EMA the auto-spin velocity toward its current target.
-    const target = userHolding ? 0 : IDLE_SPIN;
-    const tau = userHolding ? GRAB_TAU : RAMP_TAU;
-    autoVel += (target - autoVel) * (1 - Math.exp(-dt / tau));
-
-    if (Math.abs(autoVel) > 1e-4 && camera && controls) {
-      const offset = camera.position.clone().sub(controls.target);
-      offset.applyAxisAngle(SPIN_AXIS, autoVel * dt);
-      camera.position.copy(controls.target).add(offset);
-    }
-
-    controls!.update();
-    renderer!.render(scene!, camera!);
-  };
-  animate();
-}
-
-// Frame the whole tensor stack (slabs + channel labels) inside the
-// current viewport, whatever its size/aspect: back the camera off along
-// a pleasing iso direction until the scene's bounding sphere fits the
-// narrower of the two view angles.
-const SCENE_RADIUS = 7.4;
-
-function fitCamera(): void {
-  if (!camera || !controls) return;
-  const target = new THREE.Vector3(0, (TOY_NUM_PLANES - 1) * SLAB_GAP * 0.5, 0);
-  const fovV = (camera.fov * Math.PI) / 180;
-  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
-  const halfMin = Math.min(fovV, fovH) / 2;
-  const dist = (SCENE_RADIUS / Math.sin(halfMin)) * 1.02;
-  const dir = new THREE.Vector3(1, 0.55, 1.15).normalize();
-  camera.position.copy(target.clone().add(dir.multiplyScalar(dist)));
-  camera.updateProjectionMatrix();
-  controls.target.copy(target);
-  controls.update();
-}
-
-// Re-home the single renderer between the inline card and the modal —
-// one scene, one WebGL context, two possible parents. Refits the
-// camera so the stack always starts fully framed in the new viewport.
-function mountSceneTo(el: HTMLElement): void {
-  if (!renderer || !camera) return;
-  el.appendChild(renderer.domElement);
-  const w = el.clientWidth || 340;
-  const h = el.clientHeight || 290;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  fitCamera();
-}
-
-function makeLabelSprite(text: string): THREE.Sprite {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 48;
-  const ctx = canvas.getContext('2d')!;
-  ctx.font = '600 26px Inter, system-ui, sans-serif';
-  ctx.fillStyle = '#cbd5e1';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, 64, 24);
-  const tex = new THREE.CanvasTexture(canvas);
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
-  sprite.scale.set(2.4, 0.9, 1);
-  return sprite;
-}
-
-const whiteMat = new THREE.MeshLambertMaterial({ color: 0xf6efde, transparent: true, opacity: 0.92 });
-const blackMat = new THREE.MeshLambertMaterial({ color: 0x17131f, transparent: true, opacity: 0.92 });
-const sphereGeo = new THREE.SphereGeometry(0.34, 20, 16);
-
-function updateSpheres(): void {
-  if (!sphereGroup) return;
-  sphereGroup.clear();
-  const { planes, blackToMove } = props.thought;
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      for (let ch = 0; ch < TOY_NUM_PLANES; ch++) {
-        const v = planes[(r * 8 + f) * TOY_NUM_PLANES + ch];
-        if (v === 0) continue;
-        const isBlackPiece = (v > 0) === blackToMove;
-        const mesh = new THREE.Mesh(sphereGeo, isBlackPiece ? blackMat : whiteMat);
-        mesh.position.set(f - 3.5, ch * SLAB_GAP, r - 3.5);
-        sphereGroup.add(mesh);
-      }
-    }
-  }
-}
-
-// Tap (not drag) on the scene expands it — distinguish from an orbit
-// drag by pointer travel.
-let downX = 0;
-let downY = 0;
-function scenePointerDown(e: PointerEvent): void {
-  downX = e.clientX;
-  downY = e.clientY;
-}
-function scenePointerUp(e: PointerEvent): void {
-  if (Math.hypot(e.clientX - downX, e.clientY - downY) < 8) {
-    openModal('state');
-  }
-}
-
-// --- modal handling ------------------------------------------------------
-
-function openModal(which: 'state' | 'policy'): void {
-  expanded.value = which;
-  nextTick(() => {
-    if (which === 'state' && modalSceneEl.value) {
-      mountSceneTo(modalSceneEl.value);
-    }
-    if (which === 'policy') {
-      redrawGrids();
-    }
-    updateLeaders();
-  });
-}
-
-function closeModal(): void {
-  const was = expanded.value;
-  expanded.value = null;
-  hover.value = null;
-  nextTick(() => {
-    if (was === 'state' && sceneEl.value) {
-      mountSceneTo(sceneEl.value);
-    }
-    updateLeaders();
-  });
-}
-
-// --- policy grid: a board of boards --------------------------------------
-//
-// Big 8x8 board in REAL coordinates (files a-h, ranks 8..1 top-down),
-// each square holding a tiny 8x8 board of destination probabilities.
-// Drawn at base geometry × an integer scale k (1 inline, 2 in the
-// modal) via ctx.scale, so both canvases stay crisp.
-
-const MINI = 5;
-const OUTER = MINI * 8;
-const GAP = 1;
-const PAD_L = 16;
-const PAD_B = 14;
-const BOARD = 8 * OUTER + 7 * GAP;
-const BASE_W = PAD_L + BOARD + 2;
-const BASE_H = BOARD + PAD_B;
+// --- coordinate frames -----------------------------------------------
 
 function netToReal(netIndex: number): { r: number; f: number } {
   let r = Math.floor(netIndex / 8);
@@ -343,17 +121,21 @@ function realToDisp(s: { r: number; f: number }): { r: number; f: number } {
   return props.flipped ? { r: 7 - s.r, f: 7 - s.f } : s;
 }
 
-// Base-coordinate pixel center of a policy entry's mini-cell.
-function cellCenter(policyIndex: number): { x: number; y: number } {
-  const from = realToDisp(netToReal(Math.floor(policyIndex / 64)));
-  const to = realToDisp(netToReal(policyIndex % 64));
-  return {
-    x: PAD_L + from.f * (OUTER + GAP) + to.f * MINI + MINI / 2,
-    y: from.r * (OUTER + GAP) + to.r * MINI + MINI / 2,
-  };
+// NET square (0-63) -> DISPLAY square. Both hops are 180° rotations,
+// so the composition is an involution: the same function converts
+// display squares back to net squares.
+function sqDisp(netSq: number): number {
+  const s = realToDisp(netToReal(netSq));
+  return s.r * 8 + s.f;
 }
 
-// Human-readable description of any policy index ("g2→g4 · 1.2% · legal").
+// NET policy index <-> DISPLAY policy index (self-inverse).
+function policyDisp(idx: number): number {
+  return sqDisp(Math.floor(idx / 64)) * 64 + sqDisp(idx % 64);
+}
+
+// Human-readable description of any NET policy index
+// ("g2→g4 · 1.2% · legal").
 function describeIndex(idx: number): string {
   const from = netToReal(Math.floor(idx / 64));
   const to = netToReal(idx % 64);
@@ -368,134 +150,101 @@ const selectionText = computed(() =>
   selIndex.value !== null ? describeIndex(selIndex.value) : '',
 );
 
-function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
-  const ctx = canvas.getContext('2d')!;
-  canvas.width = BASE_W * k;
-  canvas.height = BASE_H * k;
-  ctx.scale(k, k);
-  ctx.fillStyle = 'rgba(10, 9, 20, 0.9)';
-  ctx.fillRect(0, 0, BASE_W, BASE_H);
+// --- policy grid data (display-ordered, fed to BoardGrid) --------------
 
+const policyColors = computed(() => {
   const { rawPolicy, legalMask } = props.thought;
-
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const ox = PAD_L + f * (OUTER + GAP);
-      const oy = r * (OUTER + GAP);
-      ctx.fillStyle = (r + f) % 2 === 0
-        ? 'rgba(139, 143, 217, 0.10)'
-        : 'rgba(139, 143, 217, 0.035)';
-      ctx.fillRect(ox, oy, OUTER, OUTER);
-    }
-  }
-
+  const colors = new Array<string>(4096);
   for (let i = 0; i < 4096; i++) {
-    const from = realToDisp(netToReal(Math.floor(i / 64)));
-    const to = realToDisp(netToReal(i % 64));
-    ctx.fillStyle = cellColor(rawPolicy[i], legalMask[i] === 0);
-    ctx.fillRect(
-      PAD_L + from.f * (OUTER + GAP) + to.f * MINI,
-      from.r * (OUTER + GAP) + to.r * MINI,
-      MINI - 0.5,
-      MINI - 0.5,
-    );
+    colors[policyDisp(i)] = cellColor(rawPolicy[i], legalMask[i] === 0);
   }
+  return colors;
+});
 
-  // Labels follow the display orientation, same as the game board's
-  // coordinate strips.
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '10px JetBrains Mono, monospace';
-  ctx.textAlign = 'center';
-  for (let i = 0; i < 8; i++) {
-    const fileChar = String.fromCharCode(97 + (props.flipped ? 7 - i : i));
-    const rankNum = props.flipped ? i + 1 : 8 - i;
-    ctx.fillText(fileChar, PAD_L + i * (OUTER + GAP) + OUTER / 2, BOARD + 11);
-    ctx.fillText(String(rankNum), PAD_L / 2 - 1, i * (OUTER + GAP) + OUTER / 2 + 3);
-  }
+const fileLabels = computed(() =>
+  Array.from({ length: 8 }, (_, i) => String.fromCharCode(97 + (props.flipped ? 7 - i : i))),
+);
+const rankLabels = computed(() =>
+  Array.from({ length: 8 }, (_, i) => String(props.flipped ? i + 1 : 8 - i)),
+);
 
-  // Ring THE selected cell (search row or modal cell pick — one ring).
-  if (selIndex.value !== null) {
-    const c = cellCenter(selIndex.value);
-    ctx.strokeStyle = '#f7c058';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
-    ctx.stroke();
-  }
+const ringDisp = computed(() =>
+  selIndex.value !== null ? policyDisp(selIndex.value) : null,
+);
+
+// --- game state grids: one 8×8 plane per piece type ---------------------
+//
+// Literal piece colors (white piece / black piece / grey empty), in the
+// same display orientation as the POLICY HEAD and the game board.
+
+const STATE_GREY = '#454b5e';
+const STATE_WHITE = '#f2ead8';
+const STATE_BLACK = '#14111f';
+
+// Kings first — channel order in the tensor is P N B R Q K.
+const STATE_ORDER = [5, 4, 3, 2, 1, 0];
+const STATE_LETTER: Record<string, string> = {
+  King: 'K', Queen: 'Q', Rook: 'R', Bishop: 'B', Knight: 'N', Pawn: 'P',
+};
+
+const stateGrids = computed(() => {
+  const { planes, blackToMove } = props.thought;
+  return STATE_ORDER.map(ch => {
+    const colors = new Array<string>(64).fill(STATE_GREY);
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        const v = planes[(r * 8 + f) * TOY_NUM_PLANES + ch];
+        if (v === 0) continue;
+        // +1 is the mover's piece; the mover is black iff blackToMove.
+        const isBlackPiece = (v > 0) === blackToMove;
+        const d = realToDisp(netToReal(r * 8 + f));
+        colors[d.r * 8 + d.f] = isBlackPiece ? STATE_BLACK : STATE_WHITE;
+      }
+    }
+    const name = TOY_CHANNEL_NAMES[ch];
+    return { ch, name, letter: STATE_LETTER[name], colors };
+  });
+});
+
+// --- modal handling ------------------------------------------------------
+
+function openModal(which: 'state' | 'policy'): void {
+  expanded.value = which;
+  nextTick(updateLeaders);
 }
 
-function redrawGrids(): void {
-  if (gridCanvas.value) drawGridInto(gridCanvas.value, 1);
-  if (expanded.value === 'policy' && modalGridCanvas.value) {
-    drawGridInto(modalGridCanvas.value, 2);
-  }
-}
-
-// Decode a mouse/touch position on a policy canvas into a policy index
-// + human-readable text, or null when outside the cells.
-function decodeCell(
-  e: MouseEvent,
-  canvas: HTMLCanvasElement,
-): { index: number; text: string } | null {
-  const rect = canvas.getBoundingClientRect();
-  const scale = rect.width / canvas.width || 1;
-  const k = canvas.width / BASE_W;
-  const x = (e.clientX - rect.left) / (scale * k) - PAD_L;
-  const y = (e.clientY - rect.top) / (scale * k);
-  const dFromF = Math.floor(x / (OUTER + GAP));
-  const dFromR = Math.floor(y / (OUTER + GAP));
-  const dToF = Math.floor((x - dFromF * (OUTER + GAP)) / MINI);
-  const dToR = Math.floor((y - dFromR * (OUTER + GAP)) / MINI);
-  if (dFromF < 0 || dFromF > 7 || dFromR < 0 || dFromR > 7 || dToF < 0 || dToF > 7 || dToR < 0 || dToR > 7) {
-    return null;
-  }
-  // Display coords -> real board coords (un-flip), then real -> net frame.
-  const flip = props.flipped ? (v: number) => 7 - v : (v: number) => v;
-  const fromR = flip(dFromR), fromF = flip(dFromF);
-  const toR = flip(dToR), toF = flip(dToF);
-  const black = props.thought.blackToMove;
-  const nFrom = (black ? 7 - fromR : fromR) * 8 + (black ? 7 - fromF : fromF);
-  const nTo = (black ? 7 - toR : toR) * 8 + (black ? 7 - toF : toF);
-  const idx = nFrom * 64 + nTo;
-  const p = props.thought.rawPolicy[idx];
-  const illegal = props.thought.legalMask[idx] === 0;
-  const name = (f: number, r: number) => String.fromCharCode(97 + f) + String(8 - r);
-  return {
-    index: idx,
-    text: `${name(fromF, fromR)}→${name(toF, toR)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ' · legal'}`,
-  };
+function closeModal(): void {
+  expanded.value = null;
+  hover.value = null;
+  nextTick(updateLeaders);
 }
 
 // Hover decode exists only in the MODAL (desktop nicety); the inline
 // canvas is purely a "tap to expand" trigger.
-function onModalGridMove(e: MouseEvent): void {
-  if (!modalGridCanvas.value || !modalPolicyWrap.value) return;
-  const cell = decodeCell(e, modalGridCanvas.value);
-  if (!cell) {
+function onModalGridMove(index: number | null, clientX: number, clientY: number): void {
+  if (index === null || !modalPolicyWrap.value) {
     hover.value = null;
     return;
   }
   const cRect = modalPolicyWrap.value.getBoundingClientRect();
   hover.value = {
-    x: e.clientX - cRect.left + 14,
-    y: e.clientY - cRect.top - 10,
-    text: cell.text,
+    x: clientX - cRect.left + 14,
+    y: clientY - cRect.top - 10,
+    text: describeIndex(policyDisp(index)),
   };
 }
 
 // Click inside the modal selects that tiny square — same selection the
 // SEARCH rows drive.
-function onModalGridClick(e: MouseEvent): void {
-  if (!modalGridCanvas.value) return;
-  const cell = decodeCell(e, modalGridCanvas.value);
-  if (cell) selectIndex(cell.index);
+function onModalGridClick(index: number): void {
+  selectIndex(policyDisp(index));
 }
 
 // --- leader lines: selected list entry → its grid cell -------------------
 
 function computeLeader(
   container: HTMLElement,
-  canvas: HTMLCanvasElement,
+  grid: InstanceType<typeof BoardGrid>,
   list: HTMLElement,
 ): { x1: number; y1: number; x2: number; y2: number } | null {
   // The leader only exists when the selection corresponds to a SEARCH
@@ -503,6 +252,8 @@ function computeLeader(
   if (selIndex.value === null) return null;
   const sel = props.thought.moves.find(m => m.index === selIndex.value);
   if (!sel) return null;
+  const canvas = grid.canvasEl;
+  if (!canvas) return null;
   const chip = list.querySelector<HTMLElement>('.tm-move.selected .tm-chip');
   if (!chip) return null;
 
@@ -510,9 +261,8 @@ function computeLeader(
   const cellRect = canvas.getBoundingClientRect();
   const chipRect = chip.getBoundingClientRect();
 
-  const k = canvas.width / BASE_W;
-  const scale = (cellRect.width / canvas.width || 1) * k;
-  const c = cellCenter(sel.index);
+  const scale = cellRect.width / grid.baseW();
+  const c = grid.cellCenter(policyDisp(sel.index));
   const cx = cellRect.left - cRect.left + c.x * scale;
   const cy = cellRect.top - cRect.top + c.y * scale;
   const lx = chipRect.left - cRect.left + chipRect.width / 2;
@@ -527,12 +277,12 @@ function computeLeader(
 
 function updateLeaders(): void {
   leader.value =
-    bodyEl.value && gridCanvas.value && moveListEl.value
-      ? computeLeader(bodyEl.value, gridCanvas.value, moveListEl.value)
+    bodyEl.value && gridRef.value && moveListEl.value
+      ? computeLeader(bodyEl.value, gridRef.value, moveListEl.value)
       : null;
   modalLeader.value =
-    expanded.value === 'policy' && modalPolicyWrap.value && modalGridCanvas.value && modalMovesEl.value
-      ? computeLeader(modalPolicyWrap.value, modalGridCanvas.value, modalMovesEl.value)
+    expanded.value === 'policy' && modalPolicyWrap.value && modalGridRef.value && modalMovesEl.value
+      ? computeLeader(modalPolicyWrap.value, modalGridRef.value, modalMovesEl.value)
       : null;
 }
 
@@ -541,8 +291,6 @@ function updateLeaders(): void {
 function refresh(): void {
   // New thought → the selection resets to the search's top choice.
   selIndex.value = props.thought.moves[0]?.index ?? null;
-  redrawGrids();
-  updateSpheres();
   nextTick(updateLeaders);
 }
 
@@ -551,20 +299,13 @@ watch(() => props.thought, refresh);
 let resizeObserver: ResizeObserver | null = null;
 
 onMounted(() => {
-  initScene();
   refresh();
   resizeObserver = new ResizeObserver(() => updateLeaders());
   if (bodyEl.value) resizeObserver.observe(bodyEl.value);
 });
 
 onBeforeUnmount(() => {
-  cancelAnimationFrame(rafId);
   resizeObserver?.disconnect();
-  controls?.dispose();
-  renderer?.dispose();
-  sphereGeo.dispose();
-  whiteMat.dispose();
-  blackMat.dispose();
 });
 
 function pct(x: number): string {
@@ -588,15 +329,15 @@ function pct(x: number): string {
       <section class="tm-section tm-sec-state">
         <h3 class="tm-section-title">Network Input</h3>
         <div class="tm-subtitle">game state</div>
-        <div
-          ref="sceneEl"
-          class="tm-scene"
-          @pointerdown="scenePointerDown"
-          @pointerup="scenePointerUp"
-        ></div>
+        <div class="tm-states" @click="openModal('state')">
+          <div v-for="g in stateGrids" :key="g.ch" class="tm-state-item">
+            <span class="tm-state-letter">{{ g.letter }}</span>
+            <BoardGrid class="tm-state-grid" :colors="g.colors" :cell-px="20" />
+            <span class="tm-state-name">{{ g.name }}</span>
+          </div>
+        </div>
         <div class="tm-caption">
-          8×8×6 tensor — drag to rotate, tap to expand<br />
-          Toy's view — its pieces are +1, yours are −1
+          one 8×8 plane per piece type · grey = empty · tap to expand
         </div>
       </section>
 
@@ -606,11 +347,17 @@ function pct(x: number): string {
         <div class="tm-out">
           <div class="tm-out-policy">
             <div class="tm-subtitle">policy head</div>
-            <canvas
-              ref="gridCanvas"
+            <BoardGrid
+              ref="gridRef"
               class="tm-grid"
+              :colors="policyColors"
+              :mini="8"
+              :file-labels="fileLabels"
+              :rank-labels="rankLabels"
+              :ring="ringDisp"
+              checker
               @click="openModal('policy')"
-            ></canvas>
+            />
             <div class="tm-caption">
               each square holds a mini-board of its destinations · tap to expand
             </div>
@@ -685,23 +432,36 @@ function pct(x: number): string {
     <div v-if="expanded" class="tm-modal" @click.self="closeModal()">
       <button class="tm-modal-close" @click="closeModal()">✕</button>
 
-      <!-- GAME STATE expanded: the same three.js scene, re-homed big. -->
+      <!-- GAME STATE expanded: the six piece planes, drawn big. -->
       <div v-if="expanded === 'state'" class="tm-modal-card">
         <div class="tm-subtitle">game state</div>
-        <div ref="modalSceneEl" class="tm-modal-scene"></div>
-        <div class="tm-caption">drag to rotate · tap outside to close</div>
+        <div class="tm-modal-states">
+          <div v-for="g in stateGrids" :key="g.ch" class="tm-state-item">
+            <BoardGrid class="tm-modal-state-grid" :colors="g.colors" :cell-px="20" :k="2" />
+            <span class="tm-state-name">{{ g.name }}</span>
+          </div>
+        </div>
+        <div class="tm-caption">
+          white / black pieces per plane · grey = empty · tap outside to close
+        </div>
       </div>
 
       <!-- POLICY expanded: big board + the SEARCH list beneath it. -->
       <div v-else ref="modalPolicyWrap" class="tm-modal-card tm-modal-policy">
         <div class="tm-subtitle">policy head</div>
-        <canvas
-          ref="modalGridCanvas"
+        <BoardGrid
+          ref="modalGridRef"
           class="tm-modal-grid"
-          @click="onModalGridClick"
-          @mousemove="onModalGridMove"
-          @mouseleave="hover = null"
-        ></canvas>
+          :colors="policyColors"
+          :mini="8"
+          :k="2"
+          :file-labels="fileLabels"
+          :rank-labels="rankLabels"
+          :ring="ringDisp"
+          checker
+          @cell-click="onModalGridClick"
+          @cell-move="onModalGridMove"
+        />
         <div class="tm-picked" :class="{ empty: selIndex === null }">
           {{ selIndex !== null ? selectionText : 'tap a tiny square to inspect it' }}
         </div>
@@ -853,15 +613,48 @@ function pct(x: number): string {
   letter-spacing: 1.5px;
 }
 
-.tm-scene {
-  width: 260px;
-  height: 192px;
-  border-radius: 10px;
-  overflow: hidden;
-  background: radial-gradient(ellipse at 50% 40%, rgba(60, 58, 110, 0.35), rgba(12, 11, 24, 0.6));
-  cursor: grab;
+/* --- GAME STATE: six piece planes ----------------------------------- */
+/* Desktop: a single row, full piece names beneath each grid. The
+   mobile block at the end flips this into a vertical column with
+   single-letter row names. */
+
+.tm-states {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  justify-content: center;
+  cursor: pointer;
 }
-.tm-scene:active { cursor: grabbing; }
+
+.tm-state-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tm-state-grid {
+  width: 54px;
+  height: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.tm-state-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  color: #94a3b8;
+  letter-spacing: 0.5px;
+}
+
+.tm-state-letter {
+  display: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  font-weight: 700;
+  color: #94a3b8;
+}
 
 .tm-out {
   display: flex;
@@ -878,9 +671,6 @@ function pct(x: number): string {
 }
 
 .tm-grid {
-  /* No rounding: radius clips the corner mini-cells of the a8/h8/a1/h1
-     squares. */
-  border-radius: 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(10, 9, 20, 0.9);
   cursor: pointer;
@@ -1069,18 +859,25 @@ function pct(x: number): string {
   max-height: 92dvh;
 }
 
-.tm-modal-scene {
-  width: min(92vw, 700px);
-  height: min(70dvh, 620px);
-  border-radius: 12px;
-  overflow: hidden;
-  background: radial-gradient(ellipse at 50% 40%, rgba(60, 58, 110, 0.35), rgba(12, 11, 24, 0.6));
-  cursor: grab;
+.tm-modal-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  justify-content: center;
+  max-width: min(92vw, 640px);
 }
-.tm-modal-scene:active { cursor: grabbing; }
+
+.tm-modal-states .tm-state-name {
+  font-size: 11px;
+}
+
+.tm-modal-state-grid {
+  width: min(27vw, 170px);
+  height: auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
 
 .tm-modal-grid {
-  border-radius: 0;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(10, 9, 20, 0.95);
   width: min(92vw, 58dvh);
@@ -1147,9 +944,35 @@ function pct(x: number): string {
   .tm-caption {
     display: none;
   }
-  .tm-scene {
+  /* GAME STATE flips to a vertical column: one row per piece plane,
+     single-letter row names on the left, grids sized by the section's
+     height (six equal shares). */
+  .tm-states {
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
     width: 100%;
-    height: 150px;
+    gap: 2px;
+    align-items: stretch;
+  }
+  .tm-state-item {
+    flex: 1 1 0;
+    min-height: 0;
+    flex-direction: row;
+    justify-content: center;
+    gap: 3px;
+  }
+  .tm-state-grid {
+    width: auto;
+    height: 100%;
+  }
+  .tm-state-name {
+    display: none;
+  }
+  .tm-state-letter {
+    display: block;
+    flex-shrink: 0;
+    width: 8px;
   }
   .tm-out {
     flex-direction: column;
