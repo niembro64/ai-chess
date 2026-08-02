@@ -193,10 +193,10 @@ const ringDisp = computed(() =>
 
 // --- SEARCH rows: the whole policy, colored by legality ----------------
 //
-// Legal moves first, ordered by visit share (the search's opinion),
-// then EVERY illegal move ordered by the net's raw prior — same teal /
-// red families as the policy grid. The default selection stays the
-// top legal move.
+// Every policy entry — legal and illegal interleaved — ordered by the
+// net's raw predicted probability, same teal / red families as the
+// policy grid. The default selection stays the search's top legal
+// move, wherever it lands in the ordering.
 
 function uciOf(netIndex: number): string {
   const from = netToReal(Math.floor(netIndex / 64));
@@ -211,14 +211,13 @@ const searchRows = computed<SearchRow[]>(() => {
   const rows: SearchRow[] = moves.map(m => ({
     uci: m.uci, index: m.index, share: m.share, p: rawPolicy[m.index], legal: true,
   }));
-  const illegal: SearchRow[] = [];
   for (let i = 0; i < rawPolicy.length; i++) {
     if (!legalMask[i]) {
-      illegal.push({ uci: uciOf(i), index: i, share: 0, p: rawPolicy[i], legal: false });
+      rows.push({ uci: uciOf(i), index: i, share: 0, p: rawPolicy[i], legal: false });
     }
   }
-  illegal.sort((a, b) => b.p - a.p);
-  return rows.concat(illegal);
+  rows.sort((a, b) => b.p - a.p);
+  return rows;
 });
 
 const illegalCount = computed(() => searchRows.value.length - props.thought.moves.length);
@@ -354,13 +353,17 @@ function updateLeaders(): void {
 // --- lifecycle ------------------------------------------------------------
 
 function refresh(): void {
-  // New thought → the selection resets to the search's top choice and
-  // the lists scroll back to the top (where that row lives).
+  // New thought → the selection resets to the search's top legal
+  // choice; scroll the lists to wherever it landed in the probability
+  // ordering (top when no legal moves remain).
   selIndex.value = props.thought.moves[0]?.index ?? null;
   nextTick(() => {
     updateLeaders();
     for (const list of [moveListEl.value, modalMovesEl.value]) {
-      if (list) list.scrollTop = 0;
+      if (!list) continue;
+      const sel = list.querySelector('.tm-move.selected');
+      if (sel) sel.scrollIntoView({ block: 'nearest' });
+      else list.scrollTop = 0;
     }
   });
 }
@@ -480,9 +483,9 @@ function pct(x: number): string {
           game over — no legal moves
         </div>
         <div v-else class="tm-caption">
-          {{ thought.moves.length }} legal moves by visit share, then
-          {{ illegalCount }} illegal by prior · click one to point at its
-          policy cell
+          all {{ searchRows.length }} moves by predicted probability —
+          {{ thought.moves.length }} legal, {{ illegalCount }} illegal ·
+          click one to point at its policy cell
         </div>
       </section>
 
