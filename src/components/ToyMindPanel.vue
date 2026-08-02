@@ -10,7 +10,7 @@
 // grid (each entry's chip = its cell's color), and a leader line runs
 // from the top-visited move to its cell in the matrix.
 
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { ToyThought } from '@/game/ai/ToyPlayer';
@@ -27,20 +27,37 @@ const hover = ref<{ x: number; y: number; text: string } | null>(null);
 
 // --- shared colormap: grid cells AND list chips ------------------------
 
-function maxProb(): number {
-  let m = 0;
-  const p = props.thought.rawPolicy;
-  for (let i = 0; i < p.length; i++) if (p[i] > m) m = p[i];
-  return m || 1;
-}
+// Hue = legality (teal legal / red illegal); brightness = probability,
+// MIN-MAX NORMALIZED PER CLASS: within the legal cells the lowest
+// probability maps to the darkest teal, the highest to the brightest,
+// linearly interpolated — likewise for the illegal cells. Full dynamic
+// range in both families, every position.
+const policyStats = computed(() => {
+  const { rawPolicy, legalMask } = props.thought;
+  let lMin = Infinity, lMax = -Infinity, iMin = Infinity, iMax = -Infinity;
+  for (let i = 0; i < rawPolicy.length; i++) {
+    const p = rawPolicy[i];
+    if (legalMask[i]) {
+      if (p < lMin) lMin = p;
+      if (p > lMax) lMax = p;
+    } else {
+      if (p < iMin) iMin = p;
+      if (p > iMax) iMax = p;
+    }
+  }
+  if (!Number.isFinite(lMin)) { lMin = 0; lMax = 1; }
+  if (!Number.isFinite(iMin)) { iMin = 0; iMax = 1; }
+  return { lMin, lMax, iMin, iMax };
+});
 
-// Every cell is hue-coded by legality (teal = legal, red = illegal)
-// and BRIGHTNESS-coded by probability. Nothing renders black: the
-// lowest-probability cells sit at a dark version of their hue, so the
-// legal/illegal split stays readable across the whole board.
-function cellColor(p: number, maxP: number, illegal: boolean): string {
-  const t = Math.sqrt(Math.min(1, p / maxP)); // sqrt lifts the mid-range
-  const a = 0.15 + 0.85 * t;                  // dark floor, never invisible
+const DARKEST = 0.12;  // alpha of the darkest shade — never invisible
+
+function cellColor(p: number, illegal: boolean): string {
+  const s = policyStats.value;
+  const min = illegal ? s.iMin : s.lMin;
+  const max = illegal ? s.iMax : s.lMax;
+  const t = max > min ? (p - min) / (max - min) : 1;
+  const a = DARKEST + (1 - DARKEST) * t;
   return illegal
     ? `rgba(248, 90, 90, ${a})`
     : `rgba(94, 234, 212, ${a})`;
@@ -48,8 +65,17 @@ function cellColor(p: number, maxP: number, illegal: boolean): string {
 
 // Chip background for a list entry = the exact color of its grid cell.
 function chipStyle(index: number): Record<string, string> {
-  const p = props.thought.rawPolicy[index];
-  return { background: cellColor(p, maxProb(), false) };
+  return { background: cellColor(props.thought.rawPolicy[index], false) };
+}
+
+// Visit-share bar behind each SEARCH row: the top move gets a full bar,
+// the rest scale relative to it.
+function rowStyle(share: number): Record<string, string> {
+  const top = props.thought.moves[0]?.share || 1;
+  const pct = Math.max(2, (share / top) * 100);
+  return {
+    background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
+  };
 }
 
 // --- three.js input scene ----------------------------------------------
@@ -200,7 +226,6 @@ function drawGrid(): void {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const { rawPolicy, legalMask } = props.thought;
-  const maxP = maxProb();
 
   // Checkerboard tint + border for the big from-squares.
   for (let r = 0; r < 8; r++) {
@@ -220,7 +245,7 @@ function drawGrid(): void {
     const p = rawPolicy[i];
     const from = netToReal(Math.floor(i / 64));
     const to = netToReal(i % 64);
-    ctx.fillStyle = cellColor(p, maxP, legalMask[i] === 0);
+    ctx.fillStyle = cellColor(p, legalMask[i] === 0);
     ctx.fillRect(
       PAD_L + from.f * (OUTER + GAP) + to.f * MINI,
       from.r * (OUTER + GAP) + to.r * MINI,
@@ -425,6 +450,7 @@ function pct(x: number): string {
             :key="m.uci"
             class="tm-move"
             :class="{ chosen: m.uci === thought.chosen, top: i === 0 }"
+            :style="rowStyle(m.share)"
           >
             <span class="tm-chip" :style="chipStyle(m.index)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
@@ -675,6 +701,8 @@ function pct(x: number): string {
   color: #d1d5db;
   padding: 2px 8px;
   border-radius: 5px;
+  /* Background is a per-row visit-share bar (rowStyle): full length for
+     the top move, others scaled against it. */
   background: rgba(255, 255, 255, 0.03);
   flex-shrink: 0;
 }
@@ -783,18 +811,10 @@ function pct(x: number): string {
   .tm-grid {
     max-width: 100%;
   }
-  /* Value folds beneath the policy board as a slim horizontal strip. */
+  /* No VALUE HEAD on mobile — the policy board and search list are
+     the story; the scalar adds nothing at this size. */
   .tm-out-value {
-    flex-direction: row;
-    gap: 5px;
-    align-items: center;
-  }
-  .tm-value-track {
-    width: 9px;
-    height: 44px;
-  }
-  .tm-value-num {
-    font-size: 10px;
+    display: none;
   }
   .tm-moves {
     min-width: 0;
