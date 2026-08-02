@@ -172,7 +172,7 @@ const statusText = computed(() => {
       return 'Waiting to start...';
     case 'active':
       if (playingVsBot.value && !isMyTurn.value) {
-        return aiThinking.value ? 'AI is thinking...' : "AI's turn";
+        return aiThinking.value ? 'AI is thinking' : "AI's turn";
       }
       return isMyTurn.value ? 'Your turn' : "Opponent's turn";
     case 'check':
@@ -579,6 +579,14 @@ onUnmounted(() => {
             }">
               {{ statusText }}
             </span>
+            <!-- Wave-dot thinking animation, here in the status bar:
+                 bot games hide the player chips (toy-mode), so the
+                 chip-mounted dots never show there. -->
+            <span
+              v-if="aiThinking"
+              class="thinking-dots"
+              aria-label="AI is thinking"
+            ><span></span><span></span><span></span></span>
             <span v-if="turnIndicator" class="turn-indicator">
               {{ turnIndicator }}
             </span>

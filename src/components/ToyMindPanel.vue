@@ -93,22 +93,17 @@ function chipStyle(row: SearchRow): Record<string, string> {
   return { background: cellColor(row.p, !row.legal) };
 }
 
-// Bar behind each SEARCH row. Legal rows: visit share, the top move
-// gets a full teal bar and the rest scale relative to it. Illegal
-// rows: raw prior relative to the biggest illegal prior, in red.
+// Bar behind each SEARCH row: the raw prior — the same number the row
+// displays and the list sorts by — relative to the position's highest
+// prior, so bar lengths strictly follow the ordering (the first row
+// always has the longest bar). Teal for legal, red for illegal.
 function rowStyle(row: SearchRow): Record<string, string> {
-  if (row.legal) {
-    const top = props.thought.moves[0]?.share || 1;
-    const pct = Math.max(2, (row.share / top) * 100);
-    return {
-      background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
-    };
-  }
-  const iMax = policyStats.value.iMax || 1;
-  const pct = Math.max(2, (row.p / iMax) * 100);
-  return {
-    background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
-  };
+  const s = policyStats.value;
+  const pMax = Math.max(s.lMax, s.iMax) || 1;
+  const pct = Math.max(2, (row.p / pMax) * 100);
+  return row.legal
+    ? { background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` }
+    : { background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` };
 }
 
 function selectIndex(idx: number): void {
