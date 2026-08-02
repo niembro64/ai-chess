@@ -1,14 +1,15 @@
 <script setup lang="ts">
-// Toy Mind — what the Toy net saw, guessed, and chose, laid out to
-// teach the architecture by its own structure:
+// Toy Mind — visualizes what the Toy net saw, guessed, and chose.
 //
-//   INPUT            NETWORK OUTPUT                SEARCH
-//   8x8x6 tensor  →  POLICY (64x64) + VALUE     →  every legal move,
-//   (rotatable)      one grid, one gauge           ordered by visits
+//   NETWORK INPUT          NETWORK OUTPUT               SEARCH
+//   GAME STATE tensor  →   POLICY HEAD + VALUE HEAD  →  all legal moves
+//   (rotatable 3D)         (board of boards)            by visit share
 //
-// The SEARCH list is colorized with the exact colormap of the policy
-// grid (each entry's chip = its cell's color), and a leader line runs
-// from the top-visited move to its cell in the matrix.
+// Interactions:
+// - Tap GAME STATE  → fullscreen modal of the 3D tensor.
+// - Tap POLICY HEAD → fullscreen modal: big policy board + SEARCH list.
+// - Click a SEARCH row → the amber circles + leader line re-target that
+//   move (reset to the top move whenever Toy thinks again).
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as THREE from 'three';
@@ -25,13 +26,22 @@ const moveListEl = ref<HTMLDivElement | null>(null);
 const leader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 const hover = ref<{ x: number; y: number; text: string } | null>(null);
 
-// --- shared colormap: grid cells AND list chips ------------------------
+// Modals + search selection.
+const expanded = ref<null | 'state' | 'policy'>(null);
+const modalSceneEl = ref<HTMLDivElement | null>(null);
+const modalPolicyWrap = ref<HTMLDivElement | null>(null);
+const modalGridCanvas = ref<HTMLCanvasElement | null>(null);
+const modalMovesEl = ref<HTMLDivElement | null>(null);
+const modalLeader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+const selectedIdx = ref(0);
 
+// --- shared colormap: grid cells AND list chips ------------------------
+//
 // Hue = legality (teal legal / red illegal); brightness = probability,
-// MIN-MAX NORMALIZED PER CLASS: within the legal cells the lowest
-// probability maps to the darkest teal, the highest to the brightest,
-// linearly interpolated — likewise for the illegal cells. Full dynamic
-// range in both families, every position.
+// MIN-MAX NORMALIZED PER CLASS and linearly interpolated: the lowest
+// probability in each family maps to its darkest shade, the highest to
+// its brightest. Full dynamic range in both families, every position.
+
 const policyStats = computed(() => {
   const { rawPolicy, legalMask } = props.thought;
   let lMin = Infinity, lMax = -Infinity, iMin = Infinity, iMax = -Infinity;
@@ -63,7 +73,6 @@ function cellColor(p: number, illegal: boolean): string {
     : `rgba(94, 234, 212, ${a})`;
 }
 
-// Chip background for a list entry = the exact color of its grid cell.
 function chipStyle(index: number): Record<string, string> {
   return { background: cellColor(props.thought.rawPolicy[index], false) };
 }
@@ -76,6 +85,12 @@ function rowStyle(share: number): Record<string, string> {
   return {
     background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
   };
+}
+
+function selectMove(i: number): void {
+  selectedIdx.value = i;
+  redrawGrids();
+  nextTick(updateLeaders);
 }
 
 // --- three.js input scene ----------------------------------------------
@@ -91,8 +106,8 @@ const SLAB_GAP = 1.5;
 
 function initScene(): void {
   const el = sceneEl.value!;
-  const w = el.clientWidth || 360;
-  const h = el.clientHeight || 300;
+  const w = el.clientWidth || 340;
+  const h = el.clientHeight || 290;
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -138,6 +153,18 @@ function initScene(): void {
   animate();
 }
 
+// Re-home the single renderer between the inline card and the modal —
+// one scene, one WebGL context, two possible parents.
+function mountSceneTo(el: HTMLElement): void {
+  if (!renderer || !camera) return;
+  el.appendChild(renderer.domElement);
+  const w = el.clientWidth || 340;
+  const h = el.clientHeight || 290;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+
 function makeLabelSprite(text: string): THREE.Sprite {
   const canvas = document.createElement('canvas');
   canvas.width = 128;
@@ -167,9 +194,6 @@ function updateSpheres(): void {
       for (let ch = 0; ch < TOY_NUM_PLANES; ch++) {
         const v = planes[(r * 8 + f) * TOY_NUM_PLANES + ch];
         if (v === 0) continue;
-        // +1 = the mover's piece; Toy usually plays black, so +1 maps
-        // to a dark sphere and -1 (the human's white army) to a light
-        // one. Positions are the honest rotated net frame.
         const isBlackPiece = (v > 0) === blackToMove;
         const mesh = new THREE.Mesh(sphereGeo, isBlackPiece ? blackMat : whiteMat);
         mesh.position.set(f - 3.5, ch * SLAB_GAP, r - 3.5);
@@ -179,23 +203,62 @@ function updateSpheres(): void {
   }
 }
 
+// Tap (not drag) on the scene expands it — distinguish from an orbit
+// drag by pointer travel.
+let downX = 0;
+let downY = 0;
+function scenePointerDown(e: PointerEvent): void {
+  downX = e.clientX;
+  downY = e.clientY;
+}
+function scenePointerUp(e: PointerEvent): void {
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) < 8) {
+    openModal('state');
+  }
+}
+
+// --- modal handling ------------------------------------------------------
+
+function openModal(which: 'state' | 'policy'): void {
+  expanded.value = which;
+  nextTick(() => {
+    if (which === 'state' && modalSceneEl.value) {
+      mountSceneTo(modalSceneEl.value);
+    }
+    if (which === 'policy') {
+      redrawGrids();
+    }
+    updateLeaders();
+  });
+}
+
+function closeModal(): void {
+  const was = expanded.value;
+  expanded.value = null;
+  nextTick(() => {
+    if (was === 'state' && sceneEl.value) {
+      mountSceneTo(sceneEl.value);
+    }
+    updateLeaders();
+  });
+}
+
 // --- policy grid: a board of boards --------------------------------------
 //
-// The 64x64 matrix rearranged so chess players can read it: a big 8x8
-// board in REAL coordinates (files a-h, ranks 8..1 top-down, same
-// orientation as the game board), where each big square holds a tiny
-// 8x8 board of that square's DESTINATIONS. "What does Toy want to do
-// with the g7 pawn?" = find g7, read its mini-board.
+// Big 8x8 board in REAL coordinates (files a-h, ranks 8..1 top-down),
+// each square holding a tiny 8x8 board of destination probabilities.
+// Drawn at base geometry × an integer scale k (1 inline, 2 in the
+// modal) via ctx.scale, so both canvases stay crisp.
 
-const MINI = 5;                    // px per destination cell
-const OUTER = MINI * 8;            // 40px per from-square
+const MINI = 5;
+const OUTER = MINI * 8;
 const GAP = 1;
-const PAD_L = 16;                  // rank labels
-const PAD_B = 14;                  // file labels
+const PAD_L = 16;
+const PAD_B = 14;
 const BOARD = 8 * OUTER + 7 * GAP;
+const BASE_W = PAD_L + BOARD + 2;
+const BASE_H = BOARD + PAD_B;
 
-// Net-frame square index -> real board coords {r, f} (engine layout:
-// r 0 = rank 8 at top, f 0 = file a). The net rotates 180° for black.
 function netToReal(netIndex: number): { r: number; f: number } {
   let r = Math.floor(netIndex / 8);
   let f = netIndex % 8;
@@ -206,7 +269,7 @@ function netToReal(netIndex: number): { r: number; f: number } {
   return { r, f };
 }
 
-// Pixel center of a policy entry's mini-cell on the canvas.
+// Base-coordinate pixel center of a policy entry's mini-cell.
 function cellCenter(policyIndex: number): { x: number; y: number } {
   const from = netToReal(Math.floor(policyIndex / 64));
   const to = netToReal(policyIndex % 64);
@@ -216,36 +279,31 @@ function cellCenter(policyIndex: number): { x: number; y: number } {
   };
 }
 
-function drawGrid(): void {
-  const canvas = gridCanvas.value;
-  if (!canvas) return;
+function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
   const ctx = canvas.getContext('2d')!;
-  canvas.width = PAD_L + BOARD + 2;
-  canvas.height = BOARD + PAD_B;
+  canvas.width = BASE_W * k;
+  canvas.height = BASE_H * k;
+  ctx.scale(k, k);
   ctx.fillStyle = 'rgba(10, 9, 20, 0.9)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
 
   const { rawPolicy, legalMask } = props.thought;
 
-  // Checkerboard tint + border for the big from-squares.
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
       const ox = PAD_L + f * (OUTER + GAP);
       const oy = r * (OUTER + GAP);
       ctx.fillStyle = (r + f) % 2 === 0
-        ? 'rgba(139, 143, 217, 0.10)'   // light square
-        : 'rgba(139, 143, 217, 0.035)'; // dark square
+        ? 'rgba(139, 143, 217, 0.10)'
+        : 'rgba(139, 143, 217, 0.035)';
       ctx.fillRect(ox, oy, OUTER, OUTER);
     }
   }
 
-  // Destination mini-cells, converted net frame -> real coords. Every
-  // cell is drawn — legality picks the hue, probability the brightness.
   for (let i = 0; i < 4096; i++) {
-    const p = rawPolicy[i];
     const from = netToReal(Math.floor(i / 64));
     const to = netToReal(i % 64);
-    ctx.fillStyle = cellColor(p, legalMask[i] === 0);
+    ctx.fillStyle = cellColor(rawPolicy[i], legalMask[i] === 0);
     ctx.fillRect(
       PAD_L + from.f * (OUTER + GAP) + to.f * MINI,
       from.r * (OUTER + GAP) + to.r * MINI,
@@ -254,7 +312,6 @@ function drawGrid(): void {
     );
   }
 
-  // File / rank labels in real coordinates, like the game board.
   ctx.fillStyle = '#94a3b8';
   ctx.font = '10px JetBrains Mono, monospace';
   ctx.textAlign = 'center';
@@ -263,10 +320,10 @@ function drawGrid(): void {
     ctx.fillText(String(8 - i), PAD_L / 2 - 1, i * (OUTER + GAP) + OUTER / 2 + 3);
   }
 
-  // Ring the top-visited move's destination mini-cell (leader target).
-  const top = props.thought.moves[0];
-  if (top) {
-    const c = cellCenter(top.index);
+  // Ring the SELECTED move's destination mini-cell (leader target).
+  const sel = props.thought.moves[selectedIdx.value];
+  if (sel) {
+    const c = cellCenter(sel.index);
     ctx.strokeStyle = '#f7c058';
     ctx.lineWidth = 1.6;
     ctx.beginPath();
@@ -275,14 +332,19 @@ function drawGrid(): void {
   }
 }
 
-function onGridMove(e: MouseEvent): void {
-  const canvas = gridCanvas.value!;
+function redrawGrids(): void {
+  if (gridCanvas.value) drawGridInto(gridCanvas.value, 1);
+  if (expanded.value === 'policy' && modalGridCanvas.value) {
+    drawGridInto(modalGridCanvas.value, 2);
+  }
+}
+
+function gridHover(e: MouseEvent, canvas: HTMLCanvasElement, container: HTMLElement): void {
   const rect = canvas.getBoundingClientRect();
-  // The canvas CSS-scales down on narrow screens; convert display px
-  // back to canvas px before doing cell math.
   const scale = rect.width / canvas.width || 1;
-  const x = (e.clientX - rect.left) / scale - PAD_L;
-  const y = (e.clientY - rect.top) / scale;
+  const k = canvas.width / BASE_W;
+  const x = (e.clientX - rect.left) / (scale * k) - PAD_L;
+  const y = (e.clientY - rect.top) / (scale * k);
   const fromF = Math.floor(x / (OUTER + GAP));
   const fromR = Math.floor(y / (OUTER + GAP));
   const toF = Math.floor((x - fromF * (OUTER + GAP)) / MINI);
@@ -291,7 +353,6 @@ function onGridMove(e: MouseEvent): void {
     hover.value = null;
     return;
   }
-  // Real display coords -> net-frame policy index.
   const black = props.thought.blackToMove;
   const nFrom = (black ? 7 - fromR : fromR) * 8 + (black ? 7 - fromF : fromF);
   const nTo = (black ? 7 - toR : toR) * 8 + (black ? 7 - toF : toF);
@@ -299,61 +360,74 @@ function onGridMove(e: MouseEvent): void {
   const p = props.thought.rawPolicy[idx];
   const illegal = props.thought.legalMask[idx] === 0;
   const name = (f: number, r: number) => String.fromCharCode(97 + f) + String(8 - r);
+  const cRect = container.getBoundingClientRect();
   hover.value = {
-    x: e.clientX - bodyEl.value!.getBoundingClientRect().left + 14,
-    y: e.clientY - bodyEl.value!.getBoundingClientRect().top - 10,
+    x: e.clientX - cRect.left + 14,
+    y: e.clientY - cRect.top - 10,
     text: `${name(fromF, fromR)}→${name(toF, toR)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ''}`,
   };
 }
 
-// --- leader line: top list entry → its grid cell -------------------------
+function onGridMove(e: MouseEvent): void {
+  if (gridCanvas.value && bodyEl.value) gridHover(e, gridCanvas.value, bodyEl.value);
+}
 
-function updateLeader(): void {
-  leader.value = null;
-  const body = bodyEl.value;
-  const canvas = gridCanvas.value;
-  const list = moveListEl.value;
-  const top = props.thought.moves[0];
-  if (!body || !canvas || !list || !top) return;
-  // Anchor the list end on the top entry's color CHIP — it wears the
-  // same amber circle as the grid cell, so the line runs circle to
-  // circle.
-  const chip = list.querySelector<HTMLElement>('.tm-move .tm-chip');
-  if (!chip) return;
+function onModalGridMove(e: MouseEvent): void {
+  if (modalGridCanvas.value && modalPolicyWrap.value) {
+    gridHover(e, modalGridCanvas.value, modalPolicyWrap.value);
+  }
+}
 
-  const bodyRect = body.getBoundingClientRect();
+// --- leader lines: selected list entry → its grid cell -------------------
+
+function computeLeader(
+  container: HTMLElement,
+  canvas: HTMLCanvasElement,
+  list: HTMLElement,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  const sel = props.thought.moves[selectedIdx.value];
+  if (!sel) return null;
+  const chip = list.querySelector<HTMLElement>('.tm-move.selected .tm-chip');
+  if (!chip) return null;
+
+  const cRect = container.getBoundingClientRect();
   const cellRect = canvas.getBoundingClientRect();
   const chipRect = chip.getBoundingClientRect();
 
-  // Account for CSS downscaling on narrow screens: canvas-space cell
-  // coordinates map to display space via the rendered/intrinsic ratio.
-  const scale = cellRect.width / canvas.width || 1;
-  const c = cellCenter(top.index);
-  const cx = cellRect.left - bodyRect.left + c.x * scale;
-  const cy = cellRect.top - bodyRect.top + c.y * scale;
-  const lx = chipRect.left - bodyRect.left + chipRect.width / 2;
-  const ly = chipRect.top - bodyRect.top + chipRect.height / 2;
-  // Pull both endpoints back along the line so the arrow TIPS rest on
-  // the two amber circles instead of covering them.
+  const k = canvas.width / BASE_W;
+  const scale = (cellRect.width / canvas.width || 1) * k;
+  const c = cellCenter(sel.index);
+  const cx = cellRect.left - cRect.left + c.x * scale;
+  const cy = cellRect.top - cRect.top + c.y * scale;
+  const lx = chipRect.left - cRect.left + chipRect.width / 2;
+  const ly = chipRect.top - cRect.top + chipRect.height / 2;
   const dx = cx - lx;
   const dy = cy - ly;
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
-  leader.value = {
-    x1: lx + ux * 12,
-    y1: ly + uy * 12,
-    x2: cx - ux * 10,
-    y2: cy - uy * 10,
-  };
+  return { x1: lx + ux * 12, y1: ly + uy * 12, x2: cx - ux * 10, y2: cy - uy * 10 };
+}
+
+function updateLeaders(): void {
+  leader.value =
+    bodyEl.value && gridCanvas.value && moveListEl.value
+      ? computeLeader(bodyEl.value, gridCanvas.value, moveListEl.value)
+      : null;
+  modalLeader.value =
+    expanded.value === 'policy' && modalPolicyWrap.value && modalGridCanvas.value && modalMovesEl.value
+      ? computeLeader(modalPolicyWrap.value, modalGridCanvas.value, modalMovesEl.value)
+      : null;
 }
 
 // --- lifecycle ------------------------------------------------------------
 
 function refresh(): void {
-  drawGrid();
+  // New thought → selection resets to the search's top choice.
+  selectedIdx.value = 0;
+  redrawGrids();
   updateSpheres();
-  nextTick(updateLeader);
+  nextTick(updateLeaders);
 }
 
 watch(() => props.thought, refresh);
@@ -363,7 +437,7 @@ let resizeObserver: ResizeObserver | null = null;
 onMounted(() => {
   initScene();
   refresh();
-  resizeObserver = new ResizeObserver(() => updateLeader());
+  resizeObserver = new ResizeObserver(() => updateLeaders());
   if (bodyEl.value) resizeObserver.observe(bodyEl.value);
 });
 
@@ -375,9 +449,6 @@ onBeforeUnmount(() => {
   sphereGeo.dispose();
   whiteMat.dispose();
   blackMat.dispose();
-  if (renderer && sceneEl.value?.contains(renderer.domElement)) {
-    sceneEl.value.removeChild(renderer.domElement);
-  }
 });
 
 function pct(x: number): string {
@@ -398,30 +469,36 @@ function pct(x: number): string {
 
     <div ref="bodyEl" class="tm-body">
       <!-- ============ NETWORK INPUT ============ -->
-      <section class="tm-section">
+      <section class="tm-section tm-sec-state">
         <h3 class="tm-section-title">Network Input</h3>
         <div class="tm-subtitle">game state</div>
-        <div ref="sceneEl" class="tm-scene"></div>
+        <div
+          ref="sceneEl"
+          class="tm-scene"
+          @pointerdown="scenePointerDown"
+          @pointerup="scenePointerUp"
+        ></div>
         <div class="tm-caption">
-          8×8×6 tensor — drag to rotate<br />
+          8×8×6 tensor — drag to rotate, tap to expand<br />
           Toy's view (rotated); its pieces are +1 (dark)
         </div>
       </section>
 
       <!-- ============ NETWORK OUTPUT ============ -->
-      <section class="tm-section">
-        <h3 class="tm-section-title">Network output</h3>
+      <section class="tm-section tm-sec-output">
+        <h3 class="tm-section-title">Network Output</h3>
         <div class="tm-out">
           <div class="tm-out-policy">
             <div class="tm-subtitle">policy head</div>
             <canvas
               ref="gridCanvas"
               class="tm-grid"
+              @click="openModal('policy')"
               @mousemove="onGridMove"
               @mouseleave="hover = null"
             ></canvas>
             <div class="tm-caption">
-              each square holds a mini-board of its destinations · hover to decode
+              each square holds a mini-board of its destinations · tap to expand
             </div>
           </div>
           <div class="tm-out-value">
@@ -442,15 +519,16 @@ function pct(x: number): string {
       </section>
 
       <!-- ============ SEARCH ============ -->
-      <section class="tm-section">
+      <section class="tm-section tm-sec-search">
         <h3 class="tm-section-title">Search</h3>
         <div ref="moveListEl" class="tm-moves">
           <div
             v-for="(m, i) in thought.moves"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, top: i === 0 }"
+            :class="{ chosen: m.uci === thought.chosen, selected: i === selectedIdx }"
             :style="rowStyle(m.share)"
+            @click="selectMove(i)"
           >
             <span class="tm-chip" :style="chipStyle(m.index)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
@@ -458,14 +536,12 @@ function pct(x: number): string {
           </div>
         </div>
         <div class="tm-caption">
-          all {{ thought.moves.length }} legal moves by visit share ·
-          chip = that move's color in the policy grid
+          all {{ thought.moves.length }} legal moves by visit share · click one
+          to point at its policy cell
         </div>
       </section>
 
-      <!-- Leader line: top-visited move ↔ its policy cell, arrowheads
-           pointing at both (the amber-outlined list entry and the
-           amber-ringed grid cell). -->
+      <!-- Leader line: selected move → its policy cell. -->
       <svg v-if="leader" class="tm-leader" aria-hidden="true">
         <defs>
           <marker
@@ -483,11 +559,69 @@ function pct(x: number): string {
       </svg>
 
       <div
-        v-if="hover"
+        v-if="hover && !expanded"
         class="tm-tooltip"
         :style="{ left: `${hover.x}px`, top: `${hover.y}px` }"
       >{{ hover.text }}</div>
     </div>
+
+    <!-- ============ Fullscreen modals ============ -->
+    <!-- Teleported to <body>: the panel's backdrop-filter makes it the
+         containing block for position:fixed, which would imprison and
+         clip the overlay inside the panel strip. -->
+    <Teleport to="body">
+    <div v-if="expanded" class="tm-modal" @click.self="closeModal()">
+      <button class="tm-modal-close" @click="closeModal()">✕</button>
+
+      <!-- GAME STATE expanded: the same three.js scene, re-homed big. -->
+      <div v-if="expanded === 'state'" class="tm-modal-card">
+        <div class="tm-subtitle">game state</div>
+        <div ref="modalSceneEl" class="tm-modal-scene"></div>
+        <div class="tm-caption">drag to rotate · tap outside to close</div>
+      </div>
+
+      <!-- POLICY expanded: big board + the SEARCH list beneath it. -->
+      <div v-else ref="modalPolicyWrap" class="tm-modal-card tm-modal-policy">
+        <div class="tm-subtitle">policy head</div>
+        <canvas
+          ref="modalGridCanvas"
+          class="tm-modal-grid"
+          @mousemove="onModalGridMove"
+          @mouseleave="hover = null"
+        ></canvas>
+        <div class="tm-subtitle">search</div>
+        <div ref="modalMovesEl" class="tm-moves tm-modal-moves">
+          <div
+            v-for="(m, i) in thought.moves"
+            :key="m.uci"
+            class="tm-move"
+            :class="{ chosen: m.uci === thought.chosen, selected: i === selectedIdx }"
+            :style="rowStyle(m.share)"
+            @click="selectMove(i)"
+          >
+            <span class="tm-chip" :style="chipStyle(m.index)"></span>
+            <span class="tm-move-uci">{{ m.uci }}</span>
+            <span class="tm-move-share">{{ pct(m.share) }}</span>
+          </div>
+        </div>
+
+        <svg v-if="modalLeader" class="tm-leader" aria-hidden="true">
+          <line
+            :x1="modalLeader.x1" :y1="modalLeader.y1"
+            :x2="modalLeader.x2" :y2="modalLeader.y2"
+            stroke="#f7c058" stroke-width="1.6" stroke-dasharray="5 4" opacity="0.9"
+            marker-start="url(#tm-arrow)" marker-end="url(#tm-arrow)"
+          />
+        </svg>
+
+        <div
+          v-if="hover"
+          class="tm-tooltip"
+          :style="{ left: `${hover.x}px`, top: `${hover.y}px` }"
+        >{{ hover.text }}</div>
+      </div>
+    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -532,7 +666,6 @@ function pct(x: number): string {
 .lg { margin-left: 10px; margin-right: 3px; }
 .lg-legal { color: #5ae3d8; }
 .lg-illegal { color: #f87171; }
-/* Dark-to-bright ramp: the brightness axis of the colormap. */
 .lg-bright {
   display: inline-block;
   width: 26px;
@@ -575,15 +708,6 @@ function pct(x: number): string {
   letter-spacing: 2.2px;
 }
 
-.tm-sublabel {
-  color: #5ae3d8;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  margin-right: 6px;
-}
-
-/* Subtitle line ABOVE each visual (game state / policy head / value head). */
 .tm-subtitle {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10.5px;
@@ -594,7 +718,7 @@ function pct(x: number): string {
 }
 
 .tm-scene {
-  width: min(340px, calc(100vw - 90px));
+  width: 340px;
   height: 290px;
   border-radius: 10px;
   overflow: hidden;
@@ -621,15 +745,10 @@ function pct(x: number): string {
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(10, 9, 20, 0.9);
-  cursor: crosshair;
-  /* Scale down on narrow screens; hover/leader math converts via the
-     rendered/intrinsic ratio. */
+  cursor: pointer;
   max-width: calc(100vw - 90px);
   height: auto;
 }
-
-/* (Mobile compression rules live at the END of this stylesheet so they
-   win the equal-specificity cascade against the base rules above.) */
 
 .tm-caption {
   font-family: 'JetBrains Mono', monospace;
@@ -701,10 +820,9 @@ function pct(x: number): string {
   color: #d1d5db;
   padding: 2px 8px;
   border-radius: 5px;
-  /* Background is a per-row visit-share bar (rowStyle): full length for
-     the top move, others scaled against it. */
   background: rgba(255, 255, 255, 0.03);
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .tm-move.chosen {
@@ -712,14 +830,14 @@ function pct(x: number): string {
   font-weight: 600;
 }
 
-/* Top-visited move: its color CHIP wears the same amber circle as the
-   move's mini-cell in the policy grid — the leader line runs circle to
-   circle, marking the SAME square twice. */
-.tm-move.top .tm-chip {
+/* Selected move (defaults to the top of the list; click any row to
+   re-target): its chip wears the same amber circle as its mini-cell in
+   the policy grid — the leader line runs circle to circle. */
+.tm-move.selected .tm-chip {
   position: relative;
 }
 
-.tm-move.top .tm-chip::after {
+.tm-move.selected .tm-chip::after {
   content: '';
   position: absolute;
   inset: -5px;
@@ -763,12 +881,71 @@ function pct(x: number): string {
   z-index: 5;
 }
 
-/* --- Mobile: compress to a fixed-height three-column strip ----------
-   GAME STATE | POLICY (+value) | SEARCH, everything scaled so the page
-   never scrolls. Only the SEARCH list scrolls internally (its length
-   is unbounded). Captions and the header go — on a phone the visuals
-   ARE the explanation. Must be the LAST block in this stylesheet: the
-   overrides tie the base rules on specificity and win by order. */
+/* --- Fullscreen modals ------------------------------------------------ */
+
+.tm-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 7, 16, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.tm-modal-close {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: 14px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(20, 19, 38, 0.8);
+  color: #e2e8f0;
+  font-size: 15px;
+  cursor: pointer;
+  z-index: 61;
+}
+
+.tm-modal-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 96vw;
+  max-height: 92dvh;
+}
+
+.tm-modal-scene {
+  width: min(92vw, 700px);
+  height: min(70dvh, 620px);
+  border-radius: 12px;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 40%, rgba(60, 58, 110, 0.35), rgba(12, 11, 24, 0.6));
+  cursor: grab;
+}
+.tm-modal-scene:active { cursor: grabbing; }
+
+.tm-modal-grid {
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(10, 9, 20, 0.95);
+  width: min(92vw, 58dvh);
+  height: auto;
+  cursor: crosshair;
+}
+
+.tm-modal-moves {
+  max-height: 24dvh;
+  min-width: min(70vw, 260px);
+}
+
+/* --- Mobile compression — MUST stay the last block (ties the base
+   rules on specificity; wins by cascade order). ---------------------- */
 @media (max-width: 900px) {
   .tm-header {
     display: none;
@@ -784,14 +961,14 @@ function pct(x: number): string {
     gap: 3px;
     min-width: 0;
   }
-  /* Proportional columns that always sum below the viewport width. */
-  .tm-section:nth-child(1) { flex: 0 1 30%; }
-  .tm-section:nth-child(2) { flex: 0 1 38%; }
-  .tm-section:nth-child(3) { flex: 1 1 28%; }
+  /* No section titles on mobile — the teal subtitles carry the labels.
+     POLICY HEAD gets the width; GAME STATE and SEARCH cede it. */
   .tm-section-title {
-    font-size: 8px;
-    letter-spacing: 1px;
+    display: none;
   }
+  .tm-sec-state { flex: 0 1 25%; }
+  .tm-sec-output { flex: 0 1 46%; }
+  .tm-sec-search { flex: 1 1 25%; }
   .tm-subtitle {
     font-size: 8px;
     letter-spacing: 0.8px;
@@ -811,8 +988,6 @@ function pct(x: number): string {
   .tm-grid {
     max-width: 100%;
   }
-  /* No VALUE HEAD on mobile — the policy board and search list are
-     the story; the scalar adds nothing at this size. */
   .tm-out-value {
     display: none;
   }
@@ -834,7 +1009,7 @@ function pct(x: number): string {
     width: 9px;
     height: 9px;
   }
-  .tm-move.top .tm-chip::after {
+  .tm-move.selected .tm-chip::after {
     inset: -4px;
   }
 }

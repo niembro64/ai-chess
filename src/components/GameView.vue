@@ -745,8 +745,10 @@ onUnmounted(() => {
     min-height: 0;
     width: 100%;
   }
-  /* Info at the top, in reading order... */
-  .status-bar { order: 1; padding: 4px 10px; }
+  /* Info at the top, in reading order — but the status bar starts the
+     bottom cluster: margin-top:auto pushes status + arrows + board
+     together against the bottom edge, right where the thumbs are. */
+  .status-bar { order: 1; padding: 4px 10px; margin-top: auto; }
   .draw-offer-banner { order: 2; }
   .player-chip { order: 3; }
   .player-chip.is-local { order: 4; }
@@ -758,7 +760,6 @@ onUnmounted(() => {
   /* ...and the board pinned to the bottom edge. */
   .board-slot {
     order: 10;
-    margin-top: auto;
     padding-bottom: max(4px, env(safe-area-inset-bottom));
   }
   /* Toy Mind rides above everything; its own mobile styles compress it
