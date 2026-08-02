@@ -148,96 +148,128 @@ function updateSpheres(): void {
   }
 }
 
-// --- policy grid ---------------------------------------------------------
+// --- policy grid: a board of boards --------------------------------------
+//
+// The 64x64 matrix rearranged so chess players can read it: a big 8x8
+// board in REAL coordinates (files a-h, ranks 8..1 top-down, same
+// orientation as the game board), where each big square holds a tiny
+// 8x8 board of that square's DESTINATIONS. "What does Toy want to do
+// with the g7 pawn?" = find g7, read its mini-board.
 
-const GRID = 256;   // 4px per cell
-const PAD = 18;
-const CELL = GRID / 64;
+const MINI = 5;                    // px per destination cell
+const OUTER = MINI * 8;            // 40px per from-square
+const GAP = 1;
+const PAD_L = 16;                  // rank labels
+const PAD_B = 14;                  // file labels
+const BOARD = 8 * OUTER + 7 * GAP;
 
-function drawGrid(): void {
-  const canvas = gridCanvas.value;
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d')!;
-  const size = GRID + PAD;
-  canvas.width = size;
-  canvas.height = size;
-  ctx.fillStyle = 'rgba(10, 9, 20, 0.9)';
-  ctx.fillRect(0, 0, size, size);
-
-  const { rawPolicy, legalMask } = props.thought;
-  const maxP = maxProb();
-
-  for (let from = 0; from < 64; from++) {
-    for (let to = 0; to < 64; to++) {
-      const p = rawPolicy[from * 64 + to];
-      if (p <= 1e-7) continue;
-      const illegal = legalMask[from * 64 + to] === 0;
-      ctx.fillStyle = cellColor(p, maxP, illegal);
-      ctx.fillRect(PAD + to * CELL, from * CELL, Math.max(1.5, CELL - 0.5), Math.max(1.5, CELL - 0.5));
-    }
-  }
-
-  // Rank-block separators.
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.beginPath();
-  for (let i = 8; i < 64; i += 8) {
-    ctx.moveTo(PAD + i * CELL, 0);
-    ctx.lineTo(PAD + i * CELL, GRID);
-    ctx.moveTo(PAD, i * CELL);
-    ctx.lineTo(PAD + GRID, i * CELL);
-  }
-  ctx.stroke();
-
-  ctx.fillStyle = '#64748b';
-  ctx.font = '9px JetBrains Mono, monospace';
-  ctx.textAlign = 'center';
-  for (let i = 0; i < 8; i++) {
-    ctx.fillText(String(i + 1), PAD / 2, i * 8 * CELL + 4 * CELL + 3);
-    ctx.fillText(String(i + 1), PAD + i * 8 * CELL + 4 * CELL, GRID + 12);
-  }
-
-  // Ring the top-visited move's cell (the leader line's target).
-  const top = props.thought.moves[0];
-  if (top) {
-    const row = Math.floor(top.index / 64);
-    const col = top.index % 64;
-    ctx.strokeStyle = '#f7c058';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.arc(PAD + col * CELL + CELL / 2, row * CELL + CELL / 2, 5.5, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-}
-
-// Translate a net-frame square index to a real board name ("g6").
-function squareName(netIndex: number): string {
+// Net-frame square index -> real board coords {r, f} (engine layout:
+// r 0 = rank 8 at top, f 0 = file a). The net rotates 180° for black.
+function netToReal(netIndex: number): { r: number; f: number } {
   let r = Math.floor(netIndex / 8);
   let f = netIndex % 8;
   if (props.thought.blackToMove) {
     r = 7 - r;
     f = 7 - f;
   }
-  return String.fromCharCode(97 + f) + String(8 - r);
+  return { r, f };
+}
+
+// Pixel center of a policy entry's mini-cell on the canvas.
+function cellCenter(policyIndex: number): { x: number; y: number } {
+  const from = netToReal(Math.floor(policyIndex / 64));
+  const to = netToReal(policyIndex % 64);
+  return {
+    x: PAD_L + from.f * (OUTER + GAP) + to.f * MINI + MINI / 2,
+    y: from.r * (OUTER + GAP) + to.r * MINI + MINI / 2,
+  };
+}
+
+function drawGrid(): void {
+  const canvas = gridCanvas.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d')!;
+  canvas.width = PAD_L + BOARD + 2;
+  canvas.height = BOARD + PAD_B;
+  ctx.fillStyle = 'rgba(10, 9, 20, 0.9)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const { rawPolicy, legalMask } = props.thought;
+  const maxP = maxProb();
+
+  // Checkerboard tint + border for the big from-squares.
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const ox = PAD_L + f * (OUTER + GAP);
+      const oy = r * (OUTER + GAP);
+      ctx.fillStyle = (r + f) % 2 === 0
+        ? 'rgba(139, 143, 217, 0.10)'   // light square
+        : 'rgba(139, 143, 217, 0.035)'; // dark square
+      ctx.fillRect(ox, oy, OUTER, OUTER);
+    }
+  }
+
+  // Destination mini-cells, converted net frame -> real coords.
+  for (let i = 0; i < 4096; i++) {
+    const p = rawPolicy[i];
+    if (p <= 1e-7) continue;
+    const from = netToReal(Math.floor(i / 64));
+    const to = netToReal(i % 64);
+    ctx.fillStyle = cellColor(p, maxP, legalMask[i] === 0);
+    ctx.fillRect(
+      PAD_L + from.f * (OUTER + GAP) + to.f * MINI,
+      from.r * (OUTER + GAP) + to.r * MINI,
+      MINI - 0.5,
+      MINI - 0.5,
+    );
+  }
+
+  // File / rank labels in real coordinates, like the game board.
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '10px JetBrains Mono, monospace';
+  ctx.textAlign = 'center';
+  for (let i = 0; i < 8; i++) {
+    ctx.fillText(String.fromCharCode(97 + i), PAD_L + i * (OUTER + GAP) + OUTER / 2, BOARD + 11);
+    ctx.fillText(String(8 - i), PAD_L / 2 - 1, i * (OUTER + GAP) + OUTER / 2 + 3);
+  }
+
+  // Ring the top-visited move's destination mini-cell (leader target).
+  const top = props.thought.moves[0];
+  if (top) {
+    const c = cellCenter(top.index);
+    ctx.strokeStyle = '#f7c058';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 }
 
 function onGridMove(e: MouseEvent): void {
   const canvas = gridCanvas.value!;
   const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left - PAD;
+  const x = e.clientX - rect.left - PAD_L;
   const y = e.clientY - rect.top;
-  const to = Math.floor(x / CELL);
-  const from = Math.floor(y / CELL);
-  if (to < 0 || to > 63 || from < 0 || from > 63) {
+  const fromF = Math.floor(x / (OUTER + GAP));
+  const fromR = Math.floor(y / (OUTER + GAP));
+  const toF = Math.floor((x - fromF * (OUTER + GAP)) / MINI);
+  const toR = Math.floor((y - fromR * (OUTER + GAP)) / MINI);
+  if (fromF < 0 || fromF > 7 || fromR < 0 || fromR > 7 || toF < 0 || toF > 7 || toR < 0 || toR > 7) {
     hover.value = null;
     return;
   }
-  const idx = from * 64 + to;
+  // Real display coords -> net-frame policy index.
+  const black = props.thought.blackToMove;
+  const nFrom = (black ? 7 - fromR : fromR) * 8 + (black ? 7 - fromF : fromF);
+  const nTo = (black ? 7 - toR : toR) * 8 + (black ? 7 - toF : toF);
+  const idx = nFrom * 64 + nTo;
   const p = props.thought.rawPolicy[idx];
   const illegal = props.thought.legalMask[idx] === 0;
+  const name = (f: number, r: number) => String.fromCharCode(97 + f) + String(8 - r);
   hover.value = {
     x: e.clientX - bodyEl.value!.getBoundingClientRect().left + 14,
     y: e.clientY - bodyEl.value!.getBoundingClientRect().top - 10,
-    text: `${squareName(from)}→${squareName(to)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ''}`,
+    text: `${name(fromF, fromR)}→${name(toF, toR)} · ${(p * 100).toFixed(2)}%${illegal ? ' · illegal' : ''}`,
   };
 }
 
@@ -250,33 +282,35 @@ function updateLeader(): void {
   const list = moveListEl.value;
   const top = props.thought.moves[0];
   if (!body || !canvas || !list || !top) return;
-  const first = list.querySelector<HTMLElement>('.tm-move');
-  if (!first) return;
+  // Anchor the list end on the top entry's color CHIP — it wears the
+  // same amber circle as the grid cell, so the line runs circle to
+  // circle.
+  const chip = list.querySelector<HTMLElement>('.tm-move .tm-chip');
+  if (!chip) return;
 
   const bodyRect = body.getBoundingClientRect();
   const cellRect = canvas.getBoundingClientRect();
-  const fromRect = first.getBoundingClientRect();
+  const chipRect = chip.getBoundingClientRect();
 
-  const row = Math.floor(top.index / 64);
-  const col = top.index % 64;
   // Canvas is rendered 1:1 (width attribute == CSS width), so cell
   // coordinates map directly.
-  const cx = cellRect.left - bodyRect.left + PAD + col * CELL + CELL / 2;
-  const cy = cellRect.top - bodyRect.top + row * CELL + CELL / 2;
-  const lx = fromRect.left - bodyRect.left - 4;
-  const ly = fromRect.top - bodyRect.top + fromRect.height / 2;
+  const c = cellCenter(top.index);
+  const cx = cellRect.left - bodyRect.left + c.x;
+  const cy = cellRect.top - bodyRect.top + c.y;
+  const lx = chipRect.left - bodyRect.left + chipRect.width / 2;
+  const ly = chipRect.top - bodyRect.top + chipRect.height / 2;
   // Pull both endpoints back along the line so the arrow TIPS rest on
-  // the cell's ring and the entry's outline instead of covering them.
+  // the two amber circles instead of covering them.
   const dx = cx - lx;
   const dy = cy - ly;
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
   leader.value = {
-    x1: lx + ux * 4,
-    y1: ly + uy * 4,
-    x2: cx - ux * 9,
-    y2: cy - uy * 9,
+    x1: lx + ux * 12,
+    y1: ly + uy * 12,
+    x2: cx - ux * 10,
+    y2: cy - uy * 10,
   };
 }
 
@@ -352,7 +386,7 @@ function pct(x: number): string {
             ></canvas>
             <div class="tm-caption">
               <span class="tm-sublabel">policy output head</span><br />
-              64 from-squares × 64 to-squares · hover to decode
+              each square holds a mini-board of its destinations · hover to decode
             </div>
           </div>
           <div class="tm-out-value">
@@ -614,11 +648,19 @@ function pct(x: number): string {
   font-weight: 600;
 }
 
-/* Top-visited move: amber outline matching the ring around its cell in
-   the policy grid — the two ends of the leader line dress alike. */
-.tm-move.top {
-  outline: 1.4px solid #f7c058;
-  outline-offset: 1px;
+/* Top-visited move: its color CHIP wears the same amber circle as the
+   move's mini-cell in the policy grid — the leader line runs circle to
+   circle, marking the SAME square twice. */
+.tm-move.top .tm-chip {
+  position: relative;
+}
+
+.tm-move.top .tm-chip::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border: 1.6px solid #f7c058;
+  border-radius: 50%;
 }
 
 .tm-chip {
