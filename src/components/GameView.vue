@@ -256,7 +256,18 @@ function formatMove(move: Move): string {
 
 function scheduleBotMove(): void {
   if (!playingVsBot.value || !currentServer || !aiPlayer) return;
-  if (isGameOver.value) return;
+  if (isGameOver.value) {
+    // Game ended on the bot's turn (e.g. Toy got checkmated): no move
+    // to make, but the Toy Mind panel still shows the net's view of
+    // the terminal position — with every move invalid.
+    if (
+      aiPlayer instanceof ToyPlayer &&
+      gameState.value.currentTurn !== localColor.value
+    ) {
+      aiPlayer.observeTerminal(gameState.value);
+    }
+    return;
+  }
   if (gameState.value.currentTurn === localColor.value) return; // Human's turn
 
   aiThinking.value = true;

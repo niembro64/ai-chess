@@ -14,7 +14,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import '@tensorflow/tfjs';
 import { ToyNet, encodeToyBoard, isToyWeights } from '../src/game/ai/ToyNet';
-import { createInitialGameState } from '../src/game/chess/ChessEngine';
+import { ToyPlayer, type ToyThought } from '../src/game/ai/ToyPlayer';
+import {
+  applyMove,
+  createInitialGameState,
+  getLegalMoves,
+  posToAlgebraic,
+} from '../src/game/chess/ChessEngine';
 
 let failures = 0;
 function check(cond: boolean, label: string): void {
@@ -89,6 +95,37 @@ console.log('forward parity:');
   check(maxPolicyErr < 3e-3, 'policy within fp16 tolerance');
   check(maxValueErr < 3e-3, 'value within fp16 tolerance');
   net.dispose();
+}
+
+// --- terminal observation (checkmated bot still shows its brain) --------
+
+console.log('observeTerminal:');
+{
+  const weights = JSON.parse(fs.readFileSync(path.resolve('public/models/toy.json'), 'utf8'));
+  let thought: ToyThought | null = null;
+  const player = ToyPlayer.create(weights, 8, t => { thought = t; });
+
+  // Fool's mate: white is checkmated with white to move.
+  let s = createInitialGameState();
+  s.status = 'active';
+  for (const uci of ['f2f3', 'e7e5', 'g2g4', 'd8h4']) {
+    const move = getLegalMoves(s).find(
+      m => posToAlgebraic(m.from) + posToAlgebraic(m.to) === uci,
+    )!;
+    s = applyMove(s, move);
+  }
+  check(s.status === 'checkmate', 'position is checkmate');
+
+  player.observeTerminal(s);
+  check(thought !== null, 'terminal thought emitted');
+  const t = thought! as ToyThought;
+  check(t.moves.length === 0, 'no legal moves in the SEARCH list');
+  check(t.legalMask.every(v => v === 0), 'legal mask is empty (all red)');
+  check(t.rawPolicy.length === 4096 && Math.abs(
+    t.rawPolicy.reduce((a, b) => a + b, 0) - 1,
+  ) < 1e-3, 'forward pass still produced a softmax policy');
+  check(Number.isFinite(t.value), `value head evaluated the mate (${t.value.toFixed(2)})`);
+  player.dispose();
 }
 
 if (failures > 0) {

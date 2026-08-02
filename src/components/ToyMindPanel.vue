@@ -649,7 +649,10 @@ function pct(x: number): string {
             <span class="tm-move-share">{{ pct(m.share) }}</span>
           </div>
         </div>
-        <div class="tm-caption">
+        <div v-if="thought.moves.length === 0" class="tm-gameover">
+          game over — no legal moves
+        </div>
+        <div v-else class="tm-caption">
           all {{ thought.moves.length }} legal moves by visit share · click one
           to point at its policy cell
         </div>
@@ -970,6 +973,17 @@ function pct(x: number): string {
 
 .tm-move-share {
   color: #94a3b8;
+}
+
+.tm-gameover {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f7c058;
+  padding: 8px 12px;
+  border: 1px dashed rgba(247, 192, 88, 0.5);
+  border-radius: 6px;
+  letter-spacing: 0.5px;
 }
 
 .tm-leader {

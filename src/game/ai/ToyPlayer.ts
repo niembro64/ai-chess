@@ -60,6 +60,36 @@ export class ToyPlayer {
     return new ToyPlayer(ToyNet.create(weights as ToySerializedWeights), sims, onThought ?? null);
   }
 
+  // Terminal observation: the game just ended on Toy's turn (it got
+  // checkmated / stalemated / the draw landed on its move). There is no
+  // move to pick, but the net can still LOOK at the position — run the
+  // forward pass and emit a thought where every move is illegal: the
+  // legal mask is empty, the whole policy board renders red, and the
+  // SEARCH list is empty. Pedagogically great: you see exactly what a
+  // mated position looks like to the network (and whether its value
+  // head has learned to recognize doom).
+  observeTerminal(state: ChessGameState): void {
+    if (!this.onThought) return;
+    const planes = encodeToyBoard(state);
+    const [rootEval] = this.net.predictBatch([planes]);
+    const isWhite = state.currentTurn === 'white';
+    const legalMask = new Uint8Array(4096);
+    for (const m of getLegalMoves(state)) {
+      legalMask[moveToIndex(m, isWhite)] = 1; // stays all-zero at mate
+    }
+    this.onThought({
+      planes,
+      rawPolicy: rootEval.policy,
+      visitPolicy: new Float32Array(4096),
+      legalMask,
+      value: rootEval.value,
+      rootValue: rootEval.value,
+      chosen: '',
+      moves: [],
+      blackToMove: !isWhite,
+    });
+  }
+
   async getMove(state: ChessGameState): Promise<Move> {
     const planes = encodeToyBoard(state);
     const [rootEval] = this.net.predictBatch([planes]);
