@@ -820,12 +820,22 @@ onUnmounted(() => {
     order: 10;
     padding-bottom: max(4px, env(safe-area-inset-bottom));
   }
-  /* Toy Mind rides above everything; its own mobile styles compress it
-     to a fixed-height three-column strip (GAME STATE | POLICY | SEARCH)
-     so the whole screen fits with NO page scrolling. */
+  /* Toy Mind rides above everything and GROWS: it takes all the
+     vertical space left above the bottom cluster (status bar, arrows,
+     board), and its three-column strip (GAME STATE | POLICY | SEARCH)
+     contains its visuals inside that allotted height. No page scroll. */
   .toy-mind-row {
     order: -1;
     margin: 4px 4px 0;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  /* The panel owns the leftover height, so the board cluster stops
+     growing and sits content-sized against the bottom edge. */
+  .game-area.has-panel .game-layout {
+    flex: 0 0 auto;
   }
   .game-area.has-panel {
     overflow: hidden;

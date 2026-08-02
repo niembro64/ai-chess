@@ -369,17 +369,19 @@ function pct(x: number): string {
         <div class="tm-out">
           <div class="tm-out-policy">
             <div class="tm-subtitle">policy head</div>
-            <BoardGrid
-              ref="gridRef"
-              class="tm-grid"
-              :colors="policyColors"
-              :mini="8"
-              :col-labels="fileLabels"
-              :row-labels="rankLabels"
-              :ring="ringDisp"
-              checker
-              @click="openModal('policy')"
-            />
+            <div class="tm-grid-wrap">
+              <BoardGrid
+                ref="gridRef"
+                class="tm-grid"
+                :colors="policyColors"
+                :mini="8"
+                :col-labels="fileLabels"
+                :row-labels="rankLabels"
+                :ring="ringDisp"
+                checker
+                @click="openModal('policy')"
+              />
+            </div>
             <div class="tm-caption">
               each square holds a mini-board of its destinations · tap to expand
             </div>
@@ -674,6 +676,11 @@ function pct(x: number): string {
   gap: 6px;
 }
 
+.tm-grid-wrap {
+  display: flex;
+  justify-content: center;
+}
+
 .tm-grid {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(10, 9, 20, 0.9);
@@ -912,17 +919,23 @@ function pct(x: number): string {
   .tm-header {
     display: none;
   }
+  /* The panel fills its row (GameView grows .toy-mind-row to the
+     bottom cluster) — flex chains, never percentage heights, down to
+     each section; the canvases contain via the absolute pattern. */
+  .toy-mind {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+  }
   .tm-body {
     display: flex;
     flex-wrap: nowrap;
     gap: 4px;
     padding: 4px;
     align-items: stretch;
-    /* Hard budget: the strip's intrinsic height is set by the POLICY
-       HEAD's width-driven size; on short screens this cap kicks in and
-       the min-height:0 shrink chains below scale the canvases down
-       (aspect kept) instead of clipping them. */
-    max-height: 36dvh;
+    flex: 1 1 0;
+    min-height: 0;
   }
   .tm-section {
     padding: 3px 4px 4px;
@@ -976,16 +989,32 @@ function pct(x: number): string {
     flex-direction: column;
     gap: 3px;
     align-items: center;
+    flex: 1 1 0;
     min-height: 0;
-    width: 100%;
+    align-self: stretch;
   }
   .tm-out-policy {
+    flex: 1 1 0;
     min-height: 0;
     width: 100%;
   }
-  .tm-grid {
-    max-width: 100%;
+  /* Same absolute-containment pattern as the state strip: the policy
+     canvas scales to whatever box the section allots it, aspect kept,
+     centered, never clipped. */
+  .tm-grid-wrap {
+    flex: 1 1 0;
     min-height: 0;
+    align-self: stretch;
+    position: relative;
+  }
+  .tm-grid {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
   }
   .tm-out-value {
     display: none;
