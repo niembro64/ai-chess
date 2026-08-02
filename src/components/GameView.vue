@@ -716,11 +716,12 @@ onUnmounted(() => {
   /* Never let the flex column squeeze the panel — the page scrolls
      instead (game-area.has-panel enables overflow-y). */
   flex-shrink: 0;
+  max-width: calc(100vw - 16px);
 }
 
 @media (max-width: 900px) {
   .toy-mind-row {
-    display: none;
+    margin: 0 4px 16px;
   }
 }
 

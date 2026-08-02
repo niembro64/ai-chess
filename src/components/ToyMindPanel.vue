@@ -253,8 +253,11 @@ function drawGrid(): void {
 function onGridMove(e: MouseEvent): void {
   const canvas = gridCanvas.value!;
   const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left - PAD_L;
-  const y = e.clientY - rect.top;
+  // The canvas CSS-scales down on narrow screens; convert display px
+  // back to canvas px before doing cell math.
+  const scale = rect.width / canvas.width || 1;
+  const x = (e.clientX - rect.left) / scale - PAD_L;
+  const y = (e.clientY - rect.top) / scale;
   const fromF = Math.floor(x / (OUTER + GAP));
   const fromR = Math.floor(y / (OUTER + GAP));
   const toF = Math.floor((x - fromF * (OUTER + GAP)) / MINI);
@@ -297,11 +300,12 @@ function updateLeader(): void {
   const cellRect = canvas.getBoundingClientRect();
   const chipRect = chip.getBoundingClientRect();
 
-  // Canvas is rendered 1:1 (width attribute == CSS width), so cell
-  // coordinates map directly.
+  // Account for CSS downscaling on narrow screens: canvas-space cell
+  // coordinates map to display space via the rendered/intrinsic ratio.
+  const scale = cellRect.width / canvas.width || 1;
   const c = cellCenter(top.index);
-  const cx = cellRect.left - bodyRect.left + c.x;
-  const cy = cellRect.top - bodyRect.top + c.y;
+  const cx = cellRect.left - bodyRect.left + c.x * scale;
+  const cy = cellRect.top - bodyRect.top + c.y * scale;
   const lx = chipRect.left - bodyRect.left + chipRect.width / 2;
   const ly = chipRect.top - bodyRect.top + chipRect.height / 2;
   // Pull both endpoints back along the line so the arrow TIPS rest on
@@ -564,7 +568,7 @@ function pct(x: number): string {
 }
 
 .tm-scene {
-  width: 340px;
+  width: min(340px, calc(100vw - 90px));
   height: 290px;
   border-radius: 10px;
   overflow: hidden;
@@ -592,6 +596,17 @@ function pct(x: number): string {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(10, 9, 20, 0.9);
   cursor: crosshair;
+  /* Scale down on narrow screens; hover/leader math converts via the
+     rendered/intrinsic ratio. */
+  max-width: calc(100vw - 90px);
+  height: auto;
+}
+
+@media (max-width: 900px) {
+  .tm-body {
+    padding: 10px 8px 12px;
+    gap: 12px;
+  }
 }
 
 .tm-caption {
