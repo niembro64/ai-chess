@@ -104,6 +104,24 @@ let rafId = 0;
 
 const SLAB_GAP = 1.5;
 
+// --- Idle auto-spin -----------------------------------------------------
+//
+// The scene drifts in a slow azimuthal rotation whenever the user isn't
+// touching it. `autoVel` EMAs toward its target each frame:
+//   - grabbing the scene → target 0 with a very short time constant, so
+//     the auto-spin gets out of the way instantly and the drag feels 1:1
+//   - releasing → target SPIN with a long time constant, so the user's
+//     fling (OrbitControls damping) decays while the idle drift ramps
+//     back up — a smooth velocity handoff, no snap
+//   - initial mount starts at 0 and eases up the same way
+const IDLE_SPIN = 0.25;      // rad/s ≈ one revolution every ~25s
+const RAMP_TAU = 1.6;        // s — gentle pickup toward idle spin
+const GRAB_TAU = 0.12;       // s — near-instant yield to the user's hand
+const SPIN_AXIS = new THREE.Vector3(0, 1, 0);
+let autoVel = 0;
+let userHolding = false;
+let lastFrameT = 0;
+
 function initScene(): void {
   const el = sceneEl.value!;
   const w = el.clientWidth || 340;
@@ -122,6 +140,8 @@ function initScene(): void {
   controls.enablePan = false;
   controls.minDistance = 4;
   controls.maxDistance = 60;
+  controls.addEventListener('start', () => { userHolding = true; });
+  controls.addEventListener('end', () => { userHolding = false; });
   fitCamera();
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.75));
@@ -144,8 +164,24 @@ function initScene(): void {
   sphereGroup = new THREE.Group();
   scene.add(sphereGroup);
 
+  lastFrameT = performance.now();
   const animate = () => {
     rafId = requestAnimationFrame(animate);
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+
+    // EMA the auto-spin velocity toward its current target.
+    const target = userHolding ? 0 : IDLE_SPIN;
+    const tau = userHolding ? GRAB_TAU : RAMP_TAU;
+    autoVel += (target - autoVel) * (1 - Math.exp(-dt / tau));
+
+    if (Math.abs(autoVel) > 1e-4 && camera && controls) {
+      const offset = camera.position.clone().sub(controls.target);
+      offset.applyAxisAngle(SPIN_AXIS, autoVel * dt);
+      camera.position.copy(controls.target).add(offset);
+    }
+
     controls!.update();
     renderer!.render(scene!, camera!);
   };
