@@ -989,32 +989,20 @@ function pct(x: number): string {
     flex-direction: column;
     gap: 3px;
     align-items: center;
-    flex: 1 1 0;
-    min-height: 0;
-    align-self: stretch;
-  }
-  .tm-out-policy {
-    flex: 1 1 0;
     min-height: 0;
     width: 100%;
   }
-  /* Same absolute-containment pattern as the state strip: the policy
-     canvas scales to whatever box the section allots it, aspect kept,
-     centered, never clipped. */
-  .tm-grid-wrap {
-    flex: 1 1 0;
+  .tm-out-policy {
     min-height: 0;
-    align-self: stretch;
-    position: relative;
+    width: 100%;
   }
+  /* POLICY HEAD stays IN FLOW and width-driven — it anchors the
+     strip's intrinsic width (going absolute here collapses the whole
+     panel horizontally). Only the GAME STATE strip needs the absolute
+     containment, inside its left section. */
   .tm-grid {
-    position: absolute;
-    inset: 0;
-    margin: auto;
     max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
+    min-height: 0;
   }
   .tm-out-value {
     display: none;

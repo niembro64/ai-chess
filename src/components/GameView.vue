@@ -831,6 +831,9 @@ onUnmounted(() => {
     min-height: 0;
     display: flex;
     flex-direction: column;
+    /* The stack centers children (shrink-to-fit); the panel must span
+       the full width regardless of its contents' intrinsic size. */
+    align-self: stretch;
   }
   /* The panel owns the leftover height, so the board cluster stops
      growing and sits content-sized against the bottom edge. */
