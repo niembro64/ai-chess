@@ -109,10 +109,10 @@ const canJoin = computed(() => {
           <!-- Bot opponents. Weights are fetched lazily on click — only
                the model you pick gets downloaded. -->
           <button class="lobby-btn ai-btn" @click="emit('playBot', 'sage')">
-            <span class="bot-name">Play Hard Bot</span>
+            <span class="bot-name">Play Sage Bot</span>
           </button>
           <button class="lobby-btn ai-btn toy-btn" @click="emit('playBot', 'toy')">
-            <span class="bot-name">Play Visual Bot</span>
+            <span class="bot-name">Play Toy Bot</span>
           </button>
         </div>
 

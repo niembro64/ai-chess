@@ -153,7 +153,8 @@ const aiThinking = ref(false);
 const botModelId = ref<ModelId | null>(null);
 // Toy's latest thought record, rendered by the Toy Mind panel.
 const toyThought = ref<ToyThought | null>(null);
-const showToyPanel = computed(() => botModelId.value === 'toy' && toyThought.value !== null);
+// Both bots emit thoughts now — the panel shows for any bot game.
+const showToyPanel = computed(() => botModelId.value !== null && toyThought.value !== null);
 
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
@@ -257,13 +258,10 @@ function formatMove(move: Move): string {
 function scheduleBotMove(): void {
   if (!playingVsBot.value || !currentServer || !aiPlayer) return;
   if (isGameOver.value) {
-    // Game ended on the bot's turn (e.g. Toy got checkmated): no move
-    // to make, but the Toy Mind panel still shows the net's view of
-    // the terminal position — with every move invalid.
-    if (
-      aiPlayer instanceof ToyPlayer &&
-      gameState.value.currentTurn !== localColor.value
-    ) {
+    // Game ended on the bot's turn (it got checkmated / stalemated):
+    // no move to make, but the mind panel still shows the net's view
+    // of the terminal position — with every move invalid.
+    if (gameState.value.currentTurn !== localColor.value) {
       aiPlayer.observeTerminal(gameState.value);
     }
     return;
@@ -348,7 +346,7 @@ async function handlePlayBot(model: ModelId): Promise<void> {
     if (model === 'toy') {
       aiPlayer = ToyPlayer.create(weights, MODELS.toy.sims, t => { toyThought.value = t; });
     } else {
-      aiPlayer = AIPlayer.create(weights as SerializedWeights, MODELS.sage.sims);
+      aiPlayer = AIPlayer.create(weights as SerializedWeights, MODELS.sage.sims, t => { toyThought.value = t; });
     }
   } catch (err) {
     lobbyError.value = (err as Error).message || 'Model weights are invalid';
@@ -538,7 +536,7 @@ onUnmounted(() => {
     <div
       v-if="gameStarted"
       class="game-area"
-      :class="{ 'has-panel': showToyPanel, 'toy-mode': botModelId === 'toy' }"
+      :class="{ 'has-panel': showToyPanel, 'toy-mode': botModelId !== null }"
     >
       <div class="game-stack">
       <div class="game-layout">
@@ -681,12 +679,14 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Toy Mind: what the toy net saw, thought, and chose. Only for
-           Toy games; desktop only (hidden by media query on mobile). -->
+      <!-- The bot's mind: what the net saw, thought, and chose — same
+           panel for Sage and Toy (Sage's GAME STATE is the 6-plane
+           view of its position; policy/value shapes are shared). -->
       <ToyMindPanel
         v-if="showToyPanel"
         :thought="toyThought!"
         :flipped="localColor === 'black'"
+        :bot-name="botModelId === 'sage' ? 'Sage' : 'Toy'"
         class="toy-mind-row"
       />
       </div>

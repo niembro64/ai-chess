@@ -1,11 +1,23 @@
 // AIPlayer: loads trained weights and generates moves via MCTS.
+//
+// Like ToyPlayer, every move can emit a ToyThought for the Toy Mind
+// panel. Sage's real input is the 20-plane tensor, but the panel's
+// GAME STATE shows the same 6-plane ±1 view for both bots — derived
+// here by re-encoding the position with Toy's encoder (identical to
+// collapsing Sage's 12 piece planes to own−opp; the extra 8 planes —
+// bias, clocks, castling, en passant — have no visual). The policy /
+// value shapes are shared, so the rest of the thought is exact.
 
-import { ChessNet, type NetConfig, type SerializedWeights, WDL_SIZE } from './ChessNet';
+import { ChessNet, moveToIndex, type NetConfig, type SerializedWeights, WDL_SIZE } from './ChessNet';
 import { runMCTSAsync } from './MCTS';
+import { encodeToyBoard } from './ToyNet';
+import type { ToyThought } from './ToyPlayer';
 import {
   applyMove,
   buildPositionCounts,
+  getLegalMoves,
   positionKey,
+  posToAlgebraic,
 } from '@/game/chess/ChessEngine';
 import type { ChessGameState, Move } from '@/types/chess';
 
@@ -96,19 +108,49 @@ function detectConfigFromWeights(weights: SerializedWeights): NetConfig {
 export class AIPlayer {
   private net: ChessNet;
   private sims: number;
+  private onThought: ((t: ToyThought) => void) | null;
 
-  private constructor(net: ChessNet, sims: number) {
+  private constructor(net: ChessNet, sims: number, onThought: ((t: ToyThought) => void) | null) {
     this.net = net;
     this.sims = sims;
+    this.onThought = onThought;
   }
 
-  static create(weights: SerializedWeights, sims: number = 50): AIPlayer {
+  static create(
+    weights: SerializedWeights,
+    sims: number = 50,
+    onThought?: (t: ToyThought) => void,
+  ): AIPlayer {
     const config: NetConfig = weights.config
       ? { ...weights.config, learningRate: 0.01 }
       : detectConfigFromWeights(weights);
     const net = ChessNet.create(config);
     net.importWeights(weights);
-    return new AIPlayer(net, sims);
+    return new AIPlayer(net, sims, onThought ?? null);
+  }
+
+  // Terminal observation, same contract as ToyPlayer.observeTerminal:
+  // the game ended on the bot's turn — run the forward pass anyway and
+  // emit a thought whose legal mask is empty.
+  observeTerminal(state: ChessGameState): void {
+    if (!this.onThought) return;
+    const rootEval = this.net.predict(state);
+    const isWhite = state.currentTurn === 'white';
+    const legalMask = new Uint8Array(4096);
+    for (const m of getLegalMoves(state)) {
+      legalMask[moveToIndex(m, isWhite)] = 1; // stays all-zero at mate
+    }
+    this.onThought({
+      planes: encodeToyBoard(state),
+      rawPolicy: rootEval.policy,
+      visitPolicy: new Float32Array(4096),
+      legalMask,
+      value: rootEval.value,
+      rootValue: rootEval.value,
+      chosen: '',
+      moves: [],
+      blackToMove: !isWhite,
+    });
   }
 
   // Match-play search: no root noise, argmax move selection, and the
@@ -121,7 +163,33 @@ export class AIPlayer {
     const vetoed = pickNonRepeatingMove(
       state, result.rankedMoves, counts, result.rootValue,
     );
-    return vetoed ?? result.move;
+    const move = vetoed ?? result.move;
+
+    if (this.onThought) {
+      const rootEval = this.net.predict(state);
+      const isWhite = state.currentTurn === 'white';
+      const legalMask = new Uint8Array(4096);
+      for (const m of getLegalMoves(state)) {
+        legalMask[moveToIndex(m, isWhite)] = 1;
+      }
+      const totalVisits = result.rankedMoves.reduce((s, r) => s + r.visits, 0) || 1;
+      this.onThought({
+        planes: encodeToyBoard(state),
+        rawPolicy: rootEval.policy,
+        visitPolicy: result.policy,
+        legalMask,
+        value: rootEval.value,
+        rootValue: result.rootValue,
+        chosen: posToAlgebraic(move.from) + posToAlgebraic(move.to),
+        moves: result.rankedMoves.map(r => ({
+          uci: posToAlgebraic(r.move.from) + posToAlgebraic(r.move.to),
+          share: r.visits / totalVisits,
+          index: moveToIndex(r.move, isWhite),
+        })),
+        blackToMove: !isWhite,
+      });
+    }
+    return move;
   }
 
   dispose(): void {

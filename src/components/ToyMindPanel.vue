@@ -26,7 +26,7 @@ import { TOY_CHANNEL_NAMES, TOY_NUM_PLANES } from '@/game/ai/ToyNet';
 // `flipped` mirrors the game board's orientation: when the human plays
 // black the board renders 180° rotated, and the POLICY HEAD follows so
 // both boards read the same way (h1 top-left, your pieces at bottom).
-const props = defineProps<{ thought: ToyThought; flipped?: boolean }>();
+const props = defineProps<{ thought: ToyThought; flipped?: boolean; botName?: string }>();
 
 const bodyEl = ref<HTMLDivElement | null>(null);
 const gridRef = ref<InstanceType<typeof BoardGrid> | null>(null);
@@ -389,7 +389,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="toy-mind">
     <div class="tm-header">
-      <span class="tm-title">Toy Mind</span>
+      <span class="tm-title">{{ (props.botName ?? 'Toy') + ' Mind' }}</span>
       <span class="tm-legend">
         <span class="lg lg-legal">■</span> legal moves
         <span class="lg lg-illegal">■</span> illegal moves
