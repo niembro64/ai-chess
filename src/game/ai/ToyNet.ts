@@ -3,7 +3,7 @@
 // Mirrors training/scripts/toy_train.py exactly:
 //   input   8x8x6 channels-last (P N B R Q K), +1 mover / -1 opponent,
 //           board rotated 180° when black is to move (Sage convention)
-//   trunk   conv3x3 -> 3 residual blocks (conv-relu-conv + skip), no BN
+//   trunk   conv3x3 -> N residual blocks (conv-relu-conv + skip), no BN
 //   policy  1x1 conv (4ch) -> flatten(256) -> FC -> softmax over 4096
 //   value   1x1 conv (2ch) -> flatten(128) -> FC(64) -> FC(3) -> softmax
 //           = WDL probabilities like Sage; scalar value = P(win) - P(loss)

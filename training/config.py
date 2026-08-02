@@ -362,7 +362,8 @@ def build_config() -> TrainConfig:
 # augmentation, resign + truth-check, Syzygy adjudication, endgame
 # curriculum, dirichlet/FPU/softening, eval gating, plateau stop — and
 # overrides only scale and throughput. Architecture lives in
-# chess_ai/toy.py (3 BN-free blocks x 32 filters, 6-plane input).
+# chess_ai/toy.py (10 BN-free blocks x 128 filters ≈ 4.0M params —
+# ~71% of Sage — behind the minimal 6-plane input).
 #
 # Throughput note: the Rust MCTS and the multiprocess inference server
 # are hard-wired to the 20-plane encoding, so Toy runs single-process

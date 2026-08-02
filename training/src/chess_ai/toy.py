@@ -1,9 +1,10 @@
 """Toy — the teaching-sized network, as a first-class citizen of the
 main training pipeline.
 
-Same skeleton as Sage (shared trunk, policy head, WDL value head), a
-fraction of the size, and a deliberately minimal 6-plane input that is
-blind to castling rights / en passant / move clocks. Because ToyNet
+Same skeleton as Sage (shared trunk, policy head, WDL value head) at
+~71% of its parameter count (10 BN-free blocks x 128 filters ≈ 4.0M
+vs Sage's 12x160 ≈ 5.7M), with the deliberately minimal 6-plane input
+that is blind to castling rights / en passant / move clocks. Because ToyNet
 implements the same `trunk_features()` / `heads()` contract as
 ChessNet and carries `num_planes`, the Trainer, self-play engine,
 dashboard, eval gating, mirror augmentation, resign logic, tablebase
@@ -27,8 +28,8 @@ TOY_NUM_PLANES = 6
 PIECE_CHANNEL = {"pawn": 0, "knight": 1, "bishop": 2, "rook": 3, "queen": 4, "king": 5}
 POLICY_SIZE = 4096
 
-TOY_FILTERS = 32
-TOY_BLOCKS = 3
+TOY_FILTERS = 128
+TOY_BLOCKS = 10
 TOY_POLICY_CH = 4
 TOY_VALUE_CH = 2
 TOY_VALUE_HIDDEN = 64
@@ -58,7 +59,7 @@ def encode_toy(state: ChessGameState) -> np.ndarray:
 class ToyNet(nn.Module):
     """Policy + WDL value network, ChessNet-compatible surface.
 
-    3 BN-free residual blocks x 32 filters. `heads()` returns
+    10 BN-free residual blocks x 128 filters (~4.0M params). `heads()` returns
     (policy_probs [B, 4096], wdl_probs [B, 3]) exactly like ChessNet,
     so Trainer.train_step / evaluators / eval gating need no branches.
     Value parameters are named value_* so the value-head warmup freeze
@@ -83,6 +84,13 @@ class ToyNet(nn.Module):
         self.value_conv = nn.Conv2d(TOY_FILTERS, TOY_VALUE_CH, 1)
         self.value_fc1 = nn.Linear(8 * 8 * TOY_VALUE_CH, TOY_VALUE_HIDDEN)
         self.value_fc2 = nn.Linear(TOY_VALUE_HIDDEN, 3)
+
+        # Fixup-style stabilizer for a deep BN-free tower: zero-init each
+        # residual branch's second conv so every block starts as the
+        # identity and the tower trains stably from step one.
+        for b in self.blocks:
+            nn.init.zeros_(b["conv2"].weight)
+            nn.init.zeros_(b["conv2"].bias)
 
     @staticmethod
     def _flatten_hwc(t: torch.Tensor) -> torch.Tensor:
