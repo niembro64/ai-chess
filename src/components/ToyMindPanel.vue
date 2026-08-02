@@ -602,12 +602,8 @@ function pct(x: number): string {
   height: auto;
 }
 
-@media (max-width: 900px) {
-  .tm-body {
-    padding: 10px 8px 12px;
-    gap: 12px;
-  }
-}
+/* (Mobile compression rules live at the END of this stylesheet so they
+   win the equal-specificity cascade against the base rules above.) */
 
 .tm-caption {
   font-family: 'JetBrains Mono', monospace;
@@ -737,5 +733,89 @@ function pct(x: number): string {
   color: #e2e8f0;
   white-space: nowrap;
   z-index: 5;
+}
+
+/* --- Mobile: compress to a fixed-height three-column strip ----------
+   GAME STATE | POLICY (+value) | SEARCH, everything scaled so the page
+   never scrolls. Only the SEARCH list scrolls internally (its length
+   is unbounded). Captions and the header go — on a phone the visuals
+   ARE the explanation. Must be the LAST block in this stylesheet: the
+   overrides tie the base rules on specificity and win by order. */
+@media (max-width: 900px) {
+  .tm-header {
+    display: none;
+  }
+  .tm-body {
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 4px;
+    align-items: stretch;
+  }
+  .tm-section {
+    padding: 3px 4px 4px;
+    gap: 3px;
+    min-width: 0;
+  }
+  /* Proportional columns that always sum below the viewport width. */
+  .tm-section:nth-child(1) { flex: 0 1 30%; }
+  .tm-section:nth-child(2) { flex: 0 1 38%; }
+  .tm-section:nth-child(3) { flex: 1 1 28%; }
+  .tm-section-title {
+    font-size: 8px;
+    letter-spacing: 1px;
+  }
+  .tm-subtitle {
+    font-size: 8px;
+    letter-spacing: 0.8px;
+  }
+  .tm-caption {
+    display: none;
+  }
+  .tm-scene {
+    width: 100%;
+    height: 150px;
+  }
+  .tm-out {
+    flex-direction: column;
+    gap: 3px;
+    align-items: center;
+  }
+  .tm-grid {
+    max-width: 100%;
+  }
+  /* Value folds beneath the policy board as a slim horizontal strip. */
+  .tm-out-value {
+    flex-direction: row;
+    gap: 5px;
+    align-items: center;
+  }
+  .tm-value-track {
+    width: 9px;
+    height: 44px;
+  }
+  .tm-value-num {
+    font-size: 10px;
+  }
+  .tm-moves {
+    min-width: 0;
+    width: 100%;
+    max-height: 168px;
+    padding-right: 2px;
+  }
+  .tm-move {
+    font-size: 9.5px;
+    padding: 1px 3px;
+    gap: 3px;
+  }
+  .tm-move-share {
+    font-size: 9px;
+  }
+  .tm-chip {
+    width: 9px;
+    height: 9px;
+  }
+  .tm-move.top .tm-chip::after {
+    inset: -4px;
+  }
 }
 </style>

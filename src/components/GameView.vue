@@ -517,7 +517,11 @@ onUnmounted(() => {
     />
 
     <!-- Game UI (visible when game started) -->
-    <div v-if="gameStarted" class="game-area" :class="{ 'has-panel': showToyPanel }">
+    <div
+      v-if="gameStarted"
+      class="game-area"
+      :class="{ 'has-panel': showToyPanel, 'toy-mode': botModelId === 'toy' }"
+    >
       <div class="game-stack">
       <div class="game-layout">
         <!-- Left sidebar: move history -->
@@ -757,12 +761,24 @@ onUnmounted(() => {
     margin-top: auto;
     padding-bottom: max(4px, env(safe-area-inset-bottom));
   }
-  /* Toy Mind rides above everything, height-capped, scrolls inside. */
+  /* Toy Mind rides above everything; its own mobile styles compress it
+     to a fixed-height three-column strip (GAME STATE | POLICY | SEARCH)
+     so the whole screen fits with NO page scrolling. */
   .toy-mind-row {
     order: -1;
     margin: 4px 4px 0;
-    max-height: 26dvh;
-    overflow-y: auto;
+  }
+  .game-area.has-panel {
+    overflow: hidden;
+  }
+  /* Visual-bot mode strips the furniture the mode doesn't need: player
+     chips and the Offer Draw / Resign buttons (the game-over Return to
+     Lobby button stays). Every pixel goes to the three visuals + board. */
+  .game-area.toy-mode .player-chip {
+    display: none;
+  }
+  .game-area.toy-mode .game-controls .control-btn:not(.lobby-btn) {
+    display: none;
   }
 }
 
