@@ -858,7 +858,9 @@ function pct(x: number): string {
 }
 
 .tm-grid {
-  border-radius: 8px;
+  /* No rounding: radius clips the corner mini-cells of the a8/h8/a1/h1
+     squares. */
+  border-radius: 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(10, 9, 20, 0.9);
   cursor: pointer;
@@ -1058,7 +1060,7 @@ function pct(x: number): string {
 .tm-modal-scene:active { cursor: grabbing; }
 
 .tm-modal-grid {
-  border-radius: 10px;
+  border-radius: 0;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(10, 9, 20, 0.95);
   width: min(92vw, 58dvh);
