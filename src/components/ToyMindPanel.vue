@@ -954,11 +954,23 @@ function pct(x: number): string {
   .tm-states {
     flex: 1 1 0;
     min-height: 0;
-    align-items: center;
+    align-self: stretch;
+    position: relative;
   }
+  /* Absolutely positioned inside the (definite) .tm-states box:
+     percentage max-sizes then resolve against the real container on
+     every engine — flex-derived percentage heights are unreliable on
+     WebKit and were letting the last plane overflow. width/height
+     auto + both max constraints scale the canvas to fit, aspect kept,
+     margin:auto centers it. */
   .tm-states-grid {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    max-width: 100%;
     max-height: 100%;
     width: auto;
+    height: auto;
   }
   .tm-out {
     flex-direction: column;
