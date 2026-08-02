@@ -384,9 +384,6 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
 });
 
-function pct(x: number): string {
-  return `${(x * 100).toFixed(1)}%`;
-}
 </script>
 
 <template>
@@ -476,7 +473,7 @@ function pct(x: number): string {
           >
             <span class="tm-chip" :style="chipStyle(m)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
-            <span class="tm-move-share">{{ m.legal ? pct(m.share) : rawPct(m.p) }}</span>
+            <span class="tm-move-share">{{ rawPct(m.p) }}</span>
           </div>
         </div>
         <div v-if="thought.moves.length === 0" class="tm-gameover">
@@ -566,7 +563,7 @@ function pct(x: number): string {
           >
             <span class="tm-chip" :style="chipStyle(m)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
-            <span class="tm-move-share">{{ m.legal ? pct(m.share) : rawPct(m.p) }}</span>
+            <span class="tm-move-share">{{ rawPct(m.p) }}</span>
           </div>
         </div>
 
