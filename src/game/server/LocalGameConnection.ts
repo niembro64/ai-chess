@@ -6,11 +6,15 @@ import type { ChessCommand } from '@/types/network';
 
 export class LocalGameConnection implements GameConnection {
   private server: ChessServer;
+  private playerId: 1 | 2;
   private snapshotCallback: SnapshotCallback | null = null;
   private gameOverCallback: GameOverCallback | null = null;
 
-  constructor(server: ChessServer) {
+  // The local human isn't always player 1: in Visual Bot games the bot
+  // takes white (player 1) and the human plays black (player 2).
+  constructor(server: ChessServer, playerId: 1 | 2 = 1) {
     this.server = server;
+    this.playerId = playerId;
 
     server.addSnapshotListener((state) => {
       this.snapshotCallback?.(state);
@@ -22,7 +26,7 @@ export class LocalGameConnection implements GameConnection {
   }
 
   sendCommand(command: ChessCommand): void {
-    this.server.receiveCommand(command, 1); // Host is always player 1
+    this.server.receiveCommand(command, this.playerId);
   }
 
   onSnapshot(callback: SnapshotCallback): void {

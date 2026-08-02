@@ -196,8 +196,10 @@ const statusText = computed(() => {
 
 const turnIndicator = computed(() => {
   if (isGameOver.value) return '';
-  const extra = playingVsBot.value ? ' (bot)' : '';
-  return (gameState.value.currentTurn === 'white' ? 'White to move' : 'Black to move') + extra;
+  const side = gameState.value.currentTurn === 'white' ? 'White to move' : 'Black to move';
+  if (!playingVsBot.value) return side;
+  // Label WHOSE turn it actually is, not just "there's a bot somewhere".
+  return side + (gameState.value.currentTurn === localColor.value ? ' (you)' : ' (bot)');
 });
 
 // Player chips: opponent shown above the board, local player below.
@@ -403,7 +405,7 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
 
   if (networkRole.value !== 'client') {
     currentServer = new ChessServer();
-    const localConnection = new LocalGameConnection(currentServer);
+    const localConnection = new LocalGameConnection(currentServer, localPlayerId.value);
     activeConnection = localConnection;
 
     localConnection.onSnapshot((snapshot: NetworkGameSnapshot) => {

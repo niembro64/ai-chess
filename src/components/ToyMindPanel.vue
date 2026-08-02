@@ -26,14 +26,21 @@ const moveListEl = ref<HTMLDivElement | null>(null);
 const leader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 const hover = ref<{ x: number; y: number; text: string } | null>(null);
 
-// Modals + search selection.
+// Modals + THE selection.
+//
+// One selection for the whole panel, stored as a policy index (0-4095).
+// Clicking a SEARCH row selects that move; clicking a tiny square in
+// the policy modal selects that cell (legal or illegal). The amber
+// ring, the row highlight, the leader line, and the decode text all
+// derive from this single value; it resets to the search's top move
+// whenever Toy thinks again.
 const expanded = ref<null | 'state' | 'policy'>(null);
 const modalSceneEl = ref<HTMLDivElement | null>(null);
 const modalPolicyWrap = ref<HTMLDivElement | null>(null);
 const modalGridCanvas = ref<HTMLCanvasElement | null>(null);
 const modalMovesEl = ref<HTMLDivElement | null>(null);
 const modalLeader = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
-const selectedIdx = ref(0);
+const selIndex = ref<number | null>(null);
 
 // --- shared colormap: grid cells AND list chips ------------------------
 //
@@ -87,8 +94,8 @@ function rowStyle(share: number): Record<string, string> {
   };
 }
 
-function selectMove(i: number): void {
-  selectedIdx.value = i;
+function selectIndex(idx: number): void {
+  selIndex.value = idx;
   redrawGrids();
   nextTick(updateLeaders);
 }
@@ -292,7 +299,6 @@ function openModal(which: 'state' | 'policy'): void {
 function closeModal(): void {
   const was = expanded.value;
   expanded.value = null;
-  picked.value = null;
   hover.value = null;
   nextTick(() => {
     if (was === 'state' && sceneEl.value) {
@@ -338,12 +344,22 @@ function cellCenter(policyIndex: number): { x: number; y: number } {
   };
 }
 
-// A tiny square the user picked inside the POLICY modal (click-to-
-// inspect). Ringed in white on the modal canvas, decoded in a pinned
-// line under it.
-const picked = ref<{ index: number; text: string } | null>(null);
+// Human-readable description of any policy index ("g2→g4 · 1.2% · legal").
+function describeIndex(idx: number): string {
+  const from = netToReal(Math.floor(idx / 64));
+  const to = netToReal(idx % 64);
+  const name = (s: { r: number; f: number }) =>
+    String.fromCharCode(97 + s.f) + String(8 - s.r);
+  const p = props.thought.rawPolicy[idx];
+  const legal = props.thought.legalMask[idx] === 1;
+  return `${name(from)}→${name(to)} · ${(p * 100).toFixed(2)}% · ${legal ? 'legal' : 'illegal'}`;
+}
 
-function drawGridInto(canvas: HTMLCanvasElement, k: number, showPicked = false): void {
+const selectionText = computed(() =>
+  selIndex.value !== null ? describeIndex(selIndex.value) : '',
+);
+
+function drawGridInto(canvas: HTMLCanvasElement, k: number): void {
   const ctx = canvas.getContext('2d')!;
   canvas.width = BASE_W * k;
   canvas.height = BASE_H * k;
@@ -384,24 +400,13 @@ function drawGridInto(canvas: HTMLCanvasElement, k: number, showPicked = false):
     ctx.fillText(String(8 - i), PAD_L / 2 - 1, i * (OUTER + GAP) + OUTER / 2 + 3);
   }
 
-  // Ring the SELECTED move's destination mini-cell (leader target).
-  const sel = props.thought.moves[selectedIdx.value];
-  if (sel) {
-    const c = cellCenter(sel.index);
+  // Ring THE selected cell (search row or modal cell pick — one ring).
+  if (selIndex.value !== null) {
+    const c = cellCenter(selIndex.value);
     ctx.strokeStyle = '#f7c058';
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  // Ring the picked cell (modal click-to-inspect) in white.
-  if (showPicked && picked.value) {
-    const c = cellCenter(picked.value.index);
-    ctx.strokeStyle = '#e2e8f0';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, 4.2, 0, Math.PI * 2);
     ctx.stroke();
   }
 }
@@ -409,7 +414,7 @@ function drawGridInto(canvas: HTMLCanvasElement, k: number, showPicked = false):
 function redrawGrids(): void {
   if (gridCanvas.value) drawGridInto(gridCanvas.value, 1);
   if (expanded.value === 'policy' && modalGridCanvas.value) {
-    drawGridInto(modalGridCanvas.value, 2, true);
+    drawGridInto(modalGridCanvas.value, 2);
   }
 }
 
@@ -461,12 +466,12 @@ function onModalGridMove(e: MouseEvent): void {
   };
 }
 
-// Click-to-inspect inside the modal: pin the decoded cell (white ring
-// on the canvas + persistent line below), tap-friendly.
+// Click inside the modal selects that tiny square — same selection the
+// SEARCH rows drive.
 function onModalGridClick(e: MouseEvent): void {
   if (!modalGridCanvas.value) return;
-  picked.value = decodeCell(e, modalGridCanvas.value);
-  redrawGrids();
+  const cell = decodeCell(e, modalGridCanvas.value);
+  if (cell) selectIndex(cell.index);
 }
 
 // --- leader lines: selected list entry → its grid cell -------------------
@@ -476,7 +481,10 @@ function computeLeader(
   canvas: HTMLCanvasElement,
   list: HTMLElement,
 ): { x1: number; y1: number; x2: number; y2: number } | null {
-  const sel = props.thought.moves[selectedIdx.value];
+  // The leader only exists when the selection corresponds to a SEARCH
+  // row (a legal move); an illegal-cell selection rings the grid alone.
+  if (selIndex.value === null) return null;
+  const sel = props.thought.moves.find(m => m.index === selIndex.value);
   if (!sel) return null;
   const chip = list.querySelector<HTMLElement>('.tm-move.selected .tm-chip');
   if (!chip) return null;
@@ -514,10 +522,8 @@ function updateLeaders(): void {
 // --- lifecycle ------------------------------------------------------------
 
 function refresh(): void {
-  // New thought → selection resets to the search's top choice and any
-  // pinned cell inspection clears.
-  selectedIdx.value = 0;
-  picked.value = null;
+  // New thought → the selection resets to the search's top choice.
+  selIndex.value = props.thought.moves[0]?.index ?? null;
   redrawGrids();
   updateSpheres();
   nextTick(updateLeaders);
@@ -614,12 +620,12 @@ function pct(x: number): string {
         <h3 class="tm-section-title">Search</h3>
         <div ref="moveListEl" class="tm-moves">
           <div
-            v-for="(m, i) in thought.moves"
+            v-for="m in thought.moves"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, selected: i === selectedIdx }"
+            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex }"
             :style="rowStyle(m.share)"
-            @click="selectMove(i)"
+            @click="selectIndex(m.index)"
           >
             <span class="tm-chip" :style="chipStyle(m.index)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
@@ -676,18 +682,18 @@ function pct(x: number): string {
           @mousemove="onModalGridMove"
           @mouseleave="hover = null"
         ></canvas>
-        <div class="tm-picked" :class="{ empty: !picked }">
-          {{ picked ? picked.text : 'tap a tiny square to inspect it' }}
+        <div class="tm-picked" :class="{ empty: selIndex === null }">
+          {{ selIndex !== null ? selectionText : 'tap a tiny square to inspect it' }}
         </div>
         <div class="tm-subtitle">search</div>
         <div ref="modalMovesEl" class="tm-moves tm-modal-moves">
           <div
-            v-for="(m, i) in thought.moves"
+            v-for="m in thought.moves"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, selected: i === selectedIdx }"
+            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex }"
             :style="rowStyle(m.share)"
-            @click="selectMove(i)"
+            @click="selectIndex(m.index)"
           >
             <span class="tm-chip" :style="chipStyle(m.index)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
