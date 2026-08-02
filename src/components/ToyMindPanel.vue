@@ -34,11 +34,16 @@ function maxProb(): number {
   return m || 1;
 }
 
+// Every cell is hue-coded by legality (teal = legal, red = illegal)
+// and BRIGHTNESS-coded by probability. Nothing renders black: the
+// lowest-probability cells sit at a dark version of their hue, so the
+// legal/illegal split stays readable across the whole board.
 function cellColor(p: number, maxP: number, illegal: boolean): string {
   const t = Math.sqrt(Math.min(1, p / maxP)); // sqrt lifts the mid-range
+  const a = 0.15 + 0.85 * t;                  // dark floor, never invisible
   return illegal
-    ? `rgba(248, 90, 90, ${0.3 + 0.7 * t})`
-    : `rgba(94, 234, 212, ${0.25 + 0.75 * t})`;
+    ? `rgba(248, 90, 90, ${a})`
+    : `rgba(94, 234, 212, ${a})`;
 }
 
 // Chip background for a list entry = the exact color of its grid cell.
@@ -209,10 +214,10 @@ function drawGrid(): void {
     }
   }
 
-  // Destination mini-cells, converted net frame -> real coords.
+  // Destination mini-cells, converted net frame -> real coords. Every
+  // cell is drawn — legality picks the hue, probability the brightness.
   for (let i = 0; i < 4096; i++) {
     const p = rawPolicy[i];
-    if (p <= 1e-7) continue;
     const from = netToReal(Math.floor(i / 64));
     const to = netToReal(i % 64);
     ctx.fillStyle = cellColor(p, maxP, legalMask[i] === 0);
@@ -356,9 +361,9 @@ function pct(x: number): string {
     <div class="tm-header">
       <span class="tm-title">Toy Mind</span>
       <span class="tm-legend">
-        <span class="lg lg-legal">■</span> probability on legal moves
-        <span class="lg lg-illegal">■</span> wasted on illegal moves (masked away)
-        <span class="lg lg-zero">■</span> ~zero
+        <span class="lg lg-legal">■</span> legal moves
+        <span class="lg lg-illegal">■</span> illegal moves
+        <span class="lg lg-bright"></span> brightness shows output probability
       </span>
     </div>
 
@@ -496,7 +501,16 @@ function pct(x: number): string {
 .lg { margin-left: 10px; margin-right: 3px; }
 .lg-legal { color: #5ae3d8; }
 .lg-illegal { color: #f87171; }
-.lg-zero { color: #1c1a2c; text-shadow: 0 0 0 1px #444; }
+/* Dark-to-bright ramp: the brightness axis of the colormap. */
+.lg-bright {
+  display: inline-block;
+  width: 26px;
+  height: 9px;
+  border-radius: 2px;
+  vertical-align: baseline;
+  background: linear-gradient(90deg, rgba(94, 234, 212, 0.15), rgba(94, 234, 212, 1));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
 
 .tm-body {
   position: relative;
