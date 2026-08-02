@@ -1566,17 +1566,15 @@ class Trainer:
 
         # Reuse save_checkpoint by writing to a temp dir then moving the .pt.
         # Simpler: just replicate the save payload here (cheap vs train_step).
+        # _model_arch_dict, NOT a hand-rolled ChessNet-shaped dict: ToyNet
+        # has no kernel_size/value_head_size/se_reduction, and the stale
+        # inline version killed the first 10x128 toy run at gen 1000 —
+        # the first time a toy run ever survived to the archive cadence.
         payload = {
             "model_state_dict": self.model.state_dict(),
             "stats": self.stats.__dict__,
             "config": self.config.__dict__,
-            "model_arch": {
-                "num_res_blocks": self.model.num_res_blocks,
-                "num_filters": self.model.num_filters,
-                "kernel_size": self.model.kernel_size,
-                "value_head_size": self.model.value_head_size,
-                "se_reduction": self.model.se_reduction,
-            },
+            "model_arch": _model_arch_dict(self.model),
         }
         if self.aux_material is not None:
             payload["aux_material_state_dict"] = self.aux_material.state_dict()

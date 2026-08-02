@@ -125,6 +125,17 @@ def test_trainer_runs_toynet_end_to_end(tmp_path):
     assert isinstance(rebuilt, ToyNet)
     rebuilt.load_state_dict(state["model_state_dict"])
 
+    # The archive path must work for ToyNet too — a stale ChessNet-shaped
+    # arch dict here killed the first 10x128 run at gen 1000, the first
+    # time any toy run reached the archive cadence.
+    trainer.config.archive_every_gens = 1
+    archive_path = trainer.maybe_archive_checkpoint(tmp_path)
+    assert archive_path is not None and archive_path.exists()
+    arch_state = torch.load(archive_path, map_location="cpu", weights_only=False)
+    assert arch_state["model_arch"] == {"family": "toy"}
+    rebuilt2 = _build_model_from_arch(arch_state["model_arch"])
+    rebuilt2.load_state_dict(arch_state["model_state_dict"])
+
 
 def test_mp_workers_rejected_with_custom_encoder():
     """The multiprocess path is hard-wired to 20-plane Rust encoding —
