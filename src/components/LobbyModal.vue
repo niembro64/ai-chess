@@ -112,7 +112,7 @@ const canJoin = computed(() => {
             <span class="bot-name">Play Hard Bot</span>
           </button>
           <button class="lobby-btn ai-btn toy-btn" @click="emit('playBot', 'toy')">
-            <span class="bot-name">Play Easy Bot (With Visuals)</span>
+            <span class="bot-name">Play Visual Bot</span>
           </button>
         </div>
 

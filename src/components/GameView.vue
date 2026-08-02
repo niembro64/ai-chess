@@ -719,9 +719,50 @@ onUnmounted(() => {
   max-width: calc(100vw - 16px);
 }
 
+/* --- Mobile: thumbs-first layout ----------------------------------
+   The chessboard is the only thing the player touches constantly, so
+   it pins to the BOTTOM of the screen (thumb zone) at full width. All
+   the info furniture — status, chips, controls, and the Toy Mind
+   panel — compresses into whatever is left at the top; the panel gets
+   a capped height and scrolls internally. Implemented with flex
+   `order` so the desktop DOM/layout is untouched. */
 @media (max-width: 900px) {
+  .game-stack {
+    min-height: 100dvh;
+    width: 100%;
+  }
+  .game-layout {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+  }
+  .board-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+  }
+  /* Info at the top, in reading order... */
+  .status-bar { order: 1; padding: 4px 10px; }
+  .draw-offer-banner { order: 2; }
+  .player-chip { order: 3; }
+  .player-chip.is-local { order: 4; }
+  .game-controls { order: 5; }
+  .control-btn { padding: 6px 14px; font-size: 12px; }
+  /* ...the history arrows last of the info stack (they're interactive,
+     so closest to the thumbs)... */
+  .history-nav { order: 6; }
+  /* ...and the board pinned to the bottom edge. */
+  .board-slot {
+    order: 10;
+    margin-top: auto;
+    padding-bottom: max(4px, env(safe-area-inset-bottom));
+  }
+  /* Toy Mind rides above everything, height-capped, scrolls inside. */
   .toy-mind-row {
-    margin: 0 4px 16px;
+    order: -1;
+    margin: 4px 4px 0;
+    max-height: 26dvh;
+    overflow-y: auto;
   }
 }
 
