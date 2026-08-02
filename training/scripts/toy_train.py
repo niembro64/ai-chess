@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import math
 import random
@@ -365,6 +366,9 @@ def main() -> None:
     parser.add_argument("--buffer", type=int, default=30_000)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-dashboard", action="store_true",
+                        help="Plain per-iteration lines instead of the live "
+                             "dashboard (auto-disabled when stdout is not a TTY)")
     parser.add_argument("--dump-fixture", type=Path, default=None,
                         help="Write a TS-parity fixture (positions + outputs) and exit")
     args = parser.parse_args()
@@ -400,6 +404,36 @@ def main() -> None:
         return
 
     buffer: deque = deque(maxlen=args.buffer)
+
+    # Plain lines always go to the log file (so remote tails and tools
+    # can read progress regardless of the dashboard) and to CSV for
+    # later plotting. The rich dashboard renders on top when we have a
+    # real terminal.
+    log_path = CKPT_DIR / "train.log"
+    csv_path = CKPT_DIR / "toy_stats.csv"
+    if not csv_path.exists():
+        csv_path.write_text(
+            "time,iteration,games,buffer,p_loss,v_loss,selfplay_s,train_s,labels\n"
+        )
+
+    use_dashboard = sys.stdout.isatty() and not args.no_dashboard
+    dashboard = None
+    if use_dashboard:
+        try:
+            from toy_dashboard import ToyDashboard
+            dashboard = ToyDashboard(args.iterations, str(device), n_params)
+        except Exception as e:
+            print(f"dashboard unavailable ({e}); falling back to plain output")
+
+    dash_ctx = dashboard if dashboard is not None else contextlib.nullcontext()
+    with dash_ctx:
+        _train_loop(args, model, optimizer, buffer, start_iter, device,
+                    dashboard, log_path, csv_path)
+
+
+def _train_loop(args, model, optimizer, buffer, start_iter, device,
+                dashboard, log_path: Path, csv_path: Path) -> None:
+    rng = random.Random(args.seed + start_iter)
 
     for it in range(start_iter, args.iterations):
         model.eval()
@@ -438,13 +472,28 @@ def main() -> None:
             p_loss, v_loss = policy_loss.item(), value_loss.item()
         train_s = time.time() - t1
 
-        print(
+        line = (
             f"iter {it + 1:4d}  games {args.games_per_iter} ({labels})  "
             f"buffer {len(buffer):6d}  p_loss {p_loss:.3f}  v_loss {v_loss:.3f}  "
-            f"selfplay {selfplay_s:5.1f}s  train {train_s:4.1f}s",
-            flush=True,
+            f"selfplay {selfplay_s:5.1f}s  train {train_s:4.1f}s"
         )
+        with log_path.open("a") as f:
+            f.write(line + "\n")
+        with csv_path.open("a") as f:
+            labels_str = ";".join(f"{k}:{n}" for k, n in sorted(labels.items()))
+            f.write(
+                f"{time.strftime('%Y-%m-%dT%H:%M:%S')},{it + 1},"
+                f"{args.games_per_iter},{len(buffer)},{p_loss:.4f},{v_loss:.4f},"
+                f"{selfplay_s:.1f},{train_s:.2f},{labels_str}\n"
+            )
+        if dashboard is not None:
+            dashboard.on_iteration(
+                it + 1, labels, len(buffer), p_loss, v_loss, selfplay_s, train_s,
+            )
+        else:
+            print(line, flush=True)
 
+        latest = CKPT_DIR / "toy-latest.pt"
         torch.save(
             {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
              "iteration": it + 1},
