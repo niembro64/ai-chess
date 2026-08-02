@@ -87,23 +87,39 @@ function cellColor(p: number, illegal: boolean): string {
     : `rgba(94, 234, 212, ${a})`;
 }
 
-function chipStyle(index: number): Record<string, string> {
-  return { background: cellColor(props.thought.rawPolicy[index], false) };
+type SearchRow = { uci: string; index: number; share: number; p: number; legal: boolean };
+
+function chipStyle(row: SearchRow): Record<string, string> {
+  return { background: cellColor(row.p, !row.legal) };
 }
 
-// Visit-share bar behind each SEARCH row: the top move gets a full bar,
-// the rest scale relative to it.
-function rowStyle(share: number): Record<string, string> {
-  const top = props.thought.moves[0]?.share || 1;
-  const pct = Math.max(2, (share / top) * 100);
+// Bar behind each SEARCH row. Legal rows: visit share, the top move
+// gets a full teal bar and the rest scale relative to it. Illegal
+// rows: raw prior relative to the biggest illegal prior, in red.
+function rowStyle(row: SearchRow): Record<string, string> {
+  if (row.legal) {
+    const top = props.thought.moves[0]?.share || 1;
+    const pct = Math.max(2, (row.share / top) * 100);
+    return {
+      background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
+    };
+  }
+  const iMax = policyStats.value.iMax || 1;
+  const pct = Math.max(2, (row.p / iMax) * 100);
   return {
-    background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
+    background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
   };
 }
 
 function selectIndex(idx: number): void {
   selIndex.value = idx;
-  nextTick(updateLeaders);
+  nextTick(() => {
+    updateLeaders();
+    // Keep the selected row visible in whichever list is on screen.
+    for (const list of [moveListEl.value, modalMovesEl.value]) {
+      list?.querySelector('.tm-move.selected')?.scrollIntoView({ block: 'nearest' });
+    }
+  });
 }
 
 // --- coordinate frames -----------------------------------------------
@@ -174,6 +190,42 @@ const rankLabels = computed(() =>
 const ringDisp = computed(() =>
   selIndex.value !== null ? policyDisp(selIndex.value) : null,
 );
+
+// --- SEARCH rows: the whole policy, colored by legality ----------------
+//
+// Legal moves first, ordered by visit share (the search's opinion),
+// then EVERY illegal move ordered by the net's raw prior — same teal /
+// red families as the policy grid. The default selection stays the
+// top legal move.
+
+function uciOf(netIndex: number): string {
+  const from = netToReal(Math.floor(netIndex / 64));
+  const to = netToReal(netIndex % 64);
+  const name = (s: { r: number; f: number }) =>
+    String.fromCharCode(97 + s.f) + String(8 - s.r);
+  return name(from) + name(to);
+}
+
+const searchRows = computed<SearchRow[]>(() => {
+  const { moves, rawPolicy, legalMask } = props.thought;
+  const rows: SearchRow[] = moves.map(m => ({
+    uci: m.uci, index: m.index, share: m.share, p: rawPolicy[m.index], legal: true,
+  }));
+  const illegal: SearchRow[] = [];
+  for (let i = 0; i < rawPolicy.length; i++) {
+    if (!legalMask[i]) {
+      illegal.push({ uci: uciOf(i), index: i, share: 0, p: rawPolicy[i], legal: false });
+    }
+  }
+  illegal.sort((a, b) => b.p - a.p);
+  return rows.concat(illegal);
+});
+
+const illegalCount = computed(() => searchRows.value.length - props.thought.moves.length);
+
+function rawPct(x: number): string {
+  return `${(x * 100).toFixed(2)}%`;
+}
 
 // --- game state strip: one 8×8 plane per piece type ---------------------
 //
@@ -262,11 +314,9 @@ function computeLeader(
   grid: InstanceType<typeof BoardGrid>,
   list: HTMLElement,
 ): { x1: number; y1: number; x2: number; y2: number } | null {
-  // The leader only exists when the selection corresponds to a SEARCH
-  // row (a legal move); an illegal-cell selection rings the grid alone.
+  // Every policy index has a SEARCH row now (legal and illegal), so
+  // the leader exists whenever the selected row's chip is in the DOM.
   if (selIndex.value === null) return null;
-  const sel = props.thought.moves.find(m => m.index === selIndex.value);
-  if (!sel) return null;
   const canvas = grid.canvasEl;
   if (!canvas) return null;
   const chip = list.querySelector<HTMLElement>('.tm-move.selected .tm-chip');
@@ -277,7 +327,7 @@ function computeLeader(
   const chipRect = chip.getBoundingClientRect();
 
   const scale = cellRect.width / grid.baseW();
-  const c = grid.cellCenter(policyDisp(sel.index));
+  const c = grid.cellCenter(policyDisp(selIndex.value));
   const cx = cellRect.left - cRect.left + c.x * scale;
   const cy = cellRect.top - cRect.top + c.y * scale;
   const lx = chipRect.left - cRect.left + chipRect.width / 2;
@@ -304,9 +354,15 @@ function updateLeaders(): void {
 // --- lifecycle ------------------------------------------------------------
 
 function refresh(): void {
-  // New thought → the selection resets to the search's top choice.
+  // New thought → the selection resets to the search's top choice and
+  // the lists scroll back to the top (where that row lives).
   selIndex.value = props.thought.moves[0]?.index ?? null;
-  nextTick(updateLeaders);
+  nextTick(() => {
+    updateLeaders();
+    for (const list of [moveListEl.value, modalMovesEl.value]) {
+      if (list) list.scrollTop = 0;
+    }
+  });
 }
 
 watch(() => props.thought, refresh);
@@ -408,24 +464,25 @@ function pct(x: number): string {
         <h3 class="tm-section-title">Search</h3>
         <div ref="moveListEl" class="tm-moves">
           <div
-            v-for="m in thought.moves"
+            v-for="m in searchRows"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex }"
-            :style="rowStyle(m.share)"
+            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex, illegal: !m.legal }"
+            :style="rowStyle(m)"
             @click="selectIndex(m.index)"
           >
-            <span class="tm-chip" :style="chipStyle(m.index)"></span>
+            <span class="tm-chip" :style="chipStyle(m)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
-            <span class="tm-move-share">{{ pct(m.share) }}</span>
+            <span class="tm-move-share">{{ m.legal ? pct(m.share) : rawPct(m.p) }}</span>
           </div>
         </div>
         <div v-if="thought.moves.length === 0" class="tm-gameover">
           game over — no legal moves
         </div>
         <div v-else class="tm-caption">
-          all {{ thought.moves.length }} legal moves by visit share · click one
-          to point at its policy cell
+          {{ thought.moves.length }} legal moves by visit share, then
+          {{ illegalCount }} illegal by prior · click one to point at its
+          policy cell
         </div>
       </section>
 
@@ -497,16 +554,16 @@ function pct(x: number): string {
         <div class="tm-subtitle">search</div>
         <div ref="modalMovesEl" class="tm-moves tm-modal-moves">
           <div
-            v-for="m in thought.moves"
+            v-for="m in searchRows"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex }"
-            :style="rowStyle(m.share)"
+            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex, illegal: !m.legal }"
+            :style="rowStyle(m)"
             @click="selectIndex(m.index)"
           >
-            <span class="tm-chip" :style="chipStyle(m.index)"></span>
+            <span class="tm-chip" :style="chipStyle(m)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
-            <span class="tm-move-share">{{ pct(m.share) }}</span>
+            <span class="tm-move-share">{{ m.legal ? pct(m.share) : rawPct(m.p) }}</span>
           </div>
         </div>
 
@@ -767,6 +824,10 @@ function pct(x: number): string {
 .tm-move.chosen {
   color: #5ae3d8;
   font-weight: 600;
+}
+
+.tm-move.illegal .tm-move-uci {
+  color: #d99a9a;
 }
 
 /* Selected move (defaults to the top of the list; click any row to
