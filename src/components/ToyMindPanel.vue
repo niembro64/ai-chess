@@ -368,11 +368,12 @@ function pct(x: number): string {
     </div>
 
     <div ref="bodyEl" class="tm-body">
-      <!-- ============ GAME STATE INPUT ============ -->
+      <!-- ============ NETWORK INPUT ============ -->
       <section class="tm-section">
-        <h3 class="tm-section-title">Game State Input</h3>
+        <h3 class="tm-section-title">Network Input</h3>
         <div ref="sceneEl" class="tm-scene"></div>
         <div class="tm-caption">
+          <span class="tm-sublabel">game state</span><br />
           8×8×6 tensor — drag to rotate<br />
           Toy's view (rotated); its pieces are +1 (dark)
         </div>
@@ -390,7 +391,7 @@ function pct(x: number): string {
               @mouseleave="hover = null"
             ></canvas>
             <div class="tm-caption">
-              <span class="tm-sublabel">policy output head</span><br />
+              <span class="tm-sublabel">policy head</span><br />
               each square holds a mini-board of its destinations · hover to decode
             </div>
           </div>
@@ -406,7 +407,7 @@ function pct(x: number): string {
             <div class="tm-value-num">
               {{ thought.value >= 0 ? '+' : '' }}{{ thought.value.toFixed(2) }}
             </div>
-            <div class="tm-caption"><span class="tm-sublabel">value output head</span></div>
+            <div class="tm-caption"><span class="tm-sublabel">value head</span></div>
           </div>
         </div>
       </section>
