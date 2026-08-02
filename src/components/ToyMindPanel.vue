@@ -12,8 +12,11 @@
 // - Click a SEARCH row → the amber circles + leader line re-target that
 //   move (reset to the top move whenever Toy thinks again).
 //
-// Both the POLICY HEAD and the GAME STATE render through the shared
-// BoardGrid canvas component (mini=8 board-of-boards vs mini=1 plane).
+// Both the POLICY HEAD and the GAME STATE render through the SAME
+// BoardGrid canvas component (the policy head's renderer): the policy
+// head is an 8×8 grid of destination boards, the game state is a 1×6
+// strip of piece planes on desktop and a 6×1 column on mobile, with
+// the piece names as the strip's row/column headers.
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import BoardGrid from './BoardGrid.vue';
@@ -172,10 +175,13 @@ const ringDisp = computed(() =>
   selIndex.value !== null ? policyDisp(selIndex.value) : null,
 );
 
-// --- game state grids: one 8×8 plane per piece type ---------------------
+// --- game state strip: one 8×8 plane per piece type ---------------------
 //
 // Literal piece colors (white piece / black piece / grey empty), in the
-// same display orientation as the POLICY HEAD and the game board.
+// same display orientation as the POLICY HEAD and the game board. The
+// strip runs 1×6 on desktop (full names as column headers) and 6×1 on
+// mobile (K Q R B N P letters as row headers) — same flat color array
+// either way, only the BoardGrid layout props change.
 
 const STATE_GREY = '#454b5e';
 const STATE_WHITE = '#f2ead8';
@@ -183,14 +189,24 @@ const STATE_BLACK = '#14111f';
 
 // Kings first — channel order in the tensor is P N B R Q K.
 const STATE_ORDER = [5, 4, 3, 2, 1, 0];
-const STATE_LETTER: Record<string, string> = {
-  King: 'K', Queen: 'Q', Rook: 'R', Bishop: 'B', Knight: 'N', Pawn: 'P',
-};
+const STATE_NAMES = STATE_ORDER.map(ch => TOY_CHANNEL_NAMES[ch]);
+const STATE_LETTERS = ['K', 'Q', 'R', 'B', 'N', 'P'];
 
-const stateGrids = computed(() => {
+// The mobile breakpoint mirrors this stylesheet's @media split — the
+// strip's orientation is a prop, not a CSS concern.
+const mq = window.matchMedia('(max-width: 900px)');
+const isMobile = ref(mq.matches);
+const onMqChange = (): void => { isMobile.value = mq.matches; };
+
+const stateRows = computed(() => (isMobile.value ? 6 : 1));
+const stateCols = computed(() => (isMobile.value ? 1 : 6));
+const stateRowLabels = computed(() => (isMobile.value ? STATE_LETTERS : null));
+const stateColLabels = computed(() => (isMobile.value ? null : STATE_NAMES));
+
+const stateColors = computed(() => {
   const { planes, blackToMove } = props.thought;
-  return STATE_ORDER.map(ch => {
-    const colors = new Array<string>(64).fill(STATE_GREY);
+  const colors = new Array<string>(STATE_ORDER.length * 64).fill(STATE_GREY);
+  STATE_ORDER.forEach((ch, board) => {
     for (let r = 0; r < 8; r++) {
       for (let f = 0; f < 8; f++) {
         const v = planes[(r * 8 + f) * TOY_NUM_PLANES + ch];
@@ -198,12 +214,11 @@ const stateGrids = computed(() => {
         // +1 is the mover's piece; the mover is black iff blackToMove.
         const isBlackPiece = (v > 0) === blackToMove;
         const d = realToDisp(netToReal(r * 8 + f));
-        colors[d.r * 8 + d.f] = isBlackPiece ? STATE_BLACK : STATE_WHITE;
+        colors[board * 64 + d.r * 8 + d.f] = isBlackPiece ? STATE_BLACK : STATE_WHITE;
       }
     }
-    const name = TOY_CHANNEL_NAMES[ch];
-    return { ch, name, letter: STATE_LETTER[name], colors };
   });
+  return colors;
 });
 
 // --- modal handling ------------------------------------------------------
@@ -300,11 +315,13 @@ let resizeObserver: ResizeObserver | null = null;
 
 onMounted(() => {
   refresh();
+  mq.addEventListener('change', onMqChange);
   resizeObserver = new ResizeObserver(() => updateLeaders());
   if (bodyEl.value) resizeObserver.observe(bodyEl.value);
 });
 
 onBeforeUnmount(() => {
+  mq.removeEventListener('change', onMqChange);
   resizeObserver?.disconnect();
 });
 
@@ -330,11 +347,16 @@ function pct(x: number): string {
         <h3 class="tm-section-title">Network Input</h3>
         <div class="tm-subtitle">game state</div>
         <div class="tm-states" @click="openModal('state')">
-          <div v-for="g in stateGrids" :key="g.ch" class="tm-state-item">
-            <span class="tm-state-letter">{{ g.letter }}</span>
-            <BoardGrid class="tm-state-grid" :colors="g.colors" :cell-px="20" />
-            <span class="tm-state-name">{{ g.name }}</span>
-          </div>
+          <BoardGrid
+            class="tm-states-grid"
+            :colors="stateColors"
+            :rows="stateRows"
+            :cols="stateCols"
+            :cell-px="7"
+            :gap="2"
+            :col-labels="stateColLabels"
+            :row-labels="stateRowLabels"
+          />
         </div>
         <div class="tm-caption">
           one 8×8 plane per piece type · grey = empty · tap to expand
@@ -432,15 +454,20 @@ function pct(x: number): string {
     <div v-if="expanded" class="tm-modal" @click.self="closeModal()">
       <button class="tm-modal-close" @click="closeModal()">✕</button>
 
-      <!-- GAME STATE expanded: the six piece planes, drawn big. -->
+      <!-- GAME STATE expanded: the same strip, drawn big. -->
       <div v-if="expanded === 'state'" class="tm-modal-card">
         <div class="tm-subtitle">game state</div>
-        <div class="tm-modal-states">
-          <div v-for="g in stateGrids" :key="g.ch" class="tm-state-item">
-            <BoardGrid class="tm-modal-state-grid" :colors="g.colors" :cell-px="20" :k="2" />
-            <span class="tm-state-name">{{ g.name }}</span>
-          </div>
-        </div>
+        <BoardGrid
+          class="tm-modal-states-grid"
+          :colors="stateColors"
+          :rows="stateRows"
+          :cols="stateCols"
+          :cell-px="7"
+          :k="2"
+          :gap="2"
+          :col-labels="stateColLabels"
+          :row-labels="stateRowLabels"
+        />
         <div class="tm-caption">
           white / black pieces per plane · grey = empty · tap outside to close
         </div>
@@ -613,47 +640,24 @@ function pct(x: number): string {
   letter-spacing: 1.5px;
 }
 
-/* --- GAME STATE: six piece planes ----------------------------------- */
-/* Desktop: a single row, full piece names beneath each grid. The
-   mobile block at the end flips this into a vertical column with
-   single-letter row names. */
+/* --- GAME STATE: the piece-plane strip ------------------------------- */
+/* One BoardGrid canvas, same visual language as the POLICY HEAD:
+   desktop 1×6 with full names as bottom headers, displayed 1:1 at its
+   base geometry (~346px — matches the policy board's width) so it
+   stays as crisp as the policy head. The mobile block at the end
+   flips it to 6×1 with letter row headers and scales by height. */
 
 .tm-states {
   display: flex;
-  flex-direction: row;
-  gap: 8px;
   justify-content: center;
   cursor: pointer;
 }
 
-.tm-state-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  min-height: 0;
-}
-
-.tm-state-grid {
-  width: 54px;
-  height: auto;
+.tm-states-grid {
   border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.tm-state-name {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 8.5px;
-  color: #94a3b8;
-  letter-spacing: 0.5px;
-}
-
-.tm-state-letter {
-  display: none;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 8px;
-  font-weight: 700;
-  color: #94a3b8;
+  background: rgba(10, 9, 20, 0.9);
+  max-width: 100%;
+  height: auto;
 }
 
 .tm-out {
@@ -859,22 +863,16 @@ function pct(x: number): string {
   max-height: 92dvh;
 }
 
-.tm-modal-states {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px 18px;
-  justify-content: center;
-  max-width: min(92vw, 640px);
-}
-
-.tm-modal-states .tm-state-name {
-  font-size: 11px;
-}
-
-.tm-modal-state-grid {
-  width: min(27vw, 170px);
-  height: auto;
+/* The modal strip is drawn at k=2 (backing store 2× base); the
+   max-constraints fit either orientation and cap it near its natural
+   2× size so it stays sharp. */
+.tm-modal-states-grid {
   border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(10, 9, 20, 0.95);
+  max-width: min(92vw, 700px);
+  max-height: 72dvh;
+  width: auto;
+  height: auto;
 }
 
 .tm-modal-grid {
@@ -944,35 +942,17 @@ function pct(x: number): string {
   .tm-caption {
     display: none;
   }
-  /* GAME STATE flips to a vertical column: one row per piece plane,
-     single-letter row names on the left, grids sized by the section's
-     height (six equal shares). */
+  /* GAME STATE strip runs 6×1 here (BoardGrid props flip at this same
+     breakpoint via matchMedia); it scales down by the section's
+     height, keeping its aspect. */
   .tm-states {
-    flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
-    width: 100%;
-    gap: 2px;
-    align-items: stretch;
+    align-items: center;
   }
-  .tm-state-item {
-    flex: 1 1 0;
-    min-height: 0;
-    flex-direction: row;
-    justify-content: center;
-    gap: 3px;
-  }
-  .tm-state-grid {
+  .tm-states-grid {
+    max-height: 100%;
     width: auto;
-    height: 100%;
-  }
-  .tm-state-name {
-    display: none;
-  }
-  .tm-state-letter {
-    display: block;
-    flex-shrink: 0;
-    width: 8px;
   }
   .tm-out {
     flex-direction: column;

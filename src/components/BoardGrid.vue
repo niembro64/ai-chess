@@ -1,30 +1,40 @@
 <script setup lang="ts">
-// BoardGrid — the POLICY HEAD's visual language as a reusable canvas.
+// BoardGrid — the POLICY HEAD renderer as a reusable component.
 //
-// An 8×8 board of squares, each holding a mini×mini block of colored
-// cells, drawn at base geometry × an integer scale k (ctx.scale) so
-// every instance stays crisp. mini=8 renders the 4096-cell policy
-// head; mini=1 renders a plain 8×8 board (the GAME STATE planes).
+// Draws a rows×cols grid of 8×8 boards on one canvas: dark separator
+// lines between boards, per-column headers along the bottom and
+// per-row headers along the left (same font/color as the policy
+// head's a-h / 1-8 coordinates), cells drawn at base geometry × an
+// integer scale k so the canvas displays 1:1 crisp at its natural
+// size.
+//
+//   POLICY HEAD:  rows=8 cols=8  (from-square grid of destination boards)
+//   GAME STATE:   1×6 desktop / 6×1 mobile (one board per piece plane)
 //
 // The parent supplies DISPLAY-ORDERED cell colors — any board
-// flipping / net-frame rotation happens upstream. This component is
-// pure geometry and paint: index = (outerR*8+outerF)*mini² +
-// subR*mini + subF, top-left origin.
+// flipping / net-frame rotation happens upstream. index =
+// (boardRow*cols + boardCol)*mini² + cellR*mini + cellF.
 
 import { onMounted, ref, watch } from 'vue';
 
 const props = withDefaults(
   defineProps<{
-    colors: string[];            // (8*mini)² cell fills, display order
-    mini?: number;               // sub-cells per board square
-    k?: number;                  // integer draw scale (1 inline, 2 modal)
-    cellPx?: number;             // base px per sub-cell
-    fileLabels?: string[] | null; // 8 bottom labels — enables bottom pad
-    rankLabels?: string[] | null; // 8 left labels — enables left pad
-    ring?: number | null;        // display-order cell index to ring amber
-    checker?: boolean;           // checkerboard the outer squares
+    colors: string[];             // rows*cols*mini² cell fills, display order
+    rows?: number;                // boards down
+    cols?: number;                // boards across
+    mini?: number;                // cells per board side
+    k?: number;                   // integer draw scale (1 inline, 2 modal)
+    cellPx?: number;              // base px per cell
+    gap?: number;                 // base px between boards
+    colLabels?: string[] | null;  // one per board column, drawn beneath
+    rowLabels?: string[] | null;  // one per board row, drawn at left
+    ring?: number | null;         // display-order cell index to ring amber
+    checker?: boolean;            // checkerboard the boards
   }>(),
-  { mini: 1, k: 1, cellPx: 5, fileLabels: null, rankLabels: null, ring: null, checker: false },
+  {
+    rows: 8, cols: 8, mini: 8, k: 1, cellPx: 5, gap: 1,
+    colLabels: null, rowLabels: null, ring: null, checker: false,
+  },
 );
 
 const emit = defineEmits<{
@@ -34,27 +44,27 @@ const emit = defineEmits<{
 
 const canvasEl = ref<HTMLCanvasElement | null>(null);
 
-const GAP = 1;
-const outerPx = () => props.mini * props.cellPx;
-const padL = () => (props.rankLabels ? 16 : 0);
-const padB = () => (props.fileLabels ? 14 : 0);
-const boardPx = () => 8 * outerPx() + 7 * GAP;
-const baseW = () => padL() + boardPx() + (props.rankLabels ? 2 : 0);
-const baseH = () => boardPx() + padB();
+const boardPx = () => props.mini * props.cellPx;
+const padL = () => (props.rowLabels ? 16 : 0);
+const padB = () => (props.colLabels ? 14 : 0);
+const gridW = () => props.cols * boardPx() + (props.cols - 1) * props.gap;
+const gridH = () => props.rows * boardPx() + (props.rows - 1) * props.gap;
+const baseW = () => padL() + gridW() + (props.rowLabels ? 2 : 0);
+const baseH = () => gridH() + padB();
 
 // Base-coordinate pixel center of a cell — for the parent's leader
 // lines (scale by rect.width / baseW() to get on-screen coords).
 function cellCenter(index: number): { x: number; y: number } {
   const m = props.mini;
-  const outer = Math.floor(index / (m * m));
-  const sub = index % (m * m);
-  const oR = Math.floor(outer / 8);
-  const oF = outer % 8;
-  const sR = Math.floor(sub / m);
-  const sF = sub % m;
+  const board = Math.floor(index / (m * m));
+  const cell = index % (m * m);
+  const bR = Math.floor(board / props.cols);
+  const bC = board % props.cols;
+  const cR = Math.floor(cell / m);
+  const cF = cell % m;
   return {
-    x: padL() + oF * (outerPx() + GAP) + sF * props.cellPx + props.cellPx / 2,
-    y: oR * (outerPx() + GAP) + sR * props.cellPx + props.cellPx / 2,
+    x: padL() + bC * (boardPx() + props.gap) + cF * props.cellPx + props.cellPx / 2,
+    y: bR * (boardPx() + props.gap) + cR * props.cellPx + props.cellPx / 2,
   };
 }
 
@@ -70,43 +80,59 @@ function draw(): void {
   ctx.fillRect(0, 0, baseW(), baseH());
 
   if (props.checker) {
-    for (let r = 0; r < 8; r++) {
-      for (let f = 0; f < 8; f++) {
-        ctx.fillStyle = (r + f) % 2 === 0
+    for (let r = 0; r < props.rows; r++) {
+      for (let c = 0; c < props.cols; c++) {
+        ctx.fillStyle = (r + c) % 2 === 0
           ? 'rgba(139, 143, 217, 0.10)'
           : 'rgba(139, 143, 217, 0.035)';
-        ctx.fillRect(padL() + f * (outerPx() + GAP), r * (outerPx() + GAP), outerPx(), outerPx());
+        ctx.fillRect(
+          padL() + c * (boardPx() + props.gap),
+          r * (boardPx() + props.gap),
+          boardPx(),
+          boardPx(),
+        );
       }
     }
   }
 
   const m = props.mini;
   for (let i = 0; i < props.colors.length; i++) {
-    const outer = Math.floor(i / (m * m));
-    const sub = i % (m * m);
-    const oR = Math.floor(outer / 8);
-    const oF = outer % 8;
-    const sR = Math.floor(sub / m);
-    const sF = sub % m;
+    const board = Math.floor(i / (m * m));
+    const cell = i % (m * m);
+    const bR = Math.floor(board / props.cols);
+    const bC = board % props.cols;
+    const cR = Math.floor(cell / m);
+    const cF = cell % m;
     ctx.fillStyle = props.colors[i];
     ctx.fillRect(
-      padL() + oF * (outerPx() + GAP) + sF * props.cellPx,
-      oR * (outerPx() + GAP) + sR * props.cellPx,
+      padL() + bC * (boardPx() + props.gap) + cF * props.cellPx,
+      bR * (boardPx() + props.gap) + cR * props.cellPx,
       props.cellPx - 0.5,
       props.cellPx - 0.5,
     );
   }
 
-  if (props.fileLabels || props.rankLabels) {
+  // Headers in the policy head's coordinate style.
+  if (props.colLabels || props.rowLabels) {
     ctx.fillStyle = '#94a3b8';
     ctx.font = '10px JetBrains Mono, monospace';
     ctx.textAlign = 'center';
-    for (let i = 0; i < 8; i++) {
-      if (props.fileLabels) {
-        ctx.fillText(props.fileLabels[i], padL() + i * (outerPx() + GAP) + outerPx() / 2, boardPx() + 11);
+    if (props.colLabels) {
+      for (let c = 0; c < props.cols; c++) {
+        ctx.fillText(
+          props.colLabels[c] ?? '',
+          padL() + c * (boardPx() + props.gap) + boardPx() / 2,
+          gridH() + 11,
+        );
       }
-      if (props.rankLabels) {
-        ctx.fillText(props.rankLabels[i], padL() / 2 - 1, i * (outerPx() + GAP) + outerPx() / 2 + 3);
+    }
+    if (props.rowLabels) {
+      for (let r = 0; r < props.rows; r++) {
+        ctx.fillText(
+          props.rowLabels[r] ?? '',
+          padL() / 2 - 1,
+          r * (boardPx() + props.gap) + boardPx() / 2 + 3,
+        );
       }
     }
   }
@@ -122,7 +148,7 @@ function draw(): void {
 }
 
 // Mouse/touch position → display-order cell index, or null outside
-// the cells (labels, gaps beyond the board).
+// the cells (headers, gaps beyond the boards).
 function decode(e: MouseEvent): number | null {
   const canvas = canvasEl.value;
   if (!canvas) return null;
@@ -130,14 +156,17 @@ function decode(e: MouseEvent): number | null {
   const s = baseW() / (rect.width || 1);
   const x = (e.clientX - rect.left) * s - padL();
   const y = (e.clientY - rect.top) * s;
-  const oF = Math.floor(x / (outerPx() + GAP));
-  const oR = Math.floor(y / (outerPx() + GAP));
-  const sF = Math.floor((x - oF * (outerPx() + GAP)) / props.cellPx);
-  const sR = Math.floor((y - oR * (outerPx() + GAP)) / props.cellPx);
-  if (oF < 0 || oF > 7 || oR < 0 || oR > 7 || sF < 0 || sF >= props.mini || sR < 0 || sR >= props.mini) {
+  const bC = Math.floor(x / (boardPx() + props.gap));
+  const bR = Math.floor(y / (boardPx() + props.gap));
+  const cF = Math.floor((x - bC * (boardPx() + props.gap)) / props.cellPx);
+  const cR = Math.floor((y - bR * (boardPx() + props.gap)) / props.cellPx);
+  if (
+    bC < 0 || bC >= props.cols || bR < 0 || bR >= props.rows ||
+    cF < 0 || cF >= props.mini || cR < 0 || cR >= props.mini
+  ) {
     return null;
   }
-  return (oR * 8 + oF) * props.mini * props.mini + sR * props.mini + sF;
+  return (bR * props.cols + bC) * props.mini * props.mini + cR * props.mini + cF;
 }
 
 function onClick(e: MouseEvent): void {
@@ -154,7 +183,13 @@ function onLeave(): void {
 }
 
 onMounted(draw);
-watch(() => [props.colors, props.ring, props.fileLabels, props.rankLabels, props.k], draw);
+watch(
+  () => [
+    props.colors, props.rows, props.cols, props.k, props.gap,
+    props.colLabels, props.rowLabels, props.ring,
+  ],
+  draw,
+);
 
 defineExpose({ canvasEl, cellCenter, baseW });
 </script>
