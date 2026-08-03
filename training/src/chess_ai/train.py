@@ -1217,6 +1217,7 @@ class Trainer:
                 [state], ev, mcts_sims, self.rng,
                 temperatures=[0.0], dirichlet_epsilon=0.0,
                 board_encoder=self._board_encoder,
+                position_counts=[position_history],
             )
             state = apply_move(state, result[0].move)
             moves_played += 1

@@ -101,41 +101,10 @@ class GameSlot:
     resign_truth_color: str | None = None
 
 
-def _position_key(state: ChessGameState) -> bytes:
-    """Stable byte-string identifying a chess position for FIDE-style
-    threefold-repetition comparison. Includes board layout, side to
-    move, castling rights, and en-passant target. Excludes the halfmove
-    clock and full-move number — FIDE 9.2 compares by position only.
-    """
-    parts = bytearray(64 + 1 + 4 + 2)
-    i = 0
-    for r in range(8):
-        for f in range(8):
-            p = state.board[r][f]
-            if p is None:
-                parts[i] = ord('.')
-            else:
-                tmap = {"king": 'k', "queen": 'q', "rook": 'r',
-                        "bishop": 'b', "knight": 'n', "pawn": 'p'}
-                ch = tmap[p.type]
-                if p.color == "white":
-                    ch = ch.upper()
-                parts[i] = ord(ch)
-            i += 1
-    parts[i] = ord(state.currentTurn[0])  # 'w' or 'b'
-    i += 1
-    cr = state.castlingRights
-    for flag in (cr.whiteKingside, cr.whiteQueenside,
-                 cr.blackKingside, cr.blackQueenside):
-        parts[i] = ord('1' if flag else '0')
-        i += 1
-    if state.enPassantTarget is not None:
-        parts[i] = ord('a') + state.enPassantTarget.file
-        parts[i + 1] = ord('1') + state.enPassantTarget.rank
-    else:
-        parts[i] = ord('-')
-        parts[i + 1] = ord('-')
-    return bytes(parts)
+# position_key moved to engine.py so the MCTS (which this module imports)
+# can use it for in-tree repetition awareness without an import cycle.
+# Re-exported under the old name for existing callers (train.py, tests).
+from .engine import position_key as _position_key
 
 
 def _is_insufficient_material(board) -> bool:
@@ -680,6 +649,9 @@ class SelfPlayEngine:
             temperatures,
             policy_softening_temperature=self.config.policy_softening_temperature,
             board_encoder=self.config.board_encoder,
+            # In-tree repetition awareness: each search sees its game's
+            # position history, so shuffling reads as a draw in-tree.
+            position_counts=[g.position_history for g in self.games],
         )
 
         finished: list[GameResult] = []

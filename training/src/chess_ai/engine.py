@@ -918,3 +918,43 @@ def _apply_move_python(state: ChessGameState, move: Move) -> ChessGameState:
         new_state.status = "active"
 
     return new_state
+
+
+def position_key(state: ChessGameState) -> bytes:
+    """Stable byte-string identifying a chess position for FIDE-style
+    threefold-repetition comparison. Includes board layout, side to
+    move, castling rights, and en-passant target. Excludes the halfmove
+    clock and full-move number — FIDE 9.2 compares by position only.
+
+    Lives in engine (not selfplay) so the MCTS — which selfplay imports —
+    can use it for in-tree repetition awareness without an import cycle.
+    """
+    parts = bytearray(64 + 1 + 4 + 2)
+    i = 0
+    for r in range(8):
+        for f in range(8):
+            p = state.board[r][f]
+            if p is None:
+                parts[i] = ord('.')
+            else:
+                tmap = {"king": 'k', "queen": 'q', "rook": 'r',
+                        "bishop": 'b', "knight": 'n', "pawn": 'p'}
+                ch = tmap[p.type]
+                if p.color == "white":
+                    ch = ch.upper()
+                parts[i] = ord(ch)
+            i += 1
+    parts[i] = ord(state.currentTurn[0])  # 'w' or 'b'
+    i += 1
+    cr = state.castlingRights
+    for flag in (cr.whiteKingside, cr.whiteQueenside,
+                 cr.blackKingside, cr.blackQueenside):
+        parts[i] = ord('1' if flag else '0')
+        i += 1
+    if state.enPassantTarget is not None:
+        parts[i] = ord('a') + state.enPassantTarget.file
+        parts[i + 1] = ord('1') + state.enPassantTarget.rank
+    else:
+        parts[i] = ord('-')
+        parts[i + 1] = ord('-')
+    return bytes(parts)

@@ -19,7 +19,15 @@ from typing import Callable
 import numpy as np
 
 from .encoding import POLICY_SIZE, encode_board, move_to_index
-from .engine import ChessGameState, Move, Position, apply_move, expand_children, get_legal_moves
+from .engine import (
+    ChessGameState,
+    Move,
+    Position,
+    apply_move,
+    expand_children,
+    get_legal_moves,
+    position_key,
+)
 
 C_PUCT = 1.5
 DIRICHLET_ALPHA = 0.3
@@ -79,6 +87,7 @@ class MCTSNode:
         "is_expanded",
         "is_terminal",
         "terminal_value",
+        "pos_key",
     )
 
     def __init__(self, state: ChessGameState, parent: "MCTSNode | None" = None, move: Move | None = None):
@@ -92,6 +101,10 @@ class MCTSNode:
         self.is_expanded = False
         self.is_terminal = False
         self.terminal_value = 0.0
+        # Repetition-aware searches cache each node's position key here
+        # (computed lazily on first descent arrival). A tree has exactly
+        # one path to each node, so a repetition verdict is permanent.
+        self.pos_key: bytes | None = None
 
 
 @dataclass
@@ -121,12 +134,26 @@ class MCTSSearch:
         self,
         state: ChessGameState,
         board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None,
+        position_counts: "dict[bytes, int] | None" = None,
     ):
         self.root = MCTSNode(state)
         self._pending_leaf: MCTSNode | None = None
         # None = Sage's 20-plane encode_board. Toy passes its 6-plane
         # encoder; the search itself is encoding-agnostic.
         self._encode = board_encoder or encode_board
+        # In-tree repetition awareness. `position_counts` is the GAME's
+        # position-occurrence history (the same dict self-play/eval use
+        # for threefold adjudication; root occurrence included). When
+        # given, any in-tree position that (a) would complete FIDE
+        # threefold against the game history, or (b) repeats ANY position
+        # on its own search path (lc0-style twofold rule — in-tree
+        # shuffling makes no progress by definition) is scored as a
+        # terminal draw. Without this the search is blind to the
+        # shuffle-draws the game rules adjudicate, so a winning side
+        # happily repeats — the root cause of self-play collapsing into
+        # ~90% threefold draws.
+        self._game_counts = position_counts
+        self._root_key = position_key(state) if position_counts is not None else None
         self._check_terminal(self.root)
 
     def is_terminal(self) -> bool:
@@ -153,8 +180,19 @@ class MCTSSearch:
     def select_leaf(self) -> np.ndarray | None:
         """Descend from root to an unexpanded (or terminal) leaf."""
         node = self.root
+        track = self._game_counts is not None
+        path_keys: set = {self._root_key} if track else set()
         while node.is_expanded and not node.is_terminal:
             node = _select_child(node)
+            if track and not node.is_terminal:
+                if node.pos_key is None:
+                    node.pos_key = position_key(node.state)
+                    occ = self._game_counts.get(node.pos_key, 0)  # type: ignore[union-attr]
+                    if node.pos_key in path_keys or occ + 1 >= 3:
+                        node.is_terminal = True
+                        node.is_expanded = True
+                        node.terminal_value = 0.0
+                path_keys.add(node.pos_key)
 
         if node.is_terminal:
             _backpropagate(node, node.terminal_value)
@@ -524,8 +562,15 @@ def run_batched_mcts(
     policy_softening_temperature: float = 1.0,
     dirichlet_epsilon: float | None = None,
     board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None,
+    position_counts: "list[dict[bytes, int]] | None" = None,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
+
+    `position_counts[i]` is game i's position-occurrence history (the
+    same dict used for threefold adjudication). When provided, the
+    Python search treats in-tree repetitions as terminal draws — see
+    MCTSSearch. The Rust fast path does NOT support this yet and
+    ignores it (warns once); Toy always runs the Python path.
 
     `temperatures[i]` controls the move-selection temperature for game `i`.
     Defaults to τ=1.0 for every game (AlphaZero-style exploration). Pass a
@@ -551,10 +596,22 @@ def run_batched_mcts(
             f"temperatures length {len(temperatures)} != states length {len(states)}"
         )
     eps = DIRICHLET_EPSILON if dirichlet_epsilon is None else dirichlet_epsilon
+    if position_counts is not None and len(position_counts) != len(states):
+        raise ValueError(
+            f"position_counts length {len(position_counts)} != states length {len(states)}"
+        )
 
     # The Rust fast path encodes boards in Rust with Sage's 20-plane
     # layout; a custom encoder (Toy's 6 planes) forces the Python path.
     if USE_RUST_MCTS and board_encoder is None:
+        if position_counts is not None:
+            import warnings
+            warnings.warn(
+                "Rust MCTS ignores position_counts — in-tree repetition "
+                "awareness is not ported to the Rust search yet.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return _run_batched_mcts_rust(
             states,
             evaluator,
@@ -567,7 +624,10 @@ def run_batched_mcts(
 
     soften = policy_softening_temperature != 1.0
 
-    searches = [MCTSSearch(s, board_encoder) for s in states]
+    searches = [
+        MCTSSearch(s, board_encoder, position_counts[i] if position_counts else None)
+        for i, s in enumerate(states)
+    ]
 
     active = [s for s in searches if not s.is_terminal()]
     if not active:

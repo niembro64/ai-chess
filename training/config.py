@@ -395,6 +395,12 @@ def build_toy_config() -> TrainConfig:
     cfg.eval_mcts_sims = 64
     cfg.eval_move_cap = 400
     cfg.archive_every_gens = 1_000
+    # More decisive-signal supply than Sage's 0.15: the 10x128 run's
+    # standard-start games were 95% shuffle-draws at gen 6k while
+    # endgame-origin games resolved 75% (mates + tablebase labels).
+    # Paired with in-tree repetition awareness (mcts.py) to break the
+    # 90%-threefold collapse.
+    cfg.endgame_start_prob = 0.35
     return cfg
 
 
