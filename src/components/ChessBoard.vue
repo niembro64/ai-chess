@@ -4,6 +4,7 @@ import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } 
 import { playerIdToColor } from '@/types/chess';
 import { getLegalMovesForSquare } from '@/game/chess/ChessEngine';
 import PieceIcon from './PieceIcon.vue';
+import { pieceTint } from '@/game/ai/models';
 
 const props = defineProps<{
   gameState: ChessGameState;
@@ -21,6 +22,15 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'move', move: Move): void;
 }>();
+
+// Bot piece tinting. The tint hexes live in models.ts (shared with the
+// lobby preview); here they become CSS vars the .piece rules consume,
+// so there is exactly one source of truth for board colors.
+const botTintStyle = computed<Record<string, string>>(() => {
+  if (!props.botTheme || !props.botColor) return {} as Record<string, string>;
+  const t = pieceTint(props.botTheme, props.botColor);
+  return { '--bot-fill': t.fill, '--bot-outline': t.outline };
+});
 
 const selectedSquare = ref<Position | null>(null);
 const legalTargets = ref<Position[]>([]);
@@ -223,11 +233,10 @@ watch(
     <div
       class="board-container"
       :class="{
-        'bot-sage': botTheme === 'sage',
-        'bot-jester': botTheme === 'jester',
-        'bot-white': botColor === 'white',
-        'bot-black': botColor === 'black',
+        'bot-white': botTheme && botColor === 'white',
+        'bot-black': botTheme && botColor === 'black',
       }"
+      :style="botTintStyle"
     >
       <!-- Rank labels (left side) -->
       <div class="rank-labels">
@@ -459,22 +468,12 @@ watch(
 /* --- Bot piece tinting ------------------------------------------------
    Only the BOT's pieces tint (the human keeps the standard cream /
    charcoal set): Sage plays green, Jester plays purple — a very light
-   shade when the bot is white, a very dark one when it is black. */
-.board-container.bot-sage.bot-white .piece.white {
-  color: #d9f2d0;
-  --piece-outline: #14381d;
-}
-.board-container.bot-sage.bot-black .piece.black {
-  color: #0e2b15;
-  --piece-outline: rgba(190, 235, 195, 0.6);
-}
-.board-container.bot-jester.bot-white .piece.white {
-  color: #ecdcf8;
-  --piece-outline: #381852;
-}
-.board-container.bot-jester.bot-black .piece.black {
-  color: #1f0e30;
-  --piece-outline: rgba(225, 200, 250, 0.6);
+   shade when the bot is white, a very dark one when it is black. The
+   actual colors arrive as --bot-fill / --bot-outline from models.ts. */
+.board-container.bot-white .piece.white,
+.board-container.bot-black .piece.black {
+  color: var(--bot-fill);
+  --piece-outline: var(--bot-outline);
 }
 
 .move-dot {

@@ -11,7 +11,14 @@ import { LocalGameConnection } from '@/game/server/LocalGameConnection';
 import { RemoteGameConnection } from '@/game/server/RemoteGameConnection';
 import { AIPlayer } from '@/game/ai/AIPlayer';
 import { ToyPlayer, type ToyThought } from '@/game/ai/ToyPlayer';
-import { MODELS, fetchModelJson, type ModelId } from '@/game/ai/models';
+import {
+  EFFORT_LEVELS,
+  MODELS,
+  effortSims,
+  fetchModelJson,
+  type Effort,
+  type ModelId,
+} from '@/game/ai/models';
 import type { SerializedWeights } from '@/game/ai/ChessNet';
 import LobbyModal from './LobbyModal.vue';
 import ChessBoard from './ChessBoard.vue';
@@ -163,6 +170,7 @@ const botTheme = computed<'sage' | 'jester' | null>(() =>
     ? botModelId.value
     : null,
 );
+
 const botColor = computed<PieceColor | null>(() =>
   playingVsBot.value ? (localPlayerId.value === 1 ? 'black' : 'white') : null,
 );
@@ -342,7 +350,7 @@ async function handleJoin(code: string): Promise<void> {
 
 async function handlePlayBot(
   model: ModelId,
-  opts: { goalInverted: boolean; temperature: number },
+  opts: { goalInverted: boolean; effort: Effort; playColor: 'white' | 'black' },
 ): Promise<void> {
   isConnecting.value = true;
   lobbyError.value = null;
@@ -357,21 +365,25 @@ async function handlePlayBot(
   }
 
   try {
+    // Effort sets BOTH search depth and move-selection temperature —
+    // see EFFORT_LEVELS. Search is where most playing strength lives.
+    const sims = effortSims(model, opts.effort);
+    const temperature = EFFORT_LEVELS[opts.effort].temperature;
     if (model === 'toy') {
       aiPlayer = ToyPlayer.create(
-        weights, MODELS.toy.sims,
+        weights, sims,
         t => { toyThought.value = t; },
-        { goalInverted: opts.goalInverted, temperature: opts.temperature },
+        { goalInverted: opts.goalInverted, temperature },
       );
     } else {
       aiPlayer = AIPlayer.create(
         weights as SerializedWeights,
-        MODELS[model].sims,
+        sims,
         t => { toyThought.value = t; },
         {
           trainedGoal: MODELS[model].trainedGoal,
           goalInverted: opts.goalInverted,
-          temperature: opts.temperature,
+          temperature,
         },
       );
     }
@@ -385,10 +397,9 @@ async function handlePlayBot(
   toyThought.value = null;
   playingVsBot.value = true;
   networkRole.value = null;
-  // Toy plays WHITE and moves first, so the Toy Mind panel fills with
-  // its first thought immediately — no waiting for the human's move.
-  // Sage games keep the human on white.
-  localPlayerId.value = model === 'toy' ? 2 : 1;
+  // The player picks their color in the lobby; the bot takes the other
+  // seat (and moves first when the human chose black).
+  localPlayerId.value = opts.playColor === 'white' ? 1 : 2;
   isConnecting.value = false;
 
   startGameWithPlayers([1, 2]);

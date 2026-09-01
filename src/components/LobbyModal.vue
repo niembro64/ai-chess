@@ -2,7 +2,16 @@
 import { ref, computed } from 'vue';
 import type { PlayerId } from '@/types/chess';
 import type { LobbyPlayer } from '@/types/network';
-import { MODELS, type ModelId } from '@/game/ai/models';
+import {
+  EFFORT_LEVELS,
+  MODELS,
+  pieceTint,
+  type Effort,
+  type ModelId,
+} from '@/game/ai/models';
+import BotIcon from './BotIcon.vue';
+import PieceIcon from './PieceIcon.vue';
+import type { BotIconName } from './botIcons';
 
 const props = defineProps<{
   visible: boolean;
@@ -19,20 +28,65 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
-  (e: 'playBot', model: ModelId, opts: { goalInverted: boolean; temperature: number }): void;
+  (e: 'playBot', model: ModelId, opts: {
+    goalInverted: boolean;
+    effort: Effort;
+    playColor: 'white' | 'black';
+  }): void;
 }>();
 
-// --- Inference mode ---------------------------------------------------
-// GOAL: pursue the model's trained goal, or the opposite (misère
-// search flip). TEMPERATURE: 0 = always the top choice; higher =
-// sample among liked moves (variety + mistakes).
-const goalInverted = ref(false);
-const temperature = ref(0);
+// --- AI setup ---------------------------------------------------------
+//
+// The model grid crosses MODEL × GOAL: each row is a network (by what
+// it was TRAINED to do), each column is what we ASK it to do at play
+// time — left = its trained goal, right = inverted (the misère search
+// flip, not "pick the worst move"). Toy sits below as its own option.
 
-function playBot(model: ModelId): void {
-  emit('playBot', model, {
-    goalInverted: goalInverted.value,
-    temperature: temperature.value,
+type BotChoice = {
+  key: string;
+  model: ModelId;
+  goalInverted: boolean;
+  icon: BotIconName;
+  trained: string;
+  asked: string;
+};
+
+const BOT_CHOICES: BotChoice[] = [
+  { key: 'sage-win', model: 'sage', goalInverted: false, icon: 'sage-calm',
+    trained: 'Trained to win', asked: 'Asked to win' },
+  { key: 'sage-lose', model: 'sage', goalInverted: true, icon: 'sage-flustered',
+    trained: 'Trained to win', asked: 'Asked to lose' },
+  { key: 'jester-lose', model: 'jester', goalInverted: false, icon: 'jester-gleeful',
+    trained: 'Trained to lose', asked: 'Asked to lose' },
+  { key: 'jester-win', model: 'jester', goalInverted: true, icon: 'jester-straining',
+    trained: 'Trained to lose', asked: 'Asked to win' },
+];
+
+const TOY_CHOICE: BotChoice = {
+  key: 'toy', model: 'toy', goalInverted: false, icon: 'toy',
+  trained: 'Trained to win', asked: 'Tiny net — watch it think',
+};
+
+const choiceKey = ref('sage-win');
+const playColor = ref<'white' | 'black'>('white');
+const effort = ref<Effort>('medium');
+
+const choice = computed<BotChoice>(
+  () => [...BOT_CHOICES, TOY_CHOICE].find(c => c.key === choiceKey.value) ?? BOT_CHOICES[0],
+);
+
+// The previews show the exact piece colors the game will start with:
+// your standard set, and the bot's tinted set in the opposite color.
+function tintStyle(model: ModelId | null, color: 'white' | 'black'): Record<string, string> {
+  const t = pieceTint(model, color);
+  return { color: t.fill, '--piece-outline': t.outline };
+}
+
+function startBot(): void {
+  emit('playBot', choice.value.model, {
+    goalInverted: choice.value.goalInverted,
+    effort: effort.value,
+    playColor: playColor.value,
   });
 }
 
@@ -121,55 +175,80 @@ const canJoin = computed(() => {
             >Join</button>
           </div>
 
-          <!-- Bot opponents. Weights are fetched lazily on click — only
-               the model you pick gets downloaded. -->
-          <button class="lobby-btn ai-btn sage-btn" @click="playBot('sage')">
-            <span class="bot-name">Play Sage Bot</span>
-            <span class="bot-tagline">{{ MODELS.sage.tagline }}</span>
-          </button>
-          <button class="lobby-btn ai-btn toy-btn" @click="playBot('toy')">
-            <span class="bot-name">Play Toy Bot</span>
-            <span class="bot-tagline">{{ MODELS.toy.tagline }}</span>
-          </button>
-          <button class="lobby-btn ai-btn jester-btn" @click="playBot('jester')">
-            <span class="bot-name">Play Jester Bot</span>
-            <span class="bot-tagline">{{ MODELS.jester.tagline }}</span>
-          </button>
+          <!-- ============ VS AI setup ============
+               Weights are fetched lazily on start — only the model you
+               actually play gets downloaded. -->
+          <div class="setup">
+            <div class="setup-title">AI Model</div>
+            <div class="model-grid">
+              <button
+                v-for="c in BOT_CHOICES"
+                :key="c.key"
+                class="model-cell"
+                :class="[`m-${c.model}`, { active: choiceKey === c.key }]"
+                @click="choiceKey = c.key"
+              >
+                <BotIcon class="model-face" :name="c.icon" />
+                <span class="model-name">{{ MODELS[c.model].name }}</span>
+                <span class="model-line">{{ c.trained }}</span>
+                <span class="model-line asked">{{ c.asked }}</span>
+              </button>
+            </div>
+            <button
+              class="model-cell model-toy"
+              :class="{ active: choiceKey === TOY_CHOICE.key }"
+              @click="choiceKey = TOY_CHOICE.key"
+            >
+              <BotIcon class="model-face" :name="TOY_CHOICE.icon" />
+              <span class="toy-text">
+                <span class="model-name">{{ MODELS.toy.name }}</span>
+                <span class="model-line asked">{{ TOY_CHOICE.asked }}</span>
+              </span>
+            </button>
 
-          <!-- Inference mode: applies to whichever bot is picked. -->
-          <div class="inference-panel">
-            <div class="inf-title">Inference Mode</div>
-            <div class="inf-row">
-              <span class="inf-label">GOAL</span>
-              <div class="inf-seg">
-                <button
-                  :class="{ active: !goalInverted }"
-                  @click="goalInverted = false"
-                >AS TRAINED</button>
-                <button
-                  :class="{ active: goalInverted }"
-                  @click="goalInverted = true"
-                >INVERTED</button>
-              </div>
+            <div class="setup-title">You Play</div>
+            <div class="color-row">
+              <button
+                v-for="c in (['white', 'black'] as const)"
+                :key="c"
+                class="color-cell"
+                :class="{ active: playColor === c }"
+                @click="playColor = c"
+              >
+                <span class="color-kings">
+                  <span class="king you" :style="tintStyle(null, c)">
+                    <PieceIcon type="king" />
+                  </span>
+                  <span
+                    class="king them"
+                    :style="tintStyle(choice.model, c === 'white' ? 'black' : 'white')"
+                  >
+                    <PieceIcon type="king" />
+                  </span>
+                </span>
+                <span class="color-label">{{ c === 'white' ? 'White' : 'Black' }}</span>
+                <span class="color-sub">you vs {{ MODELS[choice.model].name }}</span>
+              </button>
             </div>
-            <div class="inf-row">
-              <span class="inf-label">TEMP</span>
-              <input
-                v-model.number="temperature"
-                class="inf-slider"
-                type="range"
-                min="0"
-                max="1.5"
-                step="0.25"
-              />
-              <span class="inf-value">{{ temperature.toFixed(2) }}</span>
+
+            <div class="setup-title">Model Effort</div>
+            <div class="effort-seg">
+              <button
+                v-for="(lvl, key) in EFFORT_LEVELS"
+                :key="key"
+                :class="{ active: effort === key }"
+                @click="effort = key as Effort"
+              >{{ lvl.label }}</button>
             </div>
-            <p class="inf-explain">
-              <b>Temperature</b> 0 = the bot always plays its top choice;
-              higher makes it sample among moves it likes — more variety,
-              more mistakes. <b>Goal inverted</b> = it pursues the opposite
-              of what it was trained to do.
+            <p class="setup-explain">
+              Effort is how much the model actually thinks: at <b>Low</b> it
+              barely looks ahead and often wanders; at <b>High</b> it runs
+              its full search and always plays its best move.
             </p>
+
+            <button class="lobby-btn start-btn" @click="startBot">
+              Play {{ MODELS[choice.model].name }}
+            </button>
           </div>
         </div>
 
@@ -262,9 +341,14 @@ const canJoin = computed(() => {
   background: linear-gradient(165deg, rgba(40, 38, 70, 0.85), rgba(20, 19, 38, 0.92));
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 20px;
-  padding: 44px 54px;
+  padding: 34px 38px;
   min-width: min(420px, 90dvw);
   max-width: 90dvw;
+  /* The AI setup section makes this screen tall — cap it and scroll
+     inside rather than overflowing the viewport on short phones. */
+  max-height: 92dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   text-align: center;
   backdrop-filter: blur(20px) saturate(1.4);
   -webkit-backdrop-filter: blur(20px) saturate(1.4);
@@ -277,8 +361,22 @@ const canJoin = computed(() => {
 
 @media (max-width: 480px) {
   .lobby-modal {
-    padding: 28px 22px;
+    padding: 22px 16px;
     border-radius: 16px;
+  }
+  /* Tighter cartoons + type so the whole setup still fits a phone. */
+  .model-face {
+    width: 38px;
+    height: 38px;
+  }
+  .model-cell {
+    padding: 8px 4px 7px;
+  }
+  .model-line {
+    font-size: 9px;
+  }
+  .setup-explain {
+    font-size: 10px;
   }
 }
 
@@ -366,147 +464,224 @@ const canJoin = computed(() => {
   box-shadow: 0 8px 24px rgba(94, 234, 212, 0.45);
 }
 
-.ai-btn {
-  background: linear-gradient(165deg, #a855f7, #7c3aed);
-  color: white;
+/* --- VS AI setup ------------------------------------------------------ */
+
+.setup {
   width: 100%;
-  box-shadow: 0 6px 18px rgba(168, 85, 247, 0.3);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.ai-btn:hover:not(:disabled) {
-  background: linear-gradient(165deg, #b569f9, #8b4ef0);
-  box-shadow: 0 8px 24px rgba(168, 85, 247, 0.5);
-}
-
-/* Bot identity colors match their piece tints on the board:
-   Sage = green, Jester = purple, Toy = teal. */
-.sage-btn {
-  background: linear-gradient(165deg, #4ade80, #16a34a);
-  box-shadow: 0 6px 18px rgba(74, 222, 128, 0.3);
-}
-
-.sage-btn:hover:not(:disabled) {
-  background: linear-gradient(165deg, #63e796, #22c55e);
-  box-shadow: 0 8px 24px rgba(74, 222, 128, 0.5);
-}
-
-.toy-btn {
-  background: linear-gradient(165deg, #2dd4bf, #0d9488);
-  box-shadow: 0 6px 18px rgba(45, 212, 191, 0.3);
-}
-
-.toy-btn:hover:not(:disabled) {
-  background: linear-gradient(165deg, #46e4cf, #14b8a6);
-  box-shadow: 0 8px 24px rgba(45, 212, 191, 0.5);
-}
-
-.bot-tagline {
-  font-size: 10.5px;
-  font-weight: 500;
-  opacity: 0.85;
-  letter-spacing: 0.3px;
-}
-
-/* --- Inference mode panel ------------------------------------------- */
-
-.inference-panel {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding-top: 4px;
   text-align: left;
 }
 
-.inf-title {
+.setup-title {
+  font-family: 'Inter', system-ui, sans-serif;
   font-size: 10px;
   font-weight: 700;
   color: #94a3b8;
   text-transform: uppercase;
   letter-spacing: 2px;
+  margin-top: 2px;
 }
 
-.inf-row {
+/* Model grid: rows are networks (what they were TRAINED to do),
+   columns are what we ASK them to do — left natural, right inverted. */
+.model-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.model-cell {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 2px;
+  padding: 10px 6px 8px;
+  border: 1.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
 }
 
-.inf-label {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  font-weight: 700;
-  color: #5ae3d8;
-  width: 38px;
+.model-cell:hover {
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-1px);
+}
+
+.model-cell.active {
+  border-color: var(--accent, #5ae3d8);
+  background: var(--accent-bg, rgba(94, 234, 212, 0.14));
+  box-shadow: 0 0 0 1px var(--accent, #5ae3d8), 0 6px 18px var(--accent-bg, rgba(94, 234, 212, 0.2));
+}
+
+/* Identity colors — same green / purple / teal the pieces use. */
+.model-cell.m-sage { --accent: #4ade80; --accent-bg: rgba(74, 222, 128, 0.16); }
+.model-cell.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
+.model-toy { --accent: #2dd4bf; --accent-bg: rgba(45, 212, 191, 0.16); }
+
+.model-face {
+  width: 46px;
+  height: 46px;
   flex-shrink: 0;
 }
 
-.inf-seg {
+.model-name {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--accent, #e2e8f0);
+}
+
+.model-line {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.model-line.asked {
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+/* Toy is its own option below the 2x2 — a different kind of thing
+   (tiny teaching net), so it gets a wide row instead of a grid cell. */
+.model-toy {
+  flex-direction: row;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.model-toy .model-face {
+  width: 32px;
+  height: 32px;
+}
+
+.toy-text {
   display: flex;
-  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+/* You-play picker: each option previews the REAL piece colors the game
+   will start with — your standard set beside the bot's tinted one. */
+.color-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.color-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 6px;
+  border: 1.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.color-cell:hover { background: rgba(255, 255, 255, 0.08); }
+
+.color-cell.active {
+  border-color: #5ae3d8;
+  background: rgba(94, 234, 212, 0.12);
+  box-shadow: 0 0 0 1px #5ae3d8;
+}
+
+.color-kings {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.king {
+  width: 30px;
+  height: 30px;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
+}
+
+.king.them {
+  width: 24px;
+  height: 24px;
+  opacity: 0.95;
+}
+
+.color-label {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e2e8f0;
+  letter-spacing: 0.5px;
+}
+
+.color-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: #64748b;
+}
+
+/* Effort segmented control. */
+.effort-seg {
+  display: flex;
   border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 7px;
+  border-radius: 9px;
   overflow: hidden;
 }
 
-.inf-seg button {
+.effort-seg button {
   flex: 1;
-  padding: 6px 4px;
-  font-size: 10.5px;
+  padding: 8px 4px;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: 0.8px;
+  letter-spacing: 1px;
   color: #94a3b8;
   background: transparent;
   border: none;
   cursor: pointer;
 }
 
-.inf-seg button.active {
+.effort-seg button.active {
   color: #07060f;
   background: #5ae3d8;
 }
 
-.inf-slider {
-  flex: 1;
-  accent-color: #5ae3d8;
-}
-
-.inf-value {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  color: #e2e8f0;
-  width: 34px;
-  text-align: right;
-}
-
-.inf-explain {
+.setup-explain {
   margin: 0;
   font-size: 10.5px;
   line-height: 1.5;
   color: #64748b;
 }
 
-.inf-explain b {
+.setup-explain b {
   color: #94a3b8;
   font-weight: 600;
 }
 
-.bot-name {
-  font-weight: 700;
+.start-btn {
+  width: 100%;
+  margin-top: 2px;
+  background: linear-gradient(165deg, #f7c058, #e09b2d);
+  color: #07060f;
+  box-shadow: 0 6px 18px rgba(247, 192, 88, 0.3);
 }
 
-.bot-tag {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.85;
-  letter-spacing: 0.3px;
+.start-btn:hover:not(:disabled) {
+  background: linear-gradient(165deg, #ffd075, #f0a93a);
+  box-shadow: 0 8px 24px rgba(247, 192, 88, 0.5);
 }
 
 .preset-btn {
