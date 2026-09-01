@@ -541,7 +541,13 @@ const canJoin = computed(() => {
   background: rgba(255, 255, 255, 0.06);
 }
 
+/* The neighbouring cells' hairline borders are painted after this one
+   in DOM order, which clipped the selected ring on every cell except
+   the first. Lift the active cell into its own stacking level so the
+   full ring shows on all four. */
 .mt-cell.active {
+  position: relative;
+  z-index: 1;
   background: var(--accent-bg, rgba(94, 234, 212, 0.16));
   box-shadow: inset 0 0 0 1.5px var(--accent, #5ae3d8);
 }

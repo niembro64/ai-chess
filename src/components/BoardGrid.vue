@@ -28,12 +28,16 @@ const props = withDefaults(
     gap?: number;                 // base px between boards
     colLabels?: string[] | null;  // one per board column, drawn beneath
     rowLabels?: string[] | null;  // one per board row, drawn at left
+    labelFontPx?: number;         // label type size in base units
+    labelPadX?: number;           // left gutter width (row labels)
+    labelPadY?: number;           // bottom strip height (col labels)
     ring?: number | null;         // display-order cell index to ring amber
     checker?: boolean;            // checkerboard the boards
   }>(),
   {
     rows: 8, cols: 8, mini: 8, k: 1, cellPx: 5, gap: 1,
     colLabels: null, rowLabels: null, ring: null, checker: false,
+    labelFontPx: 10, labelPadX: 16, labelPadY: 14,
   },
 );
 
@@ -45,8 +49,8 @@ const emit = defineEmits<{
 const canvasEl = ref<HTMLCanvasElement | null>(null);
 
 const boardPx = () => props.mini * props.cellPx;
-const padL = () => (props.rowLabels ? 16 : 0);
-const padB = () => (props.colLabels ? 14 : 0);
+const padL = () => (props.rowLabels ? props.labelPadX : 0);
+const padB = () => (props.colLabels ? props.labelPadY : 0);
 const gridW = () => props.cols * boardPx() + (props.cols - 1) * props.gap;
 const gridH = () => props.rows * boardPx() + (props.rows - 1) * props.gap;
 const baseW = () => padL() + gridW() + (props.rowLabels ? 2 : 0);
@@ -115,14 +119,14 @@ function draw(): void {
   // Headers in the policy head's coordinate style.
   if (props.colLabels || props.rowLabels) {
     ctx.fillStyle = '#94a3b8';
-    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.font = `${props.labelFontPx}px JetBrains Mono, monospace`;
     ctx.textAlign = 'center';
     if (props.colLabels) {
       for (let c = 0; c < props.cols; c++) {
         ctx.fillText(
           props.colLabels[c] ?? '',
           padL() + c * (boardPx() + props.gap) + boardPx() / 2,
-          gridH() + 11,
+          gridH() + props.labelFontPx + 2,
         );
       }
     }
@@ -130,8 +134,8 @@ function draw(): void {
       for (let r = 0; r < props.rows; r++) {
         ctx.fillText(
           props.rowLabels[r] ?? '',
-          padL() / 2 - 1,
-          r * (boardPx() + props.gap) + boardPx() / 2 + 3,
+          padL() / 2,
+          r * (boardPx() + props.gap) + boardPx() / 2 + props.labelFontPx / 3,
         );
       }
     }
@@ -187,6 +191,7 @@ watch(
   () => [
     props.colors, props.rows, props.cols, props.k, props.gap,
     props.colLabels, props.rowLabels, props.ring,
+    props.labelFontPx, props.labelPadX, props.labelPadY,
   ],
   draw,
 );

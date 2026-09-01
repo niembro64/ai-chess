@@ -93,17 +93,22 @@ function chipStyle(row: SearchRow): Record<string, string> {
   return { background: cellColor(row.p, !row.legal) };
 }
 
-// Bar behind each SEARCH row: the raw prior — the same number the row
-// displays and the list sorts by — relative to the position's highest
-// prior, so bar lengths strictly follow the ordering (the first row
-// always has the longest bar). Teal for legal, red for illegal.
+// Bar behind each SEARCH row, matching how the list is ordered: legal
+// rows scale by SEARCH SHARE (so the bot's pick has the longest bar and
+// they shorten down the list), illegal rows by raw prior.
 function rowStyle(row: SearchRow): Record<string, string> {
-  const s = policyStats.value;
-  const pMax = Math.max(s.lMax, s.iMax) || 1;
-  const pct = Math.max(2, (row.p / pMax) * 100);
-  return row.legal
-    ? { background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` }
-    : { background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` };
+  if (row.legal) {
+    const top = props.thought.moves[0]?.share || 1;
+    const pct = Math.max(2, (row.share / top) * 100);
+    return {
+      background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
+    };
+  }
+  const iMax = policyStats.value.iMax || 1;
+  const pct = Math.max(2, (row.p / iMax) * 100);
+  return {
+    background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
+  };
 }
 
 function selectIndex(idx: number): void {
@@ -188,10 +193,15 @@ const ringDisp = computed(() =>
 
 // --- SEARCH rows: the whole policy, colored by legality ----------------
 //
-// Every policy entry — legal and illegal interleaved — ordered by the
-// net's raw predicted probability, same teal / red families as the
-// policy grid. The default selection stays the search's top legal
-// move, wherever it lands in the ordering.
+// Ordered THE WAY THE BOT DECIDES: legal moves by search preference
+// (visit count) so the move it actually plays is always row 1, then
+// every illegal move by raw prior. Sorting the legal moves by prior
+// instead made the played move show up as row 2 or 3 whenever search
+// overruled the network's first instinct — which is most of the point
+// of running a search.
+//
+// For a goal-inverted bot the search prefers the moves the network
+// rates WORST, so row 1 is a low-probability move by design.
 
 function uciOf(netIndex: number): string {
   const from = netToReal(Math.floor(netIndex / 64));
@@ -203,16 +213,18 @@ function uciOf(netIndex: number): string {
 
 const searchRows = computed<SearchRow[]>(() => {
   const { moves, rawPolicy, legalMask } = props.thought;
+  // `moves` already arrives visit-ranked, best first — keep that order.
   const rows: SearchRow[] = moves.map(m => ({
     uci: m.uci, index: m.index, share: m.share, p: rawPolicy[m.index], legal: true,
   }));
+  const illegal: SearchRow[] = [];
   for (let i = 0; i < rawPolicy.length; i++) {
     if (!legalMask[i]) {
-      rows.push({ uci: uciOf(i), index: i, share: 0, p: rawPolicy[i], legal: false });
+      illegal.push({ uci: uciOf(i), index: i, share: 0, p: rawPolicy[i], legal: false });
     }
   }
-  rows.sort((a, b) => b.p - a.p);
-  return rows;
+  illegal.sort((a, b) => b.p - a.p);
+  return rows.concat(illegal);
 });
 
 const illegalCount = computed(() => searchRows.value.length - props.thought.moves.length);
@@ -407,6 +419,9 @@ onBeforeUnmount(() => {
             :gap="2"
             :col-labels="stateColLabels"
             :row-labels="stateRowLabels"
+            :label-font-px="9"
+            :label-pad-x="10"
+            :label-pad-y="13"
           />
         </div>
         <div class="tm-caption">
@@ -475,9 +490,9 @@ onBeforeUnmount(() => {
           game over — no legal moves
         </div>
         <div v-else class="tm-caption">
-          all {{ searchRows.length }} moves by predicted probability —
-          {{ thought.moves.length }} legal, {{ illegalCount }} illegal ·
-          click one to point at its policy cell
+          {{ thought.moves.length }} legal moves in the bot's own order
+          (its pick is first), then {{ illegalCount }} illegal by
+          probability · click one to point at its policy cell
         </div>
       </section>
 
@@ -521,6 +536,9 @@ onBeforeUnmount(() => {
           :gap="2"
           :col-labels="stateColLabels"
           :row-labels="stateRowLabels"
+          :label-font-px="9"
+          :label-pad-x="10"
+          :label-pad-y="13"
         />
         <div class="tm-caption">
           white / black pieces per plane · grey = empty · tap outside to close
@@ -538,6 +556,9 @@ onBeforeUnmount(() => {
           :k="2"
           :col-labels="fileLabels"
           :row-labels="rankLabels"
+          :label-font-px="12"
+          :label-pad-x="18"
+          :label-pad-y="17"
           :ring="ringDisp"
           checker
           @cell-click="onModalGridClick"
@@ -994,7 +1015,7 @@ onBeforeUnmount(() => {
     min-height: 0;
   }
   .tm-section {
-    padding: 3px 4px 4px;
+    padding: 3px 3px 4px;
     gap: 3px;
     min-width: 0;
     min-height: 0;
@@ -1004,8 +1025,10 @@ onBeforeUnmount(() => {
   .tm-section-title {
     display: none;
   }
-  .tm-sec-state { flex: 0 1 25%; }
-  .tm-sec-output { flex: 0 1 46%; }
+  /* GAME STATE needs less width than it was taking; the POLICY HEAD is
+     the detail-dense view, so it gets the slack. */
+  .tm-sec-state { flex: 0 1 21%; }
+  .tm-sec-output { flex: 0 1 50%; }
   .tm-sec-search { flex: 1 1 25%; }
   .tm-subtitle {
     font-size: 8px;

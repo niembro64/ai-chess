@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue';
+import { ref, computed, watch } from 'vue';
 import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
 import { getLegalMovesForSquare } from '@/game/chess/ChessEngine';
@@ -176,9 +176,15 @@ watch(
   },
 );
 
+// flush: 'post' — the callback runs immediately after Vue patches the
+// DOM and before the browser paints, so the invert transform is applied
+// in the same frame the piece appears at its destination. The previous
+// pre-flush + `await nextTick()` version added a microtask hop between
+// the patch and the transform, which could let a frame slip through and
+// show the piece at the destination before it snapped back to animate.
 watch(
   () => props.gameState.lastMove,
-  async (newMove, oldMove) => {
+  (newMove, oldMove) => {
     if (!newMove) return;
     // History navigation swaps whole positions; sliding the "last move"
     // of the viewed ply is confusing when stepping backward. Snap.
@@ -192,7 +198,6 @@ watch(
       oldMove.to.file === newMove.to.file
     ) return;
 
-    await nextTick();
     const board = boardRef.value;
     if (!board) return;
 
@@ -225,6 +230,7 @@ watch(
     };
     piece.addEventListener('transitionend', cleanup);
   },
+  { flush: 'post' },
 );
 </script>
 
