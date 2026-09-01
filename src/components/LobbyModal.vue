@@ -4,9 +4,15 @@ import type { PlayerId } from '@/types/chess';
 import type { LobbyPlayer } from '@/types/network';
 import {
   EFFORT_LEVELS,
+  GRID_ASKED,
+  GRID_MODELS,
   MODELS,
+  botFace,
+  goalLabel,
+  isInverted,
   pieceTint,
   type Effort,
+  type Goal,
   type ModelId,
 } from '@/game/ai/models';
 import BotIcon from './BotIcon.vue';
@@ -42,38 +48,13 @@ const emit = defineEmits<{
 // time — left = its trained goal, right = inverted (the misère search
 // flip, not "pick the worst move"). Toy sits below as its own option.
 
-type BotChoice = {
-  key: string;
-  model: ModelId;
-  goalInverted: boolean;
-  icon: BotIconName;
-  trained: string;
-  asked: string;
-};
-
-const BOT_CHOICES: BotChoice[] = [
-  { key: 'sage-win', model: 'sage', goalInverted: false, icon: 'sage-calm',
-    trained: 'Trained to win', asked: 'Asked to win' },
-  { key: 'sage-lose', model: 'sage', goalInverted: true, icon: 'sage-flustered',
-    trained: 'Trained to win', asked: 'Asked to lose' },
-  { key: 'jester-lose', model: 'jester', goalInverted: false, icon: 'jester-gleeful',
-    trained: 'Trained to lose', asked: 'Asked to lose' },
-  { key: 'jester-win', model: 'jester', goalInverted: true, icon: 'jester-straining',
-    trained: 'Trained to lose', asked: 'Asked to win' },
-];
-
-const TOY_CHOICE: BotChoice = {
-  key: 'toy', model: 'toy', goalInverted: false, icon: 'toy',
-  trained: 'Trained to win', asked: 'Tiny net — watch it think',
-};
-
-const choiceKey = ref('sage-win');
+// Grid selection: which network, and what we ask of it.
+const pickedModel = ref<ModelId>('sage');
+const askedGoal = ref<Goal>('win');
 const playColor = ref<'white' | 'black'>('white');
 const effort = ref<Effort>('medium');
 
-const choice = computed<BotChoice>(
-  () => [...BOT_CHOICES, TOY_CHOICE].find(c => c.key === choiceKey.value) ?? BOT_CHOICES[0],
-);
+const goalInverted = computed(() => isInverted(pickedModel.value, askedGoal.value));
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -83,8 +64,8 @@ function tintStyle(model: ModelId | null, color: 'white' | 'black'): Record<stri
 }
 
 function startBot(): void {
-  emit('playBot', choice.value.model, {
-    goalInverted: choice.value.goalInverted,
+  emit('playBot', pickedModel.value, {
+    goalInverted: goalInverted.value,
     effort: effort.value,
     playColor: playColor.value,
   });
@@ -154,7 +135,7 @@ const canJoin = computed(() => {
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
         <h1 class="title">AI CHESS</h1>
-        <p class="subtitle">Online Multiplayer Chess</p>
+        <p class="subtitle">Can you lose to a bot trying to lose?</p>
 
         <div class="main-actions">
           <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>
@@ -180,30 +161,36 @@ const canJoin = computed(() => {
                actually play gets downloaded. -->
           <div class="setup">
             <div class="setup-title">AI Model</div>
-            <div class="model-grid">
-              <button
-                v-for="c in BOT_CHOICES"
-                :key="c.key"
-                class="model-cell"
-                :class="[`m-${c.model}`, { active: choiceKey === c.key }]"
-                @click="choiceKey = c.key"
-              >
-                <BotIcon class="model-face" :name="c.icon" />
-                <span class="model-name">{{ MODELS[c.model].name }}</span>
-                <span class="model-line">{{ c.trained }}</span>
-                <span class="model-line asked">{{ c.asked }}</span>
-              </button>
+            <div class="model-table">
+              <div class="mt-corner"></div>
+              <div v-for="m in GRID_MODELS" :key="`h-${m}`" class="mt-colhead">
+                TRAINED TO {{ goalLabel(MODELS[m].trainedGoal) }}
+              </div>
+              <template v-for="asked in GRID_ASKED" :key="`r-${asked}`">
+                <div class="mt-rowhead"><span>ASKED TO {{ goalLabel(asked) }}</span></div>
+                <button
+                  v-for="m in GRID_MODELS"
+                  :key="`${m}-${asked}`"
+                  class="mt-cell"
+                  :class="[
+                    `m-${m}`,
+                    { active: pickedModel === m && askedGoal === asked },
+                  ]"
+                  @click="pickedModel = m; askedGoal = asked"
+                >
+                  <BotIcon class="mt-face" :name="botFace(m, asked) as BotIconName" />
+                  <span class="mt-name">{{ MODELS[m].name }}</span>
+                </button>
+              </template>
             </div>
             <button
-              class="model-cell model-toy"
-              :class="{ active: choiceKey === TOY_CHOICE.key }"
-              @click="choiceKey = TOY_CHOICE.key"
+              class="mt-toy"
+              :class="{ active: pickedModel === 'toy' }"
+              @click="pickedModel = 'toy'; askedGoal = 'win'"
             >
-              <BotIcon class="model-face" :name="TOY_CHOICE.icon" />
-              <span class="toy-text">
-                <span class="model-name">{{ MODELS.toy.name }}</span>
-                <span class="model-line asked">{{ TOY_CHOICE.asked }}</span>
-              </span>
+              <BotIcon class="mt-toy-face" name="toy" />
+              <span class="mt-name">{{ MODELS.toy.name }}</span>
+              <span class="mt-toy-sub">tiny net · watch it think</span>
             </button>
 
             <div class="setup-title">You Play</div>
@@ -213,21 +200,15 @@ const canJoin = computed(() => {
                 :key="c"
                 class="color-cell"
                 :class="{ active: playColor === c }"
+                :aria-label="`Play as ${c}`"
                 @click="playColor = c"
               >
-                <span class="color-kings">
-                  <span class="king you" :style="tintStyle(null, c)">
-                    <PieceIcon type="king" />
-                  </span>
-                  <span
-                    class="king them"
-                    :style="tintStyle(choice.model, c === 'white' ? 'black' : 'white')"
-                  >
-                    <PieceIcon type="king" />
-                  </span>
+                <span
+                  class="king"
+                  :style="tintStyle(playColor === c ? null : pickedModel, c)"
+                >
+                  <PieceIcon type="king" />
                 </span>
-                <span class="color-label">{{ c === 'white' ? 'White' : 'Black' }}</span>
-                <span class="color-sub">you vs {{ MODELS[choice.model].name }}</span>
               </button>
             </div>
 
@@ -241,13 +222,13 @@ const canJoin = computed(() => {
               >{{ lvl.label }}</button>
             </div>
             <p class="setup-explain">
-              Effort is how much the model actually thinks: at <b>Low</b> it
-              barely looks ahead and often wanders; at <b>High</b> it runs
-              its full search and always plays its best move.
+              Effort is how much the model actually thinks before moving:
+              at <b>Low</b> it barely looks ahead, at <b>High</b> it runs its
+              full search. It always plays the best move it found.
             </p>
 
             <button class="lobby-btn start-btn" @click="startBot">
-              Play {{ MODELS[choice.model].name }}
+              Play {{ MODELS[pickedModel].name }}
             </button>
           </div>
         </div>
@@ -485,91 +466,141 @@ const canJoin = computed(() => {
   margin-top: 2px;
 }
 
-/* Model grid: rows are networks (what they were TRAINED to do),
-   columns are what we ASK them to do — left natural, right inverted. */
-.model-grid {
+/* Model table — one connected button group, not four loose buttons.
+   COLUMNS are the networks (by what they were trained to do); ROWS are
+   what we ask of them, labelled with 90deg text down the left gutter. */
+.model-table {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: 18px 1fr 1fr;
+  grid-template-rows: auto 1fr 1fr;
+  border: 1.5px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
 }
 
-.model-cell {
+.mt-colhead {
+  padding: 6px 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: #94a3b8;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mt-corner {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mt-rowhead {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Bottom-to-top so the label reads upward alongside its row. */
+.mt-rowhead span {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.mt-cell {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 10px 6px 8px;
-  border: 1.5px solid rgba(255, 255, 255, 0.12);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
+  padding: 9px 4px 8px;
+  border: none;
+  /* Hairlines between cells keep the group reading as one control. */
+  border-left: 1px solid rgba(255, 255, 255, 0.09);
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  background: transparent;
   color: #e2e8f0;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+  transition: background 0.15s;
 }
 
-.model-cell:hover {
-  background: rgba(255, 255, 255, 0.08);
-  transform: translateY(-1px);
+.mt-cell:first-of-type,
+.mt-rowhead + .mt-cell {
+  border-left: none;
 }
 
-.model-cell.active {
-  border-color: var(--accent, #5ae3d8);
-  background: var(--accent-bg, rgba(94, 234, 212, 0.14));
-  box-shadow: 0 0 0 1px var(--accent, #5ae3d8), 0 6px 18px var(--accent-bg, rgba(94, 234, 212, 0.2));
+.mt-cell:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
-/* Identity colors — same green / purple / teal the pieces use. */
-.model-cell.m-sage { --accent: #4ade80; --accent-bg: rgba(74, 222, 128, 0.16); }
-.model-cell.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
-.model-toy { --accent: #2dd4bf; --accent-bg: rgba(45, 212, 191, 0.16); }
-
-.model-face {
-  width: 46px;
-  height: 46px;
-  flex-shrink: 0;
+.mt-cell.active {
+  background: var(--accent-bg, rgba(94, 234, 212, 0.16));
+  box-shadow: inset 0 0 0 1.5px var(--accent, #5ae3d8);
 }
 
-.model-name {
+.mt-cell.m-sage { --accent: #4ade80; --accent-bg: rgba(74, 222, 128, 0.16); }
+.mt-cell.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
+
+.mt-face {
+  width: 42px;
+  height: 42px;
+}
+
+.mt-name {
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 12px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 1px;
   text-transform: uppercase;
-  color: var(--accent, #e2e8f0);
-}
-
-.model-line {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9.5px;
-  line-height: 1.35;
-  color: #94a3b8;
-  text-align: center;
-}
-
-.model-line.asked {
   color: #cbd5e1;
-  font-weight: 600;
 }
 
-/* Toy is its own option below the 2x2 — a different kind of thing
-   (tiny teaching net), so it gets a wide row instead of a grid cell. */
-.model-toy {
-  flex-direction: row;
-  justify-content: center;
-  gap: 10px;
-  padding: 8px 10px;
+.mt-cell.active .mt-name {
+  color: var(--accent);
 }
 
-.model-toy .model-face {
-  width: 32px;
-  height: 32px;
-}
-
-.toy-text {
+/* Toy is a different kind of thing (tiny teaching net), so it sits
+   outside the grid as its own wide button. */
+.mt-toy {
+  --accent: #2dd4bf;
+  --accent-bg: rgba(45, 212, 191, 0.16);
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 1.5px solid rgba(255, 255, 255, 0.14);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.mt-toy:hover { background: rgba(255, 255, 255, 0.07); }
+
+.mt-toy.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.mt-toy.active .mt-name { color: var(--accent); }
+
+.mt-toy-face {
+  width: 26px;
+  height: 26px;
+}
+
+.mt-toy-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: #64748b;
 }
 
 /* You-play picker: each option previews the REAL piece colors the game
@@ -585,7 +616,7 @@ const canJoin = computed(() => {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 8px 6px;
+  padding: 10px 6px;
   border: 1.5px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
@@ -601,36 +632,13 @@ const canJoin = computed(() => {
   box-shadow: 0 0 0 1px #5ae3d8;
 }
 
-.color-kings {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-}
-
+/* White king always on the left, black on the right. Your side shows
+   the standard set; the other king wears the chosen model's tint —
+   exactly the two colors the game will start with. */
 .king {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
-}
-
-.king.them {
-  width: 24px;
-  height: 24px;
-  opacity: 0.95;
-}
-
-.color-label {
-  font-family: 'Inter', system-ui, sans-serif;
-  font-size: 12px;
-  font-weight: 700;
-  color: #e2e8f0;
-  letter-spacing: 0.5px;
-}
-
-.color-sub {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  color: #64748b;
 }
 
 /* Effort segmented control. */

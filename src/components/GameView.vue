@@ -12,7 +12,6 @@ import { RemoteGameConnection } from '@/game/server/RemoteGameConnection';
 import { AIPlayer } from '@/game/ai/AIPlayer';
 import { ToyPlayer, type ToyThought } from '@/game/ai/ToyPlayer';
 import {
-  EFFORT_LEVELS,
   MODELS,
   effortSims,
   fetchModelJson,
@@ -142,6 +141,7 @@ onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange);
 });
 onUnmounted(() => {
+  stopProgress();
   window.removeEventListener('keydown', handleHistoryKeys);
   document.removeEventListener('visibilitychange', handleVisibilityChange);
   releaseWakeLock();
@@ -157,6 +157,41 @@ let activeConnection: GameConnection | null = null;
 let aiPlayer: AIPlayer | ToyPlayer | null = null;
 const playingVsBot = ref(false);
 const aiThinking = ref(false);
+
+// --- Search progress bar -------------------------------------------
+//
+// The raw fraction arrives in chunks (one tick per yield batch), which
+// looks like a stuttering staircase. `smoothProgress` chases the target
+// with a frame-rate-independent EMA so the bar always glides. No time
+// estimate is shown — only the bar itself.
+const progressTarget = ref(0);
+const smoothProgress = ref(0);
+const PROGRESS_TAU = 0.28; // seconds — higher = lazier, smoother bar
+let progressRaf = 0;
+let progressLast = 0;
+
+function stepProgress(now: number): void {
+  const dt = Math.min(0.1, (now - progressLast) / 1000);
+  progressLast = now;
+  const alpha = 1 - Math.exp(-dt / PROGRESS_TAU);
+  smoothProgress.value += (progressTarget.value - smoothProgress.value) * alpha;
+  progressRaf = requestAnimationFrame(stepProgress);
+}
+
+function startProgress(): void {
+  progressTarget.value = 0;
+  smoothProgress.value = 0;
+  if (progressRaf) return;
+  progressLast = performance.now();
+  progressRaf = requestAnimationFrame(stepProgress);
+}
+
+function stopProgress(): void {
+  cancelAnimationFrame(progressRaf);
+  progressRaf = 0;
+  progressTarget.value = 0;
+  smoothProgress.value = 0;
+}
 const botModelId = ref<ModelId | null>(null);
 // Toy's latest thought record, rendered by the Toy Mind panel.
 const toyThought = ref<ToyThought | null>(null);
@@ -288,14 +323,17 @@ function scheduleBotMove(): void {
   if (gameState.value.currentTurn === localColor.value) return; // Human's turn
 
   aiThinking.value = true;
+  startProgress();
   // Let the UI update before the bot starts computing.
   setTimeout(async () => {
     if (!aiPlayer || !currentServer || isGameOver.value) {
       aiThinking.value = false;
+      stopProgress();
       return;
     }
     const move = await aiPlayer.getMove(gameState.value);
     aiThinking.value = false;
+    stopProgress();
     if (!currentServer || isGameOver.value) return;
     // The bot is whichever seat the human isn't in (Toy plays white).
     const botPlayerId: PlayerId = localPlayerId.value === 1 ? 2 : 1;
@@ -365,15 +403,17 @@ async function handlePlayBot(
   }
 
   try {
-    // Effort sets BOTH search depth and move-selection temperature —
-    // see EFFORT_LEVELS. Search is where most playing strength lives.
+    // Effort sets the search budget — see EFFORT_LEVELS. Search is
+    // where most of the playing strength lives.
     const sims = effortSims(model, opts.effort);
-    const temperature = EFFORT_LEVELS[opts.effort].temperature;
     if (model === 'toy') {
       aiPlayer = ToyPlayer.create(
         weights, sims,
         t => { toyThought.value = t; },
-        { goalInverted: opts.goalInverted, temperature },
+        {
+          goalInverted: opts.goalInverted,
+          onProgress: (done, total) => { progressTarget.value = done / total; },
+        },
       );
     } else {
       aiPlayer = AIPlayer.create(
@@ -383,7 +423,7 @@ async function handlePlayBot(
         {
           trainedGoal: MODELS[model].trainedGoal,
           goalInverted: opts.goalInverted,
-          temperature,
+          onProgress: (done, total) => { progressTarget.value = done / total; },
         },
       );
     }
@@ -625,6 +665,9 @@ onUnmounted(() => {
               class="thinking-dots"
               aria-label="AI is thinking"
             ><span></span><span></span><span></span></span>
+          </div>
+          <div v-if="aiThinking" class="think-track" aria-hidden="true">
+            <div class="think-fill" :style="{ width: `${smoothProgress * 100}%` }"></div>
             <span v-if="turnIndicator" class="turn-indicator">
               {{ turnIndicator }}
             </span>
@@ -1252,6 +1295,23 @@ onUnmounted(() => {
 /* Three small teal dots that wave in sequence — the canonical "AI is
    thinking" affordance. Used on the opponent chip during their turn,
    distinct from the local chip's turn-dot which says "your move." */
+/* Search-progress bar: the bar alone, no time estimate. Width is fed
+   by an EMA (see smoothProgress) so it glides instead of stepping. */
+.think-track {
+  height: 3px;
+  width: min(320px, 60%);
+  margin: 4px auto 0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+
+.think-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #5ae3d8, #f7c058);
+}
+
 .thinking-dots {
   display: inline-flex;
   align-items: flex-end;

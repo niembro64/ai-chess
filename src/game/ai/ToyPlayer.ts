@@ -39,10 +39,11 @@ export type ToyThought = {
 };
 
 export type ToyPlayerOptions = {
-  // GOAL INVERTED inference mode + move temperature — same semantics
-  // as AIPlayerOptions (Toy's trained goal is always 'win').
+  // GOAL INVERTED inference mode — same semantics as AIPlayerOptions
+  // (Toy's trained goal is always 'win').
   goalInverted?: boolean;
-  temperature?: number;
+  // Search-progress callback for the in-game thinking bar.
+  onProgress?: (completed: number, total: number) => void;
 };
 
 export class ToyPlayer {
@@ -50,7 +51,7 @@ export class ToyPlayer {
   private sims: number;
   private onThought: ((t: ToyThought) => void) | null;
   private goalInverted: boolean;
-  private temperature: number;
+  private onProgress: ((completed: number, total: number) => void) | null;
 
   private constructor(
     net: ToyNet,
@@ -62,7 +63,7 @@ export class ToyPlayer {
     this.sims = sims;
     this.onThought = onThought;
     this.goalInverted = options.goalInverted ?? false;
-    this.temperature = options.temperature ?? 0;
+    this.onProgress = options.onProgress ?? null;
   }
 
   static create(
@@ -117,7 +118,7 @@ export class ToyPlayer {
       encode: encodeToyBoard,
       invertForTurn: this.goalInverted ? state.currentTurn : undefined,
       flattenRootPriors: this.goalInverted,
-      moveTemperature: this.temperature,
+      onProgress: (done, total) => this.onProgress?.(done, total),
     });
 
     const counts = buildPositionCounts(state);

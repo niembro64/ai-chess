@@ -97,10 +97,8 @@ export type AIPlayerOptions = {
   // away from the new goal and would starve the search of the moves it
   // now needs. The value net stays a truthful evaluator throughout.
   goalInverted?: boolean;
-  // Move-selection temperature over the search's visit counts:
-  // 0 = always the top choice, 1 = proportional sampling, higher =
-  // flatter (more variety, more mistakes). See MCTSOptions.
-  temperature?: number;
+  // Search-progress callback for the in-game thinking bar.
+  onProgress?: (completed: number, total: number) => void;
 };
 
 export class AIPlayer {
@@ -111,7 +109,7 @@ export class AIPlayer {
   // the inference mode) is to lose — drives the misère search flip.
   private seeksLoss: boolean;
   private flattenRootPriors: boolean;
-  private temperature: number;
+  private onProgress: ((completed: number, total: number) => void) | null;
 
   private constructor(
     net: ChessNet,
@@ -126,7 +124,7 @@ export class AIPlayer {
     const inverted = options.goalInverted ?? false;
     this.seeksLoss = trainedToLose !== inverted;
     this.flattenRootPriors = inverted;
-    this.temperature = options.temperature ?? 0;
+    this.onProgress = options.onProgress ?? null;
   }
 
   static create(
@@ -175,11 +173,11 @@ export class AIPlayer {
     const result = await runMCTSAsync(state, this.net, this.sims, {
       invertForTurn: this.seeksLoss ? state.currentTurn : undefined,
       flattenRootPriors: this.flattenRootPriors,
-      moveTemperature: this.temperature,
+      onProgress: (done, total) => this.onProgress?.(done, total),
     });
     const counts = buildPositionCounts(state);
     // House rule: bots never repeat a prior board state (see
-    // pickFreshMove) — regardless of goal direction or temperature.
+    // pickFreshMove) — regardless of goal direction or effort.
     const vetoed = pickFreshMove(state, result.rankedMoves, counts);
     const move = vetoed ?? result.move;
 
