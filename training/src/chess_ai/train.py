@@ -209,6 +209,16 @@ class TrainConfig:
     # Periodically copy `latest.pt` off to `archive/gen-<N>.pt` so we have a
     # trail of snapshots for compare_checkpoints + plateau detection. 0
     # disables archival entirely.
+    # --- Jester (misère) mode ---------------------------------------
+    # Train the model to LOSE: MCTS selection inverts at the agent's
+    # plies (truthful value labels throughout — see mcts.MCTSSearch).
+    # Self-play mixes agent-vs-frozen-winner games with agent-vs-agent
+    # mirror games (jester_selfplay_prob). Eval gating plays the
+    # challenger vs the frozen winner and counts games the challenger
+    # LOSES as eval wins. Requires num_workers=0 (Python MCTS path).
+    jester_mode: bool = False
+    jester_selfplay_prob: float = 0.25
+    jester_opponent_checkpoint: str = ""
     archive_every_gens: int = 0
     # Cap on retained archives (oldest are deleted as new ones are written).
     # 0 = unlimited.
@@ -440,6 +450,30 @@ class Trainer:
                 "path encodes boards in Rust with the 20-plane layout)"
             )
 
+        # Jester mode: load the frozen winner net (game opponent AND the
+        # opponent-ply evaluator inside the agent's search trees).
+        self._frozen_opponent = None
+        if self.config.jester_mode:
+            if self.config.num_workers > 0:
+                raise ValueError(
+                    "jester_mode requires num_workers=0 (selection inversion "
+                    "and dual-net routing run on the Python MCTS path only)"
+                )
+            if not self.config.jester_opponent_checkpoint:
+                raise ValueError(
+                    "jester_mode requires jester_opponent_checkpoint "
+                    "(frozen winner weights, e.g. the Sage champion .pt)"
+                )
+            opp_ckpt = torch.load(
+                self.config.jester_opponent_checkpoint,
+                map_location="cpu",
+                weights_only=False,
+            )
+            opp = _build_model_from_arch(opp_ckpt.get("model_arch") or {})
+            opp.load_state_dict(opp_ckpt["model_state_dict"])
+            opp.to(device).eval()
+            self._frozen_opponent = opp
+
         # Apply MCTS hyperparam overrides before self-play starts.
         from .mcts import set_mcts_params
         set_mcts_params(
@@ -538,6 +572,13 @@ class Trainer:
                     resign_disabled_prob=self.config.resign_disabled_prob,
                     resign_min_plies=self.config.resign_min_plies,
                     board_encoder=self._board_encoder,
+                    invert_agent_selection=self.config.jester_mode,
+                    frozen_evaluator=(
+                        self._make_model_evaluator(self._frozen_opponent)
+                        if self._frozen_opponent is not None
+                        else None
+                    ),
+                    agent_selfplay_prob=self.config.jester_selfplay_prob,
                 ),
                 rng=self.rng,
             )
@@ -1208,17 +1249,33 @@ class Trainer:
                 return "draw"
             if _is_insufficient_material(state.board):
                 return "draw"
-            if state.currentTurn == "white":
-                ev = challenger_eval if challenger_plays_white else champion_eval
+            if jester:
+                # Misère match: every search runs dual-net + inverted at
+                # the challenger's color — the opponent's tree models the
+                # challenger truthfully (as a net trying to lose) via the
+                # same per-turn spec.
+                ch_color = "white" if challenger_plays_white else "black"
+                result = run_batched_mcts(
+                    [state], challenger_eval, mcts_sims, self.rng,
+                    temperatures=[0.0], dirichlet_epsilon=0.0,
+                    board_encoder=self._board_encoder,
+                    position_counts=[position_history],
+                    invert_turns=[ch_color],
+                    opponent_evaluator=champion_eval,
+                    agent_colors=[ch_color],
+                )
             else:
-                ev = champion_eval if challenger_plays_white else challenger_eval
-            # Greedy play: τ=0 (argmax visits), no exploration noise.
-            result = run_batched_mcts(
-                [state], ev, mcts_sims, self.rng,
-                temperatures=[0.0], dirichlet_epsilon=0.0,
-                board_encoder=self._board_encoder,
-                position_counts=[position_history],
-            )
+                if state.currentTurn == "white":
+                    ev = challenger_eval if challenger_plays_white else champion_eval
+                else:
+                    ev = champion_eval if challenger_plays_white else challenger_eval
+                # Greedy play: τ=0 (argmax visits), no exploration noise.
+                result = run_batched_mcts(
+                    [state], ev, mcts_sims, self.rng,
+                    temperatures=[0.0], dirichlet_epsilon=0.0,
+                    board_encoder=self._board_encoder,
+                    position_counts=[position_history],
+                )
             state = apply_move(state, result[0].move)
             moves_played += 1
 
@@ -1227,6 +1284,10 @@ class Trainer:
             winner_color = "white" if loser == "black" else "black"
             winner_is_white = winner_color == "white"
             winner_is_challenger = winner_is_white == challenger_plays_white
+            if jester:
+                # Misère objective: the challenger "wins" the eval by
+                # getting checkmated; accidentally winning is a loss.
+                return "champion" if winner_is_challenger else "challenger"
             return "challenger" if winner_is_challenger else "champion"
         return "draw"
 
@@ -1296,6 +1357,15 @@ class Trainer:
         try:
             challenger_eval = self._make_model_evaluator(self.model)
             champion_eval = self._make_model_evaluator(self._champion_model)
+            if self.config.jester_mode:
+                # Jester gating: the match opponent is the FROZEN winner
+                # net, and _play_eval_game reports "challenger" when the
+                # challenger achieved its objective — LOSING. All the
+                # score/threshold/promotion machinery reads unchanged
+                # under that inverted meaning; the curated position suite
+                # does the discriminating (throwing a mate-in-1-up
+                # position against a strong winner takes real skill).
+                champion_eval = self._make_model_evaluator(self._frozen_opponent)
 
             # Pull the curated position set. Built once per trainer and
             # cached; building plays a few moves per opening through our
@@ -1362,6 +1432,7 @@ class Trainer:
                     self.config.eval_mcts_sims,
                     self.config.eval_move_cap,
                     starting_state=position.state,
+                    jester=self.config.jester_mode,
                 )
                 bucket = per_diff.setdefault(
                     position.difficulty, {"w": 0, "d": 0, "l": 0}

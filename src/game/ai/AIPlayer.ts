@@ -105,28 +105,49 @@ function detectConfigFromWeights(weights: SerializedWeights): NetConfig {
   return { numResBlocks, numFilters, kernelSize, valueHeadSize, seReduction, learningRate: 0.01 };
 }
 
+export type AIPlayerOptions = {
+  // Misère ("Jester") mode: the bot plays to LOSE. Search selection
+  // inverts at its own plies (see MCTSOptions.invertForTurn) and the
+  // repetition veto flips (a draw SPOILS a loss in progress). The value
+  // net stays a truthful "who is winning" estimator throughout.
+  jester?: boolean;
+  // See MCTSOptions.flattenRootPriors — needed while Jester runs on
+  // winner weights.
+  flattenRootPriors?: boolean;
+};
+
 export class AIPlayer {
   private net: ChessNet;
   private sims: number;
   private onThought: ((t: ToyThought) => void) | null;
+  private jester: boolean;
+  private flattenRootPriors: boolean;
 
-  private constructor(net: ChessNet, sims: number, onThought: ((t: ToyThought) => void) | null) {
+  private constructor(
+    net: ChessNet,
+    sims: number,
+    onThought: ((t: ToyThought) => void) | null,
+    options: AIPlayerOptions,
+  ) {
     this.net = net;
     this.sims = sims;
     this.onThought = onThought;
+    this.jester = options.jester ?? false;
+    this.flattenRootPriors = options.flattenRootPriors ?? false;
   }
 
   static create(
     weights: SerializedWeights,
     sims: number = 50,
     onThought?: (t: ToyThought) => void,
+    options: AIPlayerOptions = {},
   ): AIPlayer {
     const config: NetConfig = weights.config
       ? { ...weights.config, learningRate: 0.01 }
       : detectConfigFromWeights(weights);
     const net = ChessNet.create(config);
     net.importWeights(weights);
-    return new AIPlayer(net, sims, onThought ?? null);
+    return new AIPlayer(net, sims, onThought ?? null, options);
   }
 
   // Terminal observation, same contract as ToyPlayer.observeTerminal:
@@ -158,10 +179,18 @@ export class AIPlayer {
   // After the search, the repetition veto may bump the choice down the
   // visit ranking (see pickNonRepeatingMove).
   async getMove(state: ChessGameState): Promise<Move> {
-    const result = await runMCTSAsync(state, this.net, this.sims);
+    const result = await runMCTSAsync(state, this.net, this.sims, {
+      invertForTurn: this.jester ? state.currentTurn : undefined,
+      flattenRootPriors: this.flattenRootPriors,
+    });
     const counts = buildPositionCounts(state);
+    // Jester flips the repetition veto by negating the root value:
+    // when it is successfully losing (very negative truthful value) a
+    // repetition draw would SPOIL the loss — avoid it strictly; when it
+    // is accidentally winning, a draw is an improvement — allow it.
+    const vetoValue = this.jester ? -result.rootValue : result.rootValue;
     const vetoed = pickNonRepeatingMove(
-      state, result.rankedMoves, counts, result.rootValue,
+      state, result.rankedMoves, counts, vetoValue,
     );
     const move = vetoed ?? result.move;
 

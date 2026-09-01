@@ -32,6 +32,17 @@ export type MCTSOptions = {
   sampleProportional?: boolean;
   // Board encoder matching the net (defaults to Sage's 20-plane).
   encode?: BoardEncoder;
+  // Misère ("Jester") selection: at nodes whose side-to-move matches
+  // this, PUCT MAXIMIZES the child's Q instead of negating it — the
+  // mover is trying to LOSE. Value semantics stay truthful everywhere
+  // (backprop, terminals); only what the search WANTS flips. Mirrors
+  // training/src/chess_ai/mcts.py invert_turns.
+  invertForTurn?: 'white' | 'black' | 'both';
+  // Replace root priors with uniform after expansion. Needed when a
+  // WINNER's policy net drives an inverted search (instant-Jester on
+  // Sage weights): the priors point at good moves, so the worst moves
+  // would never accumulate PUCT exploration without this.
+  flattenRootPriors?: boolean;
 };
 
 class MCTSNode {
@@ -69,10 +80,16 @@ export class MCTSSearch {
   private root: MCTSNode;
   private pendingLeaf: MCTSNode | null = null;
   private encode: BoardEncoder;
+  private invertForTurn: 'white' | 'black' | 'both' | undefined;
 
-  constructor(state: ChessGameState, encode: BoardEncoder = encodeBoard) {
+  constructor(
+    state: ChessGameState,
+    encode: BoardEncoder = encodeBoard,
+    invertForTurn?: 'white' | 'black' | 'both',
+  ) {
     this.root = new MCTSNode(state);
     this.encode = encode;
+    this.invertForTurn = invertForTurn;
     this.checkTerminal(this.root);
   }
 
@@ -85,8 +102,12 @@ export class MCTSSearch {
   }
 
   // Initialize root with NN evaluation (+ optional Dirichlet noise)
-  initRoot(policy: Float32Array, value: number, addNoise = false): void {
+  initRoot(policy: Float32Array, value: number, addNoise = false, flattenPriors = false): void {
     this.expandWithPolicy(this.root, policy);
+    if (flattenPriors) {
+      const n = this.root.children.size;
+      for (const child of this.root.children.values()) child.prior = 1 / n;
+    }
     if (addNoise) addDirichletNoise(this.root);
     backpropagate(this.root, value);
   }
@@ -95,7 +116,7 @@ export class MCTSSearch {
   selectLeaf(): Float32Array | null {
     let node = this.root;
     while (node.isExpanded && !node.isTerminal) {
-      node = selectChild(node, node === this.root);
+      node = selectChild(node, node === this.root, this.invertForTurn);
     }
 
     if (node.isTerminal) {
@@ -204,7 +225,9 @@ export function runBatchedMCTS(
 ): MCTSResult[] {
   const addNoise = options.addRootNoise ?? false;
   const sampleProportional = options.sampleProportional ?? false;
-  const searches = states.map(s => new MCTSSearch(s, options.encode ?? encodeBoard));
+  const searches = states.map(
+    s => new MCTSSearch(s, options.encode ?? encodeBoard, options.invertForTurn),
+  );
 
   // Filter to non-terminal games
   const active = searches.filter(s => !s.isTerminal());
@@ -216,7 +239,10 @@ export function runBatchedMCTS(
   const rootBoards = active.map(s => s.getRootBoard());
   const rootResults = net.predictBatch(rootBoards);
   for (let i = 0; i < active.length; i++) {
-    active[i].initRoot(rootResults[i].policy, rootResults[i].value, addNoise);
+    active[i].initRoot(
+      rootResults[i].policy, rootResults[i].value, addNoise,
+      options.flattenRootPriors ?? false,
+    );
   }
 
   // Run simulation steps with batched leaf evaluation
@@ -261,13 +287,16 @@ export async function runMCTSAsync(
   options: MCTSOptions = {},
   yieldEverySims = 16,
 ): Promise<MCTSResult> {
-  const search = new MCTSSearch(state, options.encode ?? encodeBoard);
+  const search = new MCTSSearch(state, options.encode ?? encodeBoard, options.invertForTurn);
   if (search.isTerminal()) {
     return search.getResult(options.sampleProportional ?? false);
   }
 
   const [rootEval] = net.predictBatch([search.getRootBoard()]);
-  search.initRoot(rootEval.policy, rootEval.value, options.addRootNoise ?? false);
+  search.initRoot(
+    rootEval.policy, rootEval.value, options.addRootNoise ?? false,
+    options.flattenRootPriors ?? false,
+  );
 
   for (let sim = 0; sim < numSimulations; sim++) {
     const board = search.selectLeaf();
@@ -285,10 +314,19 @@ export async function runMCTSAsync(
 
 // --- Shared helpers ---
 
-function selectChild(node: MCTSNode, isRoot: boolean): MCTSNode {
+function selectChild(
+  node: MCTSNode,
+  isRoot: boolean,
+  invertForTurn?: 'white' | 'black' | 'both',
+): MCTSNode {
   let bestScore = -Infinity;
   let bestChild: MCTSNode | null = null;
   const sqrtParent = Math.sqrt(node.visitCount);
+  // Misère inversion (see MCTSOptions.invertForTurn): at an inverted
+  // node the mover WANTS to lose, so a child's Q is read as-is (the
+  // child's own perspective IS the opponent's winning chances).
+  const inverted = invertForTurn !== undefined
+    && (invertForTurn === 'both' || node.state.currentTurn === invertForTurn);
   // node.totalValue accumulates values from node's own side-to-move
   // perspective, so a child's Q seen from the selecting node is NEGATED.
   // Without the negation the search prefers moves that are good for the
@@ -298,12 +336,15 @@ function selectChild(node: MCTSNode, isRoot: boolean): MCTSNode {
   // FPU at non-root nodes only: the training search pairs root FPU with
   // Dirichlet root noise, but we play noiseless — root FPU without noise
   // lets the first-visited child starve its unvisited siblings forever
-  // (KataGo makes the same root exception).
-  const unvisitedQ = isRoot ? parentQ : parentQ - FPU_REDUCTION;
+  // (KataGo makes the same root exception). Under inversion a child's
+  // expected Q is ~ -parentQ, so the FPU baseline negates too.
+  const baseQ = inverted ? -parentQ : parentQ;
+  const unvisitedQ = isRoot ? baseQ : baseQ - FPU_REDUCTION;
+  const sign = inverted ? 1 : -1;
 
   for (const child of node.children.values()) {
     const q = child.visitCount > 0
-      ? -child.totalValue / child.visitCount
+      ? sign * child.totalValue / child.visitCount
       : unvisitedQ;
     const u = C_PUCT * child.prior * sqrtParent / (1 + child.visitCount);
     const score = q + u;

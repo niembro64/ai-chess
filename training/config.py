@@ -371,6 +371,10 @@ def build_config() -> TrainConfig:
 # same architecture Sage used pre-Rust. Fine at Toy's size.
 
 CHECKPOINT_DIR_TOY = ROOT / "runs_toy" / "latest"
+CHECKPOINT_DIR_JESTER = ROOT / "runs_jester" / "latest"
+# Frozen winner the jester trains against (and models in-tree): the
+# Sage champion checkpoint on this box.
+JESTER_OPPONENT_CKPT = ROOT / "runs" / "latest" / "champion.pt"
 
 
 def build_toy_config() -> TrainConfig:
@@ -401,6 +405,50 @@ def build_toy_config() -> TrainConfig:
     # Paired with in-tree repetition awareness (mcts.py) to break the
     # 90%-threefold collapse.
     cfg.endgame_start_prob = 0.35
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Jester — the misère bot: full Sage architecture, inverted incentives.
+# ---------------------------------------------------------------------------
+#
+# Trains to LOSE. Search selection inverts at the jester's plies while
+# every value label stays truthful (chess_ai/mcts.py MCTSSearch). Games
+# mix jester-vs-frozen-Sage (dense loss signal) with jester-vs-jester
+# mirror games (losses must be FORCED against an opponent who refuses
+# to win). Runs on the Python MCTS path (inversion/dual-net are not in
+# the Rust search yet), single-process like Toy.
+
+def build_jester_config() -> TrainConfig:
+    cfg = build_config()
+    cfg.num_workers = 0
+    cfg.num_concurrent_games = 64
+    cfg.mcts_simulations = 96
+    cfg.batch_size = 256
+    cfg.min_examples_between_grad_steps = 64
+    cfg.replay_buffer_capacity = 80_000
+    cfg.min_buffer_for_training = 2_000
+    cfg.learning_rate = 1e-3
+    cfg.lr_schedule = (
+        (0,       1e-3),
+        (15_000,  3e-4),
+        (35_000,  1e-4),
+        (60_000,  3e-5),
+    )
+    cfg.target_gens = 40_000
+    cfg.eval_every_gens = 2_000
+    cfg.eval_mcts_sims = 96
+    # Jester-vs-Sage games end quickly once losing works; a long cap
+    # just pads the rare stubborn draw.
+    cfg.eval_move_cap = 300
+    cfg.archive_every_gens = 1_000
+    # Resignation is meaningless in misère play: the jester's truthful
+    # best-Q is *supposed* to be terrible, so the trigger would fire on
+    # every healthy position. Disabled outright.
+    cfg.resign_threshold = -2.0
+    cfg.jester_mode = True
+    cfg.jester_selfplay_prob = 0.25
+    cfg.jester_opponent_checkpoint = str(JESTER_OPPONENT_CKPT)
     return cfg
 
 

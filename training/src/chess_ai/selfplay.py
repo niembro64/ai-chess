@@ -28,7 +28,7 @@ from .engine import (
     get_legal_moves,
     is_in_check,
 )
-from .mcts import run_batched_mcts
+from .mcts import BatchedEvaluator, run_batched_mcts
 from .model import NUM_PLANES, ChessNet, encoded_to_nchw
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
 
@@ -94,6 +94,10 @@ class GameSlot:
     # Set when the side-to-move resigns (MCTS best-child Q <= threshold).
     # The named color loses; opponent gets the win. None = no resign.
     resigned_color: str | None = None
+    # Jester mode: which color the LEARNING agent plays in this game.
+    # None = both sides are the agent (normal self-play always; in
+    # jester mode a None slot is a mirror jester-vs-jester game).
+    agent_color: str | None = None
     # First color that hit the resign threshold while sampled into the
     # truth-check holdout (resign_disabled_prob). The game plays on;
     # _finish_game compares the predicted loss against the actual
@@ -564,6 +568,20 @@ class SelfPlayConfig:
     # passes chess_ai.toy.encode_toy — any non-default encoder forces
     # the Python MCTS path, whose boards are encoded per this callable.
     board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None
+    # --- Jester (misère) mode -------------------------------------------
+    # The agent learns to LOSE. Value labels stay truthful; only MCTS
+    # selection inverts at agent plies (see mcts.MCTSSearch). Games mix
+    # agent-vs-frozen-opponent (dense loss signal — the opponent
+    # punishes every offer) with agent-vs-agent mirror games where BOTH
+    # sides invert — there a loss must be FORCED against an opponent who
+    # refuses to win, which is the strongest form of losing well.
+    invert_agent_selection: bool = False
+    # Frozen winner net (e.g. the Sage champion) — evaluates its own
+    # plies both as game opponent and inside the agent's search tree
+    # (dual-net routing). Required for non-mirror jester games.
+    frozen_evaluator: "BatchedEvaluator | None" = None
+    # Share of fresh slots that are agent-vs-agent mirror games.
+    agent_selfplay_prob: float = 0.25
     # Per-sample policy-loss weight applied to training examples from
     # TB-adjudicated games. In those games MCTS never found a forcing
     # line — Syzygy rescued the value label, but the move distribution
@@ -607,8 +625,7 @@ class SelfPlayEngine:
         self.rng = rng or random.Random()
 
         self.games: list[GameSlot] = [
-            _make_game_slot(self.rng, self.config.random_start_prob, self.config.endgame_start_prob)
-            for _ in range(self.config.num_concurrent_games)
+            self._new_slot() for _ in range(self.config.num_concurrent_games)
         ]
         self.games_completed = 0
         self.white_wins = 0
@@ -634,6 +651,15 @@ class SelfPlayEngine:
         self.resign_truth_finished: int = 0
         self.resign_truth_fps: int = 0
 
+    def _new_slot(self) -> GameSlot:
+        slot = _make_game_slot(
+            self.rng, self.config.random_start_prob, self.config.endgame_start_prob
+        )
+        if self.config.invert_agent_selection and self.config.frozen_evaluator is not None:
+            if self.rng.random() >= self.config.agent_selfplay_prob:
+                slot.agent_color = "white" if self.rng.random() < 0.5 else "black"
+        return slot
+
     def step(self) -> list[GameResult]:
         """Advance every active game by one move. Returns results for games that ended this step."""
         states = [g.state for g in self.games]
@@ -641,6 +667,21 @@ class SelfPlayEngine:
             1.0 if g.move_count < self.config.temperature_threshold_plies else 0.0
             for g in self.games
         ]
+        jester = self.config.invert_agent_selection
+        invert_turns = None
+        agent_colors = None
+        opponent_evaluator = None
+        if jester:
+            # Mirror games invert both plies; agent-vs-frozen games invert
+            # only the agent's color — in EVERY search of that game, so the
+            # frozen side's tree also models the agent truthfully (as a
+            # net trying to lose) via the same spec.
+            invert_turns = [
+                "both" if g.agent_color is None else g.agent_color for g in self.games
+            ]
+            if self.config.frozen_evaluator is not None:
+                opponent_evaluator = self.config.frozen_evaluator
+                agent_colors = [g.agent_color for g in self.games]
         mcts_results = run_batched_mcts(
             states,
             self.evaluator,
@@ -652,6 +693,9 @@ class SelfPlayEngine:
             # In-tree repetition awareness: each search sees its game's
             # position history, so shuffling reads as a draw in-tree.
             position_counts=[g.position_history for g in self.games],
+            invert_turns=invert_turns,
+            opponent_evaluator=opponent_evaluator,
+            agent_colors=agent_colors,
         )
 
         finished: list[GameResult] = []
@@ -665,6 +709,14 @@ class SelfPlayEngine:
             # the canonical training target — an earlier version re-derived
             # the legal moves and copied the same entries index-by-index,
             # a bit-identical no-op costing one get_legal_moves per ply.
+            # In jester games vs the frozen opponent, only the AGENT's
+            # plies become training examples — the frozen net's moves are
+            # environment, not behavior to learn.
+            record_example = (
+                not jester
+                or slot.agent_color is None
+                or slot.state.currentTurn == slot.agent_color
+            )
             board = (self.config.board_encoder or encode_board)(slot.state)
 
             # Phase 1 of the reward refactor: pure-outcome value target, so we
@@ -672,14 +724,15 @@ class SelfPlayEngine:
             # `position_score` is kept on the dataclass for now (set to 0) so
             # external tests and fixtures that build examples directly keep
             # type-compatible. Will be repurposed when aux heads land.
-            slot.examples.append(
-                GameSlotExample(
-                    board=board,
-                    policy=policy,
-                    turn_color=slot.state.currentTurn,
-                    position_score=0.0,
+            if record_example:
+                slot.examples.append(
+                    GameSlotExample(
+                        board=board,
+                        policy=policy,
+                        turn_color=slot.state.currentTurn,
+                        position_score=0.0,
+                    )
                 )
-            )
 
             # Resignation: trigger on the best VISITED child's Q ("even
             # my best move loses"), from the side-to-move's perspective.
@@ -713,11 +766,7 @@ class SelfPlayEngine:
                     self.resigns += 1
                     slot.resigned_color = slot.state.currentTurn
                     finished.append(self._finish_game(slot))
-                    self.games[i] = _make_game_slot(
-                        self.rng,
-                        self.config.random_start_prob,
-                        self.config.endgame_start_prob,
-                    )
+                    self.games[i] = self._new_slot()
                     continue
 
             # Apply the move.
@@ -746,7 +795,7 @@ class SelfPlayEngine:
             )
             if is_over:
                 finished.append(self._finish_game(slot))
-                self.games[i] = _make_game_slot(self.rng, self.config.random_start_prob, self.config.endgame_start_prob)
+                self.games[i] = self._new_slot()
 
         return finished
 

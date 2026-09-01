@@ -18,7 +18,7 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
-  (e: 'playBot', model: 'sage' | 'toy'): void;
+  (e: 'playBot', model: 'sage' | 'toy' | 'jester'): void;
 }>();
 
 const joinCode = ref('');
@@ -113,6 +113,9 @@ const canJoin = computed(() => {
           </button>
           <button class="lobby-btn ai-btn toy-btn" @click="emit('playBot', 'toy')">
             <span class="bot-name">Play Toy Bot</span>
+          </button>
+          <button class="lobby-btn ai-btn jester-btn" @click="emit('playBot', 'jester')">
+            <span class="bot-name">Play Jester Bot</span>
           </button>
         </div>
 

@@ -5,13 +5,19 @@
 // ships in the JS bundle. (Sage's 15MB blob used to be imported into
 // the bundle and downloaded by every visitor.)
 
-export type ModelId = 'sage' | 'toy';
+export type ModelId = 'sage' | 'toy' | 'jester';
 
 export const MODELS: Record<ModelId, {
   name: string;
   tagline: string;
   file: string;
   sims: number;
+  // Misère bot: inverted MCTS selection + inverted repetition veto.
+  jester?: boolean;
+  // Uniform root priors — required while Jester runs on WINNER weights
+  // (their priors point at good moves and would starve the bad ones).
+  // Drop this once a trained jester.json ships.
+  flattenRootPriors?: boolean;
 }> = {
   sage: {
     name: 'Sage',
@@ -24,6 +30,17 @@ export const MODELS: Record<ModelId, {
     tagline: 'Weak AI - Watch Input and Output Activations',
     file: 'models/toy.json',
     sims: 128,
+  },
+  jester: {
+    name: 'Jester',
+    tagline: 'Tries Its Hardest to Lose',
+    // Instant Jester: Sage's truthful value net steered toward its own
+    // doom by the inverted search. Swap for models/jester.json once the
+    // misère training run ships weights.
+    file: 'models/sage.json',
+    sims: 400,
+    jester: true,
+    flattenRootPriors: true,
   },
 };
 

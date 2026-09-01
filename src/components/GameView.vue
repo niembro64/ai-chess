@@ -346,7 +346,12 @@ async function handlePlayBot(model: ModelId): Promise<void> {
     if (model === 'toy') {
       aiPlayer = ToyPlayer.create(weights, MODELS.toy.sims, t => { toyThought.value = t; });
     } else {
-      aiPlayer = AIPlayer.create(weights as SerializedWeights, MODELS.sage.sims, t => { toyThought.value = t; });
+      aiPlayer = AIPlayer.create(
+        weights as SerializedWeights,
+        MODELS[model].sims,
+        t => { toyThought.value = t; },
+        { jester: MODELS[model].jester, flattenRootPriors: MODELS[model].flattenRootPriors },
+      );
     }
   } catch (err) {
     lobbyError.value = (err as Error).message || 'Model weights are invalid';
@@ -694,7 +699,7 @@ onUnmounted(() => {
         v-if="showToyPanel"
         :thought="toyThought!"
         :flipped="localColor === 'black'"
-        :bot-name="botModelId === 'sage' ? 'Sage' : 'Toy'"
+        :bot-name="botModelId ? MODELS[botModelId].name : 'Bot'"
         class="toy-mind-row"
       />
       </div>
