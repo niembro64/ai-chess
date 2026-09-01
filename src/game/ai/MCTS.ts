@@ -30,6 +30,12 @@ export type MCTSOptions = {
   // Pick the move by sampling proportional to visit counts (τ=1) instead
   // of argmax. Self-play opening diversity only — off for match play.
   sampleProportional?: boolean;
+  // Move-selection temperature over the visit distribution:
+  //   0 (default) → argmax (always the search's top choice)
+  //   1           → sample proportional to visits
+  //   >1          → flatter — more variety, more mistakes
+  // Overrides sampleProportional when set.
+  moveTemperature?: number;
   // Board encoder matching the net (defaults to Sage's 20-plane).
   encode?: BoardEncoder;
   // Misère ("Jester") selection: at nodes whose side-to-move matches
@@ -137,8 +143,9 @@ export class MCTSSearch {
     this.pendingLeaf = null;
   }
 
-  // Get final result after all simulations
-  getResult(sampleProportional = false): MCTSResult {
+  // Get final result after all simulations. `temperature` shapes move
+  // selection: 0 = argmax visits, 1 = proportional, >1 = flatter.
+  getResult(temperature = 0): MCTSResult {
     const policy = new Float32Array(POLICY_SIZE);
     let totalVisits = 0;
     for (const child of this.root.children.values()) {
@@ -155,7 +162,7 @@ export class MCTSSearch {
       .sort((a, b) => b.visits - a.visits);
     return {
       policy,
-      move: sampleProportional ? sampleMove(this.root) : argmaxMove(this.root),
+      move: temperature > 1e-6 ? sampleMove(this.root, temperature) : argmaxMove(this.root),
       rootValue: this.root.visitCount > 0 ? this.root.totalValue / this.root.visitCount : 0,
       rankedMoves,
     };
@@ -224,7 +231,7 @@ export function runBatchedMCTS(
   options: MCTSOptions = {},
 ): MCTSResult[] {
   const addNoise = options.addRootNoise ?? false;
-  const sampleProportional = options.sampleProportional ?? false;
+  const temperature = options.moveTemperature ?? (options.sampleProportional ? 1 : 0);
   const searches = states.map(
     s => new MCTSSearch(s, options.encode ?? encodeBoard, options.invertForTurn),
   );
@@ -232,7 +239,7 @@ export function runBatchedMCTS(
   // Filter to non-terminal games
   const active = searches.filter(s => !s.isTerminal());
   if (active.length === 0) {
-    return searches.map(s => s.getResult(sampleProportional));
+    return searches.map(s => s.getResult(temperature));
   }
 
   // Batch-evaluate root positions
@@ -264,7 +271,7 @@ export function runBatchedMCTS(
     }
   }
 
-  return searches.map(s => s.getResult(sampleProportional));
+  return searches.map(s => s.getResult(temperature));
 }
 
 // --- Single-game MCTS (for gameplay, not training) ---
@@ -288,8 +295,9 @@ export async function runMCTSAsync(
   yieldEverySims = 16,
 ): Promise<MCTSResult> {
   const search = new MCTSSearch(state, options.encode ?? encodeBoard, options.invertForTurn);
+  const temperature = options.moveTemperature ?? (options.sampleProportional ? 1 : 0);
   if (search.isTerminal()) {
-    return search.getResult(options.sampleProportional ?? false);
+    return search.getResult(temperature);
   }
 
   const [rootEval] = net.predictBatch([search.getRootBoard()]);
@@ -309,7 +317,7 @@ export async function runMCTSAsync(
     }
   }
 
-  return search.getResult(options.sampleProportional ?? false);
+  return search.getResult(temperature);
 }
 
 // --- Shared helpers ---
@@ -366,18 +374,24 @@ function backpropagate(node: MCTSNode, value: number): void {
   }
 }
 
-function sampleMove(root: MCTSNode): Move {
-  let totalVisits = 0;
-  for (const child of root.children.values()) {
-    totalVisits += child.visitCount;
+function sampleMove(root: MCTSNode, temperature = 1): Move {
+  // visits^(1/τ): τ=1 leaves the distribution as-is; τ>1 flattens it
+  // (weaker, more varied play); τ<1 sharpens toward the argmax.
+  const weights: number[] = [];
+  const children = [...root.children.values()];
+  let total = 0;
+  for (const child of children) {
+    const w = Math.pow(child.visitCount, 1 / temperature);
+    weights.push(w);
+    total += w;
   }
+  if (total <= 0) return argmaxMove(root);
 
-  let r = Math.random() * totalVisits;
-  for (const child of root.children.values()) {
-    r -= child.visitCount;
-    if (r <= 0) return child.move!;
+  let r = Math.random() * total;
+  for (let i = 0; i < children.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return children[i].move!;
   }
-
   return argmaxMove(root);
 }
 

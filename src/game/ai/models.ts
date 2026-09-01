@@ -12,35 +12,31 @@ export const MODELS: Record<ModelId, {
   tagline: string;
   file: string;
   sims: number;
-  // Misère bot: inverted MCTS selection + inverted repetition veto.
-  jester?: boolean;
-  // Uniform root priors — required while Jester runs on WINNER weights
-  // (their priors point at good moves and would starve the bad ones).
-  // Drop this once a trained jester.json ships.
-  flattenRootPriors?: boolean;
+  // What the net was TRAINED to want. The lobby's GOAL INVERTED mode
+  // pursues the opposite at play time (misère search flip) — see
+  // AIPlayerOptions.
+  trainedGoal: 'win' | 'lose';
 }> = {
   sage: {
     name: 'Sage',
-    tagline: 'Strong AI - No Brain Visuals',
+    tagline: 'Trained to checkmate opponent',
     file: 'models/sage.json',
     sims: 400,
+    trainedGoal: 'win',
   },
   toy: {
     name: 'Toy',
-    tagline: 'Weak AI - Watch Input and Output Activations',
+    tagline: 'Trained to checkmate opponent — watch it think',
     file: 'models/toy.json',
     sims: 128,
+    trainedGoal: 'win',
   },
   jester: {
     name: 'Jester',
-    tagline: 'Tries Its Hardest to Lose',
-    // Instant Jester: Sage's truthful value net steered toward its own
-    // doom by the inverted search. Swap for models/jester.json once the
-    // misère training run ships weights.
-    file: 'models/sage.json',
+    tagline: 'Trained to checkmate itself',
+    file: 'models/jester.json',
     sims: 400,
-    jester: true,
-    flattenRootPriors: true,
+    trainedGoal: 'lose',
   },
 };
 

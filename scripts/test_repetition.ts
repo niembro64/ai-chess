@@ -12,7 +12,7 @@ import {
   posToAlgebraic,
 } from '../src/game/chess/ChessEngine';
 import { ChessServer } from '../src/game/server/ChessServer';
-import { pickNonRepeatingMove } from '../src/game/ai/AIPlayer';
+import { pickFreshMove } from '../src/game/ai/AIPlayer';
 import type { Board, ChessGameState, Move, PieceColor, PieceType } from '../src/types/chess';
 
 let failures = 0;
@@ -151,9 +151,13 @@ console.log('isInsufficientMaterial:');
   check(!isInsufficientMaterial(kpk), 'K+P vs K = NOT insufficient');
 }
 
-// --- pickNonRepeatingMove (the AI veto) ---------------------------------
+// --- pickFreshMove (the AI house rule) -----------------------------------
+//
+// A bot may NEVER move into a board state the game has already seen —
+// even once. Only when every legal move repeats does the search's own
+// choice stand.
 
-console.log('pickNonRepeatingMove:');
+console.log('pickFreshMove:');
 {
   const state = createInitialGameState();
   state.status = 'active';
@@ -165,38 +169,33 @@ console.log('pickNonRepeatingMove:');
   ];
   const keyAfterNf3 = positionKey(applyMove(state, nf3));
 
-  // Nf3's resulting position already occurred twice → playing it would be
-  // the third occurrence. Neutral eval: veto must fall through to e4.
-  const counts2 = new Map([[keyAfterNf3, 2]]);
+  // Fresh board: the search's favorite plays.
   check(
-    pickNonRepeatingMove(state, ranked, counts2, 0.0) === e4,
-    'third-occurrence move vetoed, next-ranked move plays',
+    pickFreshMove(state, ranked, new Map()) === nf3,
+    'fresh position — search favorite plays',
   );
 
-  // Same map but the bot is losing badly: no veto (draw saves half a point).
-  check(
-    pickNonRepeatingMove(state, ranked, counts2, -0.5) === null,
-    'no veto while losing — repetition draw is welcome',
-  );
-
-  // Winning strictly: even a SECOND occurrence is dodged.
+  // Nf3's resulting position occurred ONCE already → even a second
+  // occurrence is forbidden for a bot; fall through to e4.
   const counts1 = new Map([[keyAfterNf3, 1]]);
   check(
-    pickNonRepeatingMove(state, ranked, counts1, 0.5) === e4,
-    'second occurrence dodged when clearly winning',
+    pickFreshMove(state, ranked, counts1) === e4,
+    'single prior occurrence vetoed — bots never repeat any state',
   );
-  // ...but with a neutral eval a mere second occurrence is fine.
+
+  // Occurred twice → same veto.
+  const counts2 = new Map([[keyAfterNf3, 2]]);
   check(
-    pickNonRepeatingMove(state, ranked, counts1, 0.0) === nf3,
-    'second occurrence allowed at neutral eval',
+    pickFreshMove(state, ranked, counts2) === e4,
+    'double prior occurrence vetoed',
   );
 
   // Every move repeats → forced; keep the search's choice.
   const keyAfterE4 = positionKey(applyMove(state, e4));
-  const allRepeat = new Map([[keyAfterNf3, 2], [keyAfterE4, 2]]);
+  const allRepeat = new Map([[keyAfterNf3, 1], [keyAfterE4, 1]]);
   check(
-    pickNonRepeatingMove(state, ranked, allRepeat, 0.0) === null,
-    'all moves repeat → forced draw, keep search choice',
+    pickFreshMove(state, ranked, allRepeat) === null,
+    'all moves repeat → forced, keep search choice',
   );
 }
 

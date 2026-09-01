@@ -156,6 +156,17 @@ const toyThought = ref<ToyThought | null>(null);
 // Both bots emit thoughts now — the panel shows for any bot game.
 const showToyPanel = computed(() => botModelId.value !== null && toyThought.value !== null);
 
+// Piece tinting: Sage plays green, Jester purple (light shade as
+// white, dark as black — see ChessBoard.vue). Toy keeps standard sets.
+const botTheme = computed<'sage' | 'jester' | null>(() =>
+  playingVsBot.value && (botModelId.value === 'sage' || botModelId.value === 'jester')
+    ? botModelId.value
+    : null,
+);
+const botColor = computed<PieceColor | null>(() =>
+  playingVsBot.value ? (localPlayerId.value === 1 ? 'black' : 'white') : null,
+);
+
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
 const isMyTurn = computed(() => gameState.value.currentTurn === localColor.value);
@@ -329,7 +340,10 @@ async function handleJoin(code: string): Promise<void> {
   }
 }
 
-async function handlePlayBot(model: ModelId): Promise<void> {
+async function handlePlayBot(
+  model: ModelId,
+  opts: { goalInverted: boolean; temperature: number },
+): Promise<void> {
   isConnecting.value = true;
   lobbyError.value = null;
 
@@ -344,13 +358,21 @@ async function handlePlayBot(model: ModelId): Promise<void> {
 
   try {
     if (model === 'toy') {
-      aiPlayer = ToyPlayer.create(weights, MODELS.toy.sims, t => { toyThought.value = t; });
+      aiPlayer = ToyPlayer.create(
+        weights, MODELS.toy.sims,
+        t => { toyThought.value = t; },
+        { goalInverted: opts.goalInverted, temperature: opts.temperature },
+      );
     } else {
       aiPlayer = AIPlayer.create(
         weights as SerializedWeights,
         MODELS[model].sims,
         t => { toyThought.value = t; },
-        { jester: MODELS[model].jester, flattenRootPriors: MODELS[model].flattenRootPriors },
+        {
+          trainedGoal: MODELS[model].trainedGoal,
+          goalInverted: opts.goalInverted,
+          temperature: opts.temperature,
+        },
       );
     }
   } catch (err) {
@@ -629,6 +651,8 @@ onUnmounted(() => {
             :game-state="displayState"
             :frozen="isViewingHistory"
             :local-player-id="localPlayerId"
+            :bot-theme="botTheme"
+            :bot-color="botColor"
             @move="handleMove"
           />
 

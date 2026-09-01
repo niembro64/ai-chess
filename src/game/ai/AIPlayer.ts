@@ -24,47 +24,27 @@ import type { ChessGameState, Move } from '@/types/chess';
 // --- Repetition veto -------------------------------------------------
 //
 // The network's input encoding carries no history, so neither the net
-// nor the search can perceive threefold repetition — a winning bot
-// would happily shuffle into the auto-draw the game rules now enforce.
-// Post-search fix that leaves the weights untouched: walk down the
-// search's visit-ranked move list and play the best move that does NOT
-// walk into a repetition, instead of blindly playing the top move.
-//
-// Below this root value the bot is losing badly enough that a
-// repetition draw SAVES half a point — the veto turns off entirely so
-// the search's choice (which may repeat) stands.
-const REPETITION_OK_BELOW = -0.3;
-// Above this root value the bot is clearly winning and shouldn't even
-// allow a SECOND occurrence — drifting to the brink lets the opponent
-// spring the third. Between the two thresholds only the game-ending
-// third occurrence is vetoed.
-const STRICT_AVOID_ABOVE = 0.3;
+// nor the search can perceive that a position already occurred.
+// House rule: a BOT may never move into a board state the game has
+// already seen — not even once (humans may; the engine only enforces
+// FIDE threefold). Post-search fix that leaves the weights untouched:
+// walk down the search's visit-ranked move list and play the best move
+// whose resulting position is FRESH. Only when every legal move
+// repeats (forced) does the search's own choice stand.
 
-// Pick the best-ranked move that avoids repetition, or null to keep the
-// search's own choice. Exported for tests.
-export function pickNonRepeatingMove(
+// Pick the best-ranked move that reaches a never-seen position, or
+// null (forced — keep the search's choice). Exported for tests.
+export function pickFreshMove(
   state: ChessGameState,
   rankedMoves: { move: Move; visits: number }[],
   positionCounts: Map<string, number>,
-  rootValue: number,
 ): Move | null {
   if (rankedMoves.length === 0) return null;
-  if (rootValue <= REPETITION_OK_BELOW) return null;
-
-  // Occurrence count the resulting position would REACH if played.
-  const resulting = rankedMoves.map(({ move }) => {
+  for (const { move } of rankedMoves) {
     const key = positionKey(applyMove(state, move));
-    return { move, wouldReach: (positionCounts.get(key) ?? 0) + 1 };
-  });
-
-  if (rootValue >= STRICT_AVOID_ABOVE) {
-    const fresh = resulting.find(r => r.wouldReach < 2);
-    if (fresh) return fresh.move;
+    if ((positionCounts.get(key) ?? 0) === 0) return move;
   }
-  const safe = resulting.find(r => r.wouldReach < 3);
-  // Every move creates the third occurrence — the draw is forced; keep
-  // the search's choice.
-  return safe ? safe.move : null;
+  return null;
 }
 
 // Figure out the ChessNet architecture from the weight tensor shapes so we
@@ -106,22 +86,32 @@ function detectConfigFromWeights(weights: SerializedWeights): NetConfig {
 }
 
 export type AIPlayerOptions = {
-  // Misère ("Jester") mode: the bot plays to LOSE. Search selection
-  // inverts at its own plies (see MCTSOptions.invertForTurn) and the
-  // repetition veto flips (a draw SPOILS a loss in progress). The value
-  // net stays a truthful "who is winning" estimator throughout.
-  jester?: boolean;
-  // See MCTSOptions.flattenRootPriors — needed while Jester runs on
-  // winner weights.
-  flattenRootPriors?: boolean;
+  // What this net was TRAINED to want ('win' = Sage/Toy, 'lose' =
+  // Jester). Determines the search's default goal direction.
+  trainedGoal?: 'win' | 'lose';
+  // GOAL INVERTED inference mode: pursue the OPPOSITE of the trained
+  // goal — implemented as the misère search-selection flip (see
+  // MCTSOptions.invertForTurn), never as "pick the lowest prediction"
+  // (which shuffles randomly instead of planning). Root priors are
+  // flattened when inverting, because the net's trained priors point
+  // away from the new goal and would starve the search of the moves it
+  // now needs. The value net stays a truthful evaluator throughout.
+  goalInverted?: boolean;
+  // Move-selection temperature over the search's visit counts:
+  // 0 = always the top choice, 1 = proportional sampling, higher =
+  // flatter (more variety, more mistakes). See MCTSOptions.
+  temperature?: number;
 };
 
 export class AIPlayer {
   private net: ChessNet;
   private sims: number;
   private onThought: ((t: ToyThought) => void) | null;
-  private jester: boolean;
+  // True when the EFFECTIVE goal (trained goal, possibly inverted by
+  // the inference mode) is to lose — drives the misère search flip.
+  private seeksLoss: boolean;
   private flattenRootPriors: boolean;
+  private temperature: number;
 
   private constructor(
     net: ChessNet,
@@ -132,8 +122,11 @@ export class AIPlayer {
     this.net = net;
     this.sims = sims;
     this.onThought = onThought;
-    this.jester = options.jester ?? false;
-    this.flattenRootPriors = options.flattenRootPriors ?? false;
+    const trainedToLose = (options.trainedGoal ?? 'win') === 'lose';
+    const inverted = options.goalInverted ?? false;
+    this.seeksLoss = trainedToLose !== inverted;
+    this.flattenRootPriors = inverted;
+    this.temperature = options.temperature ?? 0;
   }
 
   static create(
@@ -180,18 +173,14 @@ export class AIPlayer {
   // visit ranking (see pickNonRepeatingMove).
   async getMove(state: ChessGameState): Promise<Move> {
     const result = await runMCTSAsync(state, this.net, this.sims, {
-      invertForTurn: this.jester ? state.currentTurn : undefined,
+      invertForTurn: this.seeksLoss ? state.currentTurn : undefined,
       flattenRootPriors: this.flattenRootPriors,
+      moveTemperature: this.temperature,
     });
     const counts = buildPositionCounts(state);
-    // Jester flips the repetition veto by negating the root value:
-    // when it is successfully losing (very negative truthful value) a
-    // repetition draw would SPOIL the loss — avoid it strictly; when it
-    // is accidentally winning, a draw is an improvement — allow it.
-    const vetoValue = this.jester ? -result.rootValue : result.rootValue;
-    const vetoed = pickNonRepeatingMove(
-      state, result.rankedMoves, counts, vetoValue,
-    );
+    // House rule: bots never repeat a prior board state (see
+    // pickFreshMove) — regardless of goal direction or temperature.
+    const vetoed = pickFreshMove(state, result.rankedMoves, counts);
     const move = vetoed ?? result.move;
 
     if (this.onThought) {

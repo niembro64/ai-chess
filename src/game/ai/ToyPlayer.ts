@@ -8,7 +8,7 @@
 import { runMCTSAsync } from './MCTS';
 import { ToyNet, encodeToyBoard, isToyWeights, type ToySerializedWeights } from './ToyNet';
 import { moveToIndex } from './ChessNet';
-import { pickNonRepeatingMove } from './AIPlayer';
+import { pickFreshMove } from './AIPlayer';
 import {
   buildPositionCounts,
   getLegalMoves,
@@ -38,26 +38,45 @@ export type ToyThought = {
   blackToMove: boolean;
 };
 
+export type ToyPlayerOptions = {
+  // GOAL INVERTED inference mode + move temperature — same semantics
+  // as AIPlayerOptions (Toy's trained goal is always 'win').
+  goalInverted?: boolean;
+  temperature?: number;
+};
+
 export class ToyPlayer {
   private net: ToyNet;
   private sims: number;
   private onThought: ((t: ToyThought) => void) | null;
+  private goalInverted: boolean;
+  private temperature: number;
 
-  private constructor(net: ToyNet, sims: number, onThought: ((t: ToyThought) => void) | null) {
+  private constructor(
+    net: ToyNet,
+    sims: number,
+    onThought: ((t: ToyThought) => void) | null,
+    options: ToyPlayerOptions,
+  ) {
     this.net = net;
     this.sims = sims;
     this.onThought = onThought;
+    this.goalInverted = options.goalInverted ?? false;
+    this.temperature = options.temperature ?? 0;
   }
 
   static create(
     weights: unknown,
     sims: number,
     onThought?: (t: ToyThought) => void,
+    options: ToyPlayerOptions = {},
   ): ToyPlayer {
     if (!isToyWeights(weights)) {
       throw new Error('Not a toy-v1 weight file');
     }
-    return new ToyPlayer(ToyNet.create(weights as ToySerializedWeights), sims, onThought ?? null);
+    return new ToyPlayer(
+      ToyNet.create(weights as ToySerializedWeights), sims, onThought ?? null, options,
+    );
   }
 
   // Terminal observation: the game just ended on Toy's turn (it got
@@ -96,10 +115,14 @@ export class ToyPlayer {
 
     const result = await runMCTSAsync(state, this.net, this.sims, {
       encode: encodeToyBoard,
+      invertForTurn: this.goalInverted ? state.currentTurn : undefined,
+      flattenRootPriors: this.goalInverted,
+      moveTemperature: this.temperature,
     });
 
     const counts = buildPositionCounts(state);
-    const vetoed = pickNonRepeatingMove(state, result.rankedMoves, counts, result.rootValue);
+    // House rule: bots never repeat a prior board state.
+    const vetoed = pickFreshMove(state, result.rankedMoves, counts);
     const move = vetoed ?? result.move;
 
     if (this.onThought) {

@@ -12,6 +12,10 @@ const props = defineProps<{
   // is blocked and the slide animation is suppressed — the parent owns
   // navigation (GameView's history arrows).
   frozen?: boolean;
+  // Bot piece tinting: which model the opponent is (Sage = green,
+  // Jester = purple) and which color it plays. null = standard sets.
+  botTheme?: 'sage' | 'jester' | null;
+  botColor?: PieceColor | null;
 }>();
 
 const emit = defineEmits<{
@@ -216,7 +220,15 @@ watch(
 
 <template>
   <div class="chess-board-wrapper">
-    <div class="board-container">
+    <div
+      class="board-container"
+      :class="{
+        'bot-sage': botTheme === 'sage',
+        'bot-jester': botTheme === 'jester',
+        'bot-white': botColor === 'white',
+        'bot-black': botColor === 'black',
+      }"
+    >
       <!-- Rank labels (left side) -->
       <div class="rank-labels">
         <div v-for="rank in displayRanks" :key="'rl' + rank" class="rank-label">
@@ -442,6 +454,27 @@ watch(
 .piece.black {
   color: #15110d;
   --piece-outline: rgba(246, 239, 222, 0.55);
+}
+
+/* --- Bot piece tinting ------------------------------------------------
+   Only the BOT's pieces tint (the human keeps the standard cream /
+   charcoal set): Sage plays green, Jester plays purple — a very light
+   shade when the bot is white, a very dark one when it is black. */
+.board-container.bot-sage.bot-white .piece.white {
+  color: #d9f2d0;
+  --piece-outline: #14381d;
+}
+.board-container.bot-sage.bot-black .piece.black {
+  color: #0e2b15;
+  --piece-outline: rgba(190, 235, 195, 0.6);
+}
+.board-container.bot-jester.bot-white .piece.white {
+  color: #ecdcf8;
+  --piece-outline: #381852;
+}
+.board-container.bot-jester.bot-black .piece.black {
+  color: #1f0e30;
+  --piece-outline: rgba(225, 200, 250, 0.6);
 }
 
 .move-dot {

@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import type { PlayerId } from '@/types/chess';
 import type { LobbyPlayer } from '@/types/network';
+import { MODELS, type ModelId } from '@/game/ai/models';
 
 const props = defineProps<{
   visible: boolean;
@@ -18,8 +19,22 @@ const emit = defineEmits<{
   (e: 'join', roomCode: string): void;
   (e: 'start'): void;
   (e: 'cancel'): void;
-  (e: 'playBot', model: 'sage' | 'toy' | 'jester'): void;
+  (e: 'playBot', model: ModelId, opts: { goalInverted: boolean; temperature: number }): void;
 }>();
+
+// --- Inference mode ---------------------------------------------------
+// GOAL: pursue the model's trained goal, or the opposite (misère
+// search flip). TEMPERATURE: 0 = always the top choice; higher =
+// sample among liked moves (variety + mistakes).
+const goalInverted = ref(false);
+const temperature = ref(0);
+
+function playBot(model: ModelId): void {
+  emit('playBot', model, {
+    goalInverted: goalInverted.value,
+    temperature: temperature.value,
+  });
+}
 
 const joinCode = ref('');
 const codeCopied = ref(false);
@@ -108,15 +123,54 @@ const canJoin = computed(() => {
 
           <!-- Bot opponents. Weights are fetched lazily on click — only
                the model you pick gets downloaded. -->
-          <button class="lobby-btn ai-btn" @click="emit('playBot', 'sage')">
+          <button class="lobby-btn ai-btn sage-btn" @click="playBot('sage')">
             <span class="bot-name">Play Sage Bot</span>
+            <span class="bot-tagline">{{ MODELS.sage.tagline }}</span>
           </button>
-          <button class="lobby-btn ai-btn toy-btn" @click="emit('playBot', 'toy')">
+          <button class="lobby-btn ai-btn toy-btn" @click="playBot('toy')">
             <span class="bot-name">Play Toy Bot</span>
+            <span class="bot-tagline">{{ MODELS.toy.tagline }}</span>
           </button>
-          <button class="lobby-btn ai-btn jester-btn" @click="emit('playBot', 'jester')">
+          <button class="lobby-btn ai-btn jester-btn" @click="playBot('jester')">
             <span class="bot-name">Play Jester Bot</span>
+            <span class="bot-tagline">{{ MODELS.jester.tagline }}</span>
           </button>
+
+          <!-- Inference mode: applies to whichever bot is picked. -->
+          <div class="inference-panel">
+            <div class="inf-title">Inference Mode</div>
+            <div class="inf-row">
+              <span class="inf-label">GOAL</span>
+              <div class="inf-seg">
+                <button
+                  :class="{ active: !goalInverted }"
+                  @click="goalInverted = false"
+                >AS TRAINED</button>
+                <button
+                  :class="{ active: goalInverted }"
+                  @click="goalInverted = true"
+                >INVERTED</button>
+              </div>
+            </div>
+            <div class="inf-row">
+              <span class="inf-label">TEMP</span>
+              <input
+                v-model.number="temperature"
+                class="inf-slider"
+                type="range"
+                min="0"
+                max="1.5"
+                step="0.25"
+              />
+              <span class="inf-value">{{ temperature.toFixed(2) }}</span>
+            </div>
+            <p class="inf-explain">
+              <b>Temperature</b> 0 = the bot always plays its top choice;
+              higher makes it sample among moves it likes — more variety,
+              more mistakes. <b>Goal inverted</b> = it pursues the opposite
+              of what it was trained to do.
+            </p>
+          </div>
         </div>
 
         <div v-if="error" class="error-message">{{ error }}</div>
@@ -328,7 +382,18 @@ const canJoin = computed(() => {
   box-shadow: 0 8px 24px rgba(168, 85, 247, 0.5);
 }
 
-/* Toy gets the teal accent to read as "the other one". */
+/* Bot identity colors match their piece tints on the board:
+   Sage = green, Jester = purple, Toy = teal. */
+.sage-btn {
+  background: linear-gradient(165deg, #4ade80, #16a34a);
+  box-shadow: 0 6px 18px rgba(74, 222, 128, 0.3);
+}
+
+.sage-btn:hover:not(:disabled) {
+  background: linear-gradient(165deg, #63e796, #22c55e);
+  box-shadow: 0 8px 24px rgba(74, 222, 128, 0.5);
+}
+
 .toy-btn {
   background: linear-gradient(165deg, #2dd4bf, #0d9488);
   box-shadow: 0 6px 18px rgba(45, 212, 191, 0.3);
@@ -337,6 +402,100 @@ const canJoin = computed(() => {
 .toy-btn:hover:not(:disabled) {
   background: linear-gradient(165deg, #46e4cf, #14b8a6);
   box-shadow: 0 8px 24px rgba(45, 212, 191, 0.5);
+}
+
+.bot-tagline {
+  font-size: 10.5px;
+  font-weight: 500;
+  opacity: 0.85;
+  letter-spacing: 0.3px;
+}
+
+/* --- Inference mode panel ------------------------------------------- */
+
+.inference-panel {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.inf-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.inf-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.inf-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: #5ae3d8;
+  width: 38px;
+  flex-shrink: 0;
+}
+
+.inf-seg {
+  display: flex;
+  flex: 1;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.inf-seg button {
+  flex: 1;
+  padding: 6px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.inf-seg button.active {
+  color: #07060f;
+  background: #5ae3d8;
+}
+
+.inf-slider {
+  flex: 1;
+  accent-color: #5ae3d8;
+}
+
+.inf-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #e2e8f0;
+  width: 34px;
+  text-align: right;
+}
+
+.inf-explain {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.inf-explain b {
+  color: #94a3b8;
+  font-weight: 600;
 }
 
 .bot-name {
