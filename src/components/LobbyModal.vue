@@ -135,7 +135,7 @@ const canJoin = computed(() => {
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
         <h1 class="title">AI CHESS</h1>
-        <p class="subtitle">Can you lose to a bot trying to lose?</p>
+        <p class="subtitle">Can you get checkmated before the bot does?</p>
 
         <div class="main-actions">
           <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>

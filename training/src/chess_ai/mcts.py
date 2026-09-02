@@ -406,13 +406,22 @@ def _backpropagate(node: MCTSNode, value: float) -> None:
 def _sample_move(root: MCTSNode, rng: random.Random, temperature: float = 1.0) -> Move:
     """Pick a move from the root's visit distribution.
 
-    temperature == 1.0 → sample proportional to visit counts (exploration).
-    temperature <= ~0  → argmax (greedy; pick the most-visited child).
+    Sampling weight is visit_count ** (1 / temperature):
+
+      temperature <= ~0  → argmax (greedy; pick the most-visited child)
+      temperature == 1.0 → proportional to visit counts (exploration)
+      temperature  > 1.0 → flatter than proportional (sloppier)
 
     AlphaZero uses τ=1 for the opening plies and τ→0 thereafter so the game
     commits to decisive best moves once the opening is committed. Without
     this annealing, self-play games keep sampling sub-optimal moves
     proportionally and the training signal stays mushy.
+
+    Jester play needs the τ>0 tail as well as the head. Two loss-seekers
+    playing greedily never terminate — neither will deliver the mate the
+    other wants — so the game shuffles to a threefold draw and teaches
+    nothing. Sustained temperature is what puts blunders back in, and a
+    blundering loss-seeker is exactly the opponent the product faces.
     """
     children = list(root.children.values())
     if not children:
@@ -428,9 +437,19 @@ def _sample_move(root: MCTSNode, rng: random.Random, temperature: float = 1.0) -
         # No sims completed yet on any child — fall back to a uniform pick.
         return rng.choice([c.move for c in children if c.move is not None])  # type: ignore[return-value]
 
-    r = rng.random() * total_visits
-    for child in children:
-        r -= child.visit_count
+    if abs(temperature - 1.0) < 1e-6:
+        weights = [float(c.visit_count) for c in children]
+        total = float(total_visits)
+    else:
+        power = 1.0 / temperature
+        weights = [float(c.visit_count) ** power for c in children]
+        total = sum(weights)
+        if total <= 0.0:
+            return rng.choice([c.move for c in children if c.move is not None])  # type: ignore[return-value]
+
+    r = rng.random() * total
+    for child, w in zip(children, weights):
+        r -= w
         if r <= 0:
             assert child.move is not None
             return child.move

@@ -235,8 +235,18 @@ const statusText = computed(() => {
     case 'check':
       return isMyTurn.value ? 'You are in check!' : 'Opponent is in check';
     case 'checkmate':
+      // Against a bot the prize is INVERTED: you are trying to get your
+      // own king checkmated, so `gs.winner` — the ordinary chess winner
+      // — is the side that failed. When the bot is chasing its own mate
+      // too it is a race, and the bot beat you to it.
+      if (playingVsBot.value) {
+        if (gs.winner !== localColor.value) return 'Checkmate - You win!';
+        return botRacesYou.value
+          ? `Checkmate - ${opponentName.value} got there first`
+          : 'Checkmate - You lose';
+      }
       if (gs.winner === localColor.value) return 'Checkmate - You win!';
-      return playingVsBot.value ? 'Checkmate - AI wins' : 'Checkmate - You lose';
+      return 'Checkmate - You lose';
     case 'stalemate':
       return 'Stalemate - Draw';
     case 'draw':
@@ -271,6 +281,15 @@ const opponentName = computed(() => {
   return 'Player 2';
 });
 const localName = computed(() => 'You');
+// True when the bot is chasing its OWN checkmate — the same prize you
+// are after, which makes the game a race rather than a favour. A net
+// trained to lose does this unless the lobby asked it for the opposite,
+// and a net trained to win does it when the lobby DID.
+const botRacesYou = computed(() => {
+  if (!playingVsBot.value || !botModelId.value) return false;
+  const trainedToLose = MODELS[botModelId.value].trainedGoal === 'lose';
+  return trainedToLose !== botPicksLowest.value;
+});
 const isOpponentTurn = computed(() => gameState.value.currentTurn === opponentColor.value);
 const isLocalTurn = computed(() => gameState.value.currentTurn === localColor.value);
 

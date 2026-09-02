@@ -212,13 +212,21 @@ class TrainConfig:
     # --- Jester (misère) mode ---------------------------------------
     # Train the model to LOSE: MCTS selection inverts at the agent's
     # plies (truthful value labels throughout — see mcts.MCTSSearch).
-    # Self-play mixes agent-vs-frozen-winner games with agent-vs-agent
-    # mirror games (jester_selfplay_prob). Eval gating plays the
-    # challenger vs the frozen winner and counts games the challenger
-    # LOSES as eval wins. Requires num_workers=0 (Python MCTS path).
+    # Self-play is mostly agent-vs-agent MIRROR games — the production
+    # matchup, where the loss must be forced against an opponent who
+    # refuses to deliver it — with a small agent-vs-frozen-winner share
+    # for bootstrap and robustness (jester_selfplay_prob). Eval gating
+    # plays the challenger against the CHAMPION JESTER and counts games
+    # the challenger LOSES as eval wins. Requires num_workers=0 (Python
+    # MCTS path).
     jester_mode: bool = False
-    jester_selfplay_prob: float = 0.25
+    jester_selfplay_prob: float = 0.85
     jester_opponent_checkpoint: str = ""
+    # Sustained move-selection temperature for the mirror sparring side
+    # (self-play) and for both sides of a jester eval game. Greedy misère
+    # play never terminates, so this is what makes the games decisive.
+    jester_spar_temperature: float = 1.0
+    eval_temperature: float = 1.0
     archive_every_gens: int = 0
     # Cap on retained archives (oldest are deleted as new ones are written).
     # 0 = unlimited.
@@ -579,6 +587,7 @@ class Trainer:
                         else None
                     ),
                     agent_selfplay_prob=self.config.jester_selfplay_prob,
+                    spar_temperature=self.config.jester_spar_temperature,
                 ),
                 rng=self.rng,
             )
@@ -1208,6 +1217,8 @@ class Trainer:
         mcts_sims: int,
         move_cap: int,
         starting_state: "ChessGameState | None" = None,
+        jester: bool = False,
+        temperature: float = 0.0,
     ) -> str:
         """One eval game. Returns "challenger", "champion", or "draw".
 
@@ -1223,6 +1234,12 @@ class Trainer:
         Threefold repetition and insufficient material are adjudicated
         here like in self-play; without them, shuffle games burned the
         full move cap and landed in "draw", further flattening scores.
+
+        `jester=True` makes it a misère match: both sides want their own
+        king mated and the side mated FIRST wins. That is the matchup the
+        bot actually ships into, and it needs `temperature > 0` — two
+        greedy loss-seekers never finish, because neither will deliver
+        the mate the other is angling for.
         """
         import copy
 
@@ -1249,20 +1266,27 @@ class Trainer:
                 return "draw"
             if _is_insufficient_material(state.board):
                 return "draw"
+            ch_color = "white" if challenger_plays_white else "black"
             if jester:
-                # Misère match: every search runs dual-net + inverted at
-                # the challenger's color — the opponent's tree models the
-                # challenger truthfully (as a net trying to lose) via the
-                # same per-turn spec.
-                ch_color = "white" if challenger_plays_white else "black"
+                # Head-to-head misère: the side to move searches with its
+                # OWN net as the agent net and the other net supplying the
+                # opponent's leaves (dual-net routing), and BOTH colors
+                # invert — each side is modelled as what it is, a net
+                # trying to lose. Whoever moves gets a search that is
+                # genuinely theirs, which a promotion gate requires.
+                mover_is_challenger = state.currentTurn == ch_color
                 result = run_batched_mcts(
-                    [state], challenger_eval, mcts_sims, self.rng,
-                    temperatures=[0.0], dirichlet_epsilon=0.0,
+                    [state],
+                    challenger_eval if mover_is_challenger else champion_eval,
+                    mcts_sims, self.rng,
+                    temperatures=[temperature], dirichlet_epsilon=0.0,
                     board_encoder=self._board_encoder,
                     position_counts=[position_history],
-                    invert_turns=[ch_color],
-                    opponent_evaluator=champion_eval,
-                    agent_colors=[ch_color],
+                    invert_turns=["both"],
+                    opponent_evaluator=(
+                        champion_eval if mover_is_challenger else challenger_eval
+                    ),
+                    agent_colors=[state.currentTurn],
                 )
             else:
                 if state.currentTurn == "white":
@@ -1272,7 +1296,7 @@ class Trainer:
                 # Greedy play: τ=0 (argmax visits), no exploration noise.
                 result = run_batched_mcts(
                     [state], ev, mcts_sims, self.rng,
-                    temperatures=[0.0], dirichlet_epsilon=0.0,
+                    temperatures=[temperature], dirichlet_epsilon=0.0,
                     board_encoder=self._board_encoder,
                     position_counts=[position_history],
                 )
@@ -1357,15 +1381,19 @@ class Trainer:
         try:
             challenger_eval = self._make_model_evaluator(self.model)
             champion_eval = self._make_model_evaluator(self._champion_model)
-            if self.config.jester_mode:
-                # Jester gating: the match opponent is the FROZEN winner
-                # net, and _play_eval_game reports "challenger" when the
-                # challenger achieved its objective — LOSING. All the
-                # score/threshold/promotion machinery reads unchanged
-                # under that inverted meaning; the curated position suite
-                # does the discriminating (throwing a mate-in-1-up
-                # position against a strong winner takes real skill).
-                champion_eval = self._make_model_evaluator(self._frozen_opponent)
+            # Jester gating plays challenger jester vs CHAMPION JESTER —
+            # the production matchup, where a loss must be forced against
+            # an opponent who refuses to deliver it. _play_eval_game
+            # reports "challenger" when the challenger achieved its
+            # objective (getting its own king mated first), so all the
+            # score/threshold/promotion machinery reads unchanged under
+            # that inverted meaning.
+            #
+            # It deliberately does NOT play the frozen winner. Against a
+            # net that is trying to mate you, getting mated is a helpmate
+            # — "stop defending" solves it — so that score saturates and
+            # gates nothing, and it measures a matchup the bot never
+            # meets in the product.
 
             # Pull the curated position set. Built once per trainer and
             # cached; building plays a few moves per opening through our
@@ -1433,6 +1461,10 @@ class Trainer:
                     self.config.eval_move_cap,
                     starting_state=position.state,
                     jester=self.config.jester_mode,
+                    temperature=(
+                        self.config.eval_temperature
+                        if self.config.jester_mode else 0.0
+                    ),
                 )
                 bucket = per_diff.setdefault(
                     position.difficulty, {"w": 0, "d": 0, "l": 0}

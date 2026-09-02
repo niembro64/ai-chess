@@ -98,6 +98,14 @@ class GameSlot:
     # None = both sides are the agent (normal self-play always; in
     # jester mode a None slot is a mirror jester-vs-jester game).
     agent_color: str | None = None
+    # Mirror games only: the color playing as the SPARRING PARTNER. Same
+    # net and same search as the agent, but its move is sampled at a
+    # sustained temperature instead of annealing to greedy, so it
+    # blunders. Two greedy loss-seekers never finish a game (neither
+    # will deliver the mate the other wants) — the sparring side is what
+    # makes the mirror decisive, and it doubles as a model of the human
+    # opponent, who is also trying to lose and also imperfect.
+    spar_color: str | None = None
     # First color that hit the resign threshold while sampled into the
     # truth-check holdout (resign_disabled_prob). The game plays on;
     # _finish_game compares the predicted loss against the actual
@@ -581,7 +589,23 @@ class SelfPlayConfig:
     # (dual-net routing). Required for non-mirror jester games.
     frozen_evaluator: "BatchedEvaluator | None" = None
     # Share of fresh slots that are agent-vs-agent mirror games.
+    #
+    # The mirror is the PRODUCT matchup: both sides want their own king
+    # mated, so a loss has to be forced against an opponent who refuses
+    # to cooperate (a *selfmate* in chess-problem terms). Playing the
+    # frozen winner instead is a *helpmate* — the opponent wants to mate
+    # you, so "stop defending" solves it — which is a different and much
+    # easier game than the one the bot actually ships into. Keep a small
+    # non-mirror share anyway: early on it is the only dense source of
+    # "this is what being mated looks like", and it keeps the net honest
+    # against a human who accidentally plays a strong winning move.
     agent_selfplay_prob: float = 0.25
+    # Move-selection temperature for the sparring side of a mirror game,
+    # applied for the WHOLE game (no annealing). >1 is flatter than
+    # visit-proportional. Only the played move is affected — the training
+    # target is the raw visit distribution either way, so the sparring
+    # side's plies stay honest examples.
+    spar_temperature: float = 1.0
     # Per-sample policy-loss weight applied to training examples from
     # TB-adjudicated games. In those games MCTS never found a forcing
     # line — Syzygy rescued the value label, but the move distribution
@@ -655,8 +679,17 @@ class SelfPlayEngine:
         slot = _make_game_slot(
             self.rng, self.config.random_start_prob, self.config.endgame_start_prob
         )
-        if self.config.invert_agent_selection and self.config.frozen_evaluator is not None:
-            if self.rng.random() >= self.config.agent_selfplay_prob:
+        if self.config.invert_agent_selection:
+            mirror = (
+                self.config.frozen_evaluator is None
+                or self.rng.random() < self.config.agent_selfplay_prob
+            )
+            if mirror:
+                # Mirror game: one side spars (sustained temperature) so
+                # the game can actually end. Which side is random, so the
+                # agent learns to force the loss from both seats.
+                slot.spar_color = "white" if self.rng.random() < 0.5 else "black"
+            else:
                 slot.agent_color = "white" if self.rng.random() < 0.5 else "black"
         return slot
 
@@ -664,7 +697,9 @@ class SelfPlayEngine:
         """Advance every active game by one move. Returns results for games that ended this step."""
         states = [g.state for g in self.games]
         temperatures = [
-            1.0 if g.move_count < self.config.temperature_threshold_plies else 0.0
+            self.config.spar_temperature
+            if g.spar_color is not None and g.state.currentTurn == g.spar_color
+            else (1.0 if g.move_count < self.config.temperature_threshold_plies else 0.0)
             for g in self.games
         ]
         jester = self.config.invert_agent_selection

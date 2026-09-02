@@ -412,12 +412,29 @@ def build_toy_config() -> TrainConfig:
 # Jester — the misère bot: full Sage architecture, inverted incentives.
 # ---------------------------------------------------------------------------
 #
-# Trains to LOSE. Search selection inverts at the jester's plies while
-# every value label stays truthful (chess_ai/mcts.py MCTSSearch). Games
-# mix jester-vs-frozen-Sage (dense loss signal) with jester-vs-jester
-# mirror games (losses must be FORCED against an opponent who refuses
-# to win). Runs on the Python MCTS path (inversion/dual-net are not in
-# the Rust search yet), single-process like Toy.
+# Trains to LOSE — specifically, to get its OWN king checkmated before
+# the opponent manages to get theirs checkmated. Search selection
+# inverts at the jester's plies while every value label stays truthful
+# (chess_ai/mcts.py MCTSSearch).
+#
+# The genre matters. Playing the frozen Sage is a HELPMATE: the
+# opponent wants to mate you, so "stop defending" solves it. Playing
+# another jester is a SELFMATE: the opponent refuses to mate you, so
+# you have to force it — and that is the game the shipped bot actually
+# plays, against a human who is also racing to be mated. Self-play is
+# therefore mostly mirror games, with a small Sage share kept for
+# bootstrap (early on it is the only dense source of "this is what
+# being mated looks like") and for robustness when a human accidentally
+# plays a strong winning move.
+#
+# Greedy mirror play never terminates — neither loss-seeker will
+# deliver the mate the other wants, so the game shuffles to a threefold
+# draw and teaches nothing. One side of every mirror game therefore
+# spars at a sustained temperature, which both restores the terminal
+# signal and models the imperfect human.
+#
+# Runs on the Python MCTS path (inversion/dual-net are not in the Rust
+# search yet), single-process like Toy.
 
 def build_jester_config() -> TrainConfig:
     cfg = build_config()
@@ -438,17 +455,22 @@ def build_jester_config() -> TrainConfig:
     cfg.target_gens = 40_000
     cfg.eval_every_gens = 2_000
     cfg.eval_mcts_sims = 96
-    # Jester-vs-Sage games end quickly once losing works; a long cap
-    # just pads the rare stubborn draw.
-    cfg.eval_move_cap = 300
+    # Mirror eval games are slower than the old vs-Sage ones: both sides
+    # are ducking the mate, so decisive lines take longer to appear.
+    cfg.eval_move_cap = 220
     cfg.archive_every_gens = 1_000
     # Resignation is meaningless in misère play: the jester's truthful
     # best-Q is *supposed* to be terrible, so the trigger would fire on
     # every healthy position. Disabled outright.
     cfg.resign_threshold = -2.0
     cfg.jester_mode = True
-    cfg.jester_selfplay_prob = 0.25
+    # Mostly mirror (the production matchup); the rest vs frozen Sage.
+    cfg.jester_selfplay_prob = 0.85
     cfg.jester_opponent_checkpoint = str(JESTER_OPPONENT_CKPT)
+    # τ=1 is visit-proportional — AlphaZero's own opening-play setting,
+    # sustained here for the whole game rather than annealed away.
+    cfg.jester_spar_temperature = 1.0
+    cfg.eval_temperature = 1.0
     return cfg
 
 
