@@ -351,8 +351,8 @@ const canJoin = computed(() => {
   /* Tighter type so the whole setup still fits a phone; the portraits
      stay large, since they are the thing you actually pick by. */
   .mt-face {
-    width: 50px;
-    height: 50px;
+    width: 62px;
+    height: 62px;
   }
   .mt-cell {
     padding: 8px 4px 7px;
@@ -475,7 +475,7 @@ const canJoin = computed(() => {
    what we ask of them, labelled with 90deg text down the left gutter. */
 .model-table {
   display: grid;
-  grid-template-columns: 18px 1fr 1fr;
+  grid-template-columns: 24px 1fr 1fr;
   grid-template-rows: auto 1fr 1fr;
   border: 1.5px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
@@ -484,12 +484,14 @@ const canJoin = computed(() => {
 }
 
 .mt-colhead {
-  padding: 6px 4px;
+  padding: 7px 4px;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 8.5px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.8px;
-  color: #94a3b8;
+  letter-spacing: 0.6px;
+  /* Unselected labels sit deliberately dim so the selected one reads as
+     the answer to "which cell am I on". */
+  color: #5b6678;
   text-align: center;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.04);
@@ -513,10 +515,10 @@ const canJoin = computed(() => {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   font-family: 'JetBrains Mono', monospace;
-  font-size: 8.5px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.8px;
-  color: #94a3b8;
+  letter-spacing: 0.6px;
+  color: #5b6678;
   white-space: nowrap;
 }
 
@@ -558,26 +560,35 @@ const canJoin = computed(() => {
 
 .mt-cell.m-sage,
 .mt-colhead.m-sage,
-.mt-rowhead.m-sage { --accent: #4ade80; --accent-bg: rgba(74, 222, 128, 0.16); }
+.mt-rowhead.m-sage {
+  --accent: #4ade80;
+  --accent-bright: #9df9bd;
+  --accent-bg: rgba(74, 222, 128, 0.16);
+}
 .mt-cell.m-jester,
 .mt-colhead.m-jester,
-.mt-rowhead.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
+.mt-rowhead.m-jester {
+  --accent: #c084fc;
+  --accent-bright: #e2c2ff;
+  --accent-bg: rgba(192, 132, 252, 0.16);
+}
 
 /* The axis labels light up for the selected cell, so the
    "trained to X, asked to Y" reading is visible at a glance. */
 .mt-colhead.on,
 .mt-rowhead.on span {
-  color: var(--accent);
+  color: var(--accent-bright);
+  font-weight: 800;
 }
 
 .mt-face {
-  width: 60px;
-  height: 60px;
+  width: 76px;
+  height: 76px;
 }
 
 .mt-name {
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 1px;
   text-transform: uppercase;
