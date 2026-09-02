@@ -116,6 +116,44 @@ export function positionKey(state: ChessGameState): string {
 // map with count 1 — it can itself be the repeated position (1.Nf3 Nf6
 // 2.Ng1 Ng8 brings it back). Used by the AI (which only receives a
 // snapshot); ChessServer maintains its copy incrementally instead.
+// --- Own-side placement (bot house rule) ------------------------------
+//
+// Just ONE colour's piece placement — no side to move, no castling, no
+// en passant. Bots are held to a stricter standard than the FIDE rules
+// bind a human to: a bot may never move its army back into an
+// arrangement it has already occupied, so it can never shuffle back and
+// forth even when the full position differs. Humans remain bound only
+// by the real rules.
+export function ownSideKey(state: ChessGameState, color: PieceColor): string {
+  const typeChar: Record<PieceType, string> = {
+    king: 'k', queen: 'q', rook: 'r', bishop: 'b', knight: 'n', pawn: 'p',
+  };
+  const parts: string[] = [];
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const p = state.board[r][f];
+      parts.push(p && p.color === color ? typeChar[p.type] : '.');
+    }
+  }
+  return parts.join('');
+}
+
+// Every arrangement `color`'s army has already occupied this game,
+// including the current one.
+export function buildOwnSideKeys(
+  state: ChessGameState,
+  color: PieceColor,
+): Set<string> {
+  const seen = new Set<string>();
+  let s = createInitialGameState();
+  seen.add(ownSideKey(s, color));
+  for (const move of state.moveHistory) {
+    s = applyMove(s, move);
+    seen.add(ownSideKey(s, color));
+  }
+  return seen;
+}
+
 export function buildPositionCounts(state: ChessGameState): Map<string, number> {
   const counts = new Map<string, number>();
   let s = createInitialGameState();

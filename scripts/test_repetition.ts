@@ -4,10 +4,12 @@
 
 import {
   applyMove,
+  buildOwnSideKeys,
   buildPositionCounts,
   createInitialGameState,
   getLegalMoves,
   isInsufficientMaterial,
+  ownSideKey,
   positionKey,
   posToAlgebraic,
 } from '../src/game/chess/ChessEngine';
@@ -151,51 +153,64 @@ console.log('isInsufficientMaterial:');
   check(!isInsufficientMaterial(kpk), 'K+P vs K = NOT insufficient');
 }
 
-// --- pickFreshMove (the AI house rule) -----------------------------------
+// --- pickFreshMove: the bot's own-army house rule ------------------------
 //
-// A bot may NEVER move into a board state the game has already seen —
-// even once. Only when every legal move repeats does the search's own
-// choice stand.
+// A bot may never move its OWN pieces back into an arrangement they
+// have already occupied — stricter than the threefold rule a human
+// plays under, and independent of what the opponent does. Only when
+// every legal move repeats does the top choice stand.
 
-console.log('pickFreshMove:');
+console.log('pickFreshMove (own-army rule):');
 {
   const state = createInitialGameState();
   state.status = 'active';
   const nf3 = uciMove(state, 'g1f3');
   const e4 = uciMove(state, 'e2e4');
-  const ranked = [
-    { move: nf3, visits: 300 },  // search's favorite
-    { move: e4, visits: 100 },
-  ];
-  const keyAfterNf3 = positionKey(applyMove(state, nf3));
+  const ranked = [{ move: nf3 }, { move: e4 }];
 
-  // Fresh board: the search's favorite plays.
+  // Nothing seen yet: the bot's first choice stands.
   check(
-    pickFreshMove(state, ranked, new Map()) === nf3,
-    'fresh position — search favorite plays',
+    pickFreshMove(state, ranked, new Set<string>(), 'white') === nf3,
+    'fresh arrangement — first choice plays',
   );
 
-  // Nf3's resulting position occurred ONCE already → even a second
-  // occurrence is forbidden for a bot; fall through to e4.
-  const counts1 = new Map([[keyAfterNf3, 1]]);
+  // The arrangement Nf3 would produce has already occurred: skip to e4.
+  const afterNf3 = ownSideKey(applyMove(state, nf3), 'white');
   check(
-    pickFreshMove(state, ranked, counts1) === e4,
-    'single prior occurrence vetoed — bots never repeat any state',
+    pickFreshMove(state, ranked, new Set([afterNf3]), 'white') === e4,
+    'own-army repeat vetoed, next choice plays',
   );
 
-  // Occurred twice → same veto.
-  const counts2 = new Map([[keyAfterNf3, 2]]);
+  // Only the MOVER's army counts — black's placement is irrelevant.
   check(
-    pickFreshMove(state, ranked, counts2) === e4,
-    'double prior occurrence vetoed',
+    ownSideKey(state, 'white') !== ownSideKey(state, 'black'),
+    'the two colours have distinct arrangement keys',
+  );
+  const blackKeyUnchanged =
+    ownSideKey(state, 'black') === ownSideKey(applyMove(state, nf3), 'black');
+  check(blackKeyUnchanged, "a white move leaves black's arrangement key alone");
+
+  // Every candidate repeats → forced, caller keeps its top choice.
+  const afterE4 = ownSideKey(applyMove(state, e4), 'white');
+  check(
+    pickFreshMove(state, ranked, new Set([afterNf3, afterE4]), 'white') === null,
+    'all candidates repeat → forced, caller falls back',
   );
 
-  // Every move repeats → forced; keep the search's choice.
-  const keyAfterE4 = positionKey(applyMove(state, e4));
-  const allRepeat = new Map([[keyAfterNf3, 1], [keyAfterE4, 1]]);
+  // A knight out and back repeats the starting arrangement, which the
+  // history set always contains — the shuffle this rule exists to stop.
+  const seen = buildOwnSideKeys(state, 'white');
+  let s2 = applyMove(state, nf3);
+  s2 = applyMove(s2, uciMove(s2, 'e7e5'));
+  const backAgain = uciMove(s2, 'f3g1');
+  const seenAfter = buildOwnSideKeys(s2, 'white');
   check(
-    pickFreshMove(state, ranked, allRepeat) === null,
-    'all moves repeat → forced, keep search choice',
+    seen.has(ownSideKey(state, 'white')),
+    'history includes the starting arrangement',
+  );
+  check(
+    pickFreshMove(s2, [{ move: backAgain }], seenAfter, 'white') === null,
+    'knight returning home is refused (its own army repeats)',
   );
 }
 

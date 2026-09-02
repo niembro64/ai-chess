@@ -56,8 +56,16 @@ const selIndex = ref<number | null>(null);
 // probability in each family maps to its darkest shade, the highest to
 // its brightest. Full dynamic range in both families, every position.
 
+// Legality by policy index, derived from the entry list.
+const legalByIndex = computed(() => {
+  const mask = new Uint8Array(4096);
+  for (const e of props.thought.entries) if (e.legal) mask[e.index] = 1;
+  return mask;
+});
+
 const policyStats = computed(() => {
-  const { rawPolicy, legalMask } = props.thought;
+  const { rawPolicy } = props.thought;
+  const legalMask = legalByIndex.value;
   let lMin = Infinity, lMax = -Infinity, iMin = Infinity, iMax = -Infinity;
   for (let i = 0; i < rawPolicy.length; i++) {
     const p = rawPolicy[i];
@@ -89,6 +97,18 @@ function cellColor(p: number, illegal: boolean): string {
 
 type SearchRow = { uci: string; index: number; p: number; legal: boolean };
 
+// The list shows the EFFECTIVE distribution the bot decided from —
+// the raw policy head at LOW effort, the search's visit shares at
+// MEDIUM/HIGH — ordered purely by probability with legal and illegal
+// interleaved. It looks the same whether the bot was asked for its
+// trained goal or the opposite; only which row is `chosen` changes.
+const searchRows = computed<SearchRow[]>(() => props.thought.entries);
+
+const illegalCount = computed(
+  () => props.thought.entries.reduce((n, e) => n + (e.legal ? 0 : 1), 0),
+);
+const legalCount = computed(() => props.thought.entries.length - illegalCount.value);
+
 function chipStyle(row: SearchRow): Record<string, string> {
   return { background: cellColor(row.p, !row.legal) };
 }
@@ -100,8 +120,7 @@ function chipStyle(row: SearchRow): Record<string, string> {
 // share.) Row ORDER still follows the bot's search ranking, so its pick
 // is row 1 even when a longer bar sits below it.
 function rowStyle(row: SearchRow): Record<string, string> {
-  const s = policyStats.value;
-  const pMax = Math.max(s.lMax, s.iMax) || 1;
+  const pMax = props.thought.entries[0]?.p || 1;
   const pct = Math.max(2, (row.p / pMax) * 100);
   return row.legal
     ? { background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` }
@@ -158,7 +177,7 @@ function describeIndex(idx: number): string {
   const name = (s: { r: number; f: number }) =>
     String.fromCharCode(97 + s.f) + String(8 - s.r);
   const p = props.thought.rawPolicy[idx];
-  const legal = props.thought.legalMask[idx] === 1;
+  const legal = legalByIndex.value[idx] === 1;
   return `${name(from)}→${name(to)} · ${(p * 100).toFixed(2)}% · ${legal ? 'legal' : 'illegal'}`;
 }
 
@@ -169,7 +188,8 @@ const selectionText = computed(() =>
 // --- policy grid data (display-ordered, fed to BoardGrid) --------------
 
 const policyColors = computed(() => {
-  const { rawPolicy, legalMask } = props.thought;
+  const { rawPolicy } = props.thought;
+  const legalMask = legalByIndex.value;
   const colors = new Array<string>(4096);
   for (let i = 0; i < 4096; i++) {
     colors[policyDisp(i)] = cellColor(rawPolicy[i], legalMask[i] === 0);
@@ -194,32 +214,6 @@ const ringDisp = computed(() =>
 // probability — highest first, or LOWEST first when the bot is asked
 // for the opposite of its trained goal — so the move it plays is
 // always row 1. Illegal cells follow, brightest first.
-
-function uciOf(netIndex: number): string {
-  const from = netToReal(Math.floor(netIndex / 64));
-  const to = netToReal(netIndex % 64);
-  const name = (s: { r: number; f: number }) =>
-    String.fromCharCode(97 + s.f) + String(8 - s.r);
-  return name(from) + name(to);
-}
-
-const searchRows = computed<SearchRow[]>(() => {
-  const { moves, rawPolicy, legalMask } = props.thought;
-  // `moves` already arrives visit-ranked, best first — keep that order.
-  const rows: SearchRow[] = moves.map(m => ({
-    uci: m.uci, index: m.index, p: rawPolicy[m.index], legal: true,
-  }));
-  const illegal: SearchRow[] = [];
-  for (let i = 0; i < rawPolicy.length; i++) {
-    if (!legalMask[i]) {
-      illegal.push({ uci: uciOf(i), index: i, p: rawPolicy[i], legal: false });
-    }
-  }
-  illegal.sort((a, b) => b.p - a.p);
-  return rows.concat(illegal);
-});
-
-const illegalCount = computed(() => searchRows.value.length - props.thought.moves.length);
 
 function rawPct(x: number): string {
   return `${(x * 100).toFixed(2)}%`;
@@ -355,7 +349,8 @@ function refresh(): void {
   // New thought → the selection resets to the search's top legal
   // choice; scroll the lists to wherever it landed in the probability
   // ordering (top when no legal moves remain).
-  selIndex.value = props.thought.moves[0]?.index ?? null;
+  selIndex.value =
+    props.thought.entries.find(e => e.uci === props.thought.chosen)?.index ?? null;
   nextTick(() => {
     updateLeaders();
     for (const list of [moveListEl.value, modalMovesEl.value]) {
@@ -478,13 +473,12 @@ onBeforeUnmount(() => {
             <span class="tm-move-share">{{ rawPct(m.p) }}</span>
           </div>
         </div>
-        <div v-if="thought.moves.length === 0" class="tm-gameover">
+        <div v-if="legalCount === 0" class="tm-gameover">
           game over — no legal moves
         </div>
         <div v-else class="tm-caption">
-          {{ thought.moves.length }} legal moves in the bot's own order
-          (its pick is first), then {{ illegalCount }} illegal ·
-          click one to point at its policy cell
+          every move by predicted probability — {{ legalCount }} legal,
+          {{ illegalCount }} illegal · click one to point at its policy cell
         </div>
       </section>
 

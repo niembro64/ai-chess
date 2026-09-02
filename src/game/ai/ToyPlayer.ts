@@ -7,34 +7,37 @@
 
 import { runMCTSAsync } from './MCTS';
 import { ToyNet, encodeToyBoard, isToyWeights, type ToySerializedWeights } from './ToyNet';
-import { moveToIndex } from './ChessNet';
-import { pickFreshMove, rankMovesByPolicy } from './AIPlayer';
 import {
-  buildPositionCounts,
+  candidateMoves,
+  pickFreshMove,
+  rankByDistribution,
+  uciForIndex,
+} from './AIPlayer';
+import {
+  buildOwnSideKeys,
   getLegalMoves,
   posToAlgebraic,
 } from '@/game/chess/ChessEngine';
-import type { ChessGameState, Move } from '@/types/chess';
+import type { ChessGameState, Move, PieceColor } from '@/types/chess';
 
 export type ToyThought = {
   // The exact input tensor (8*8*6 flat, mover perspective, ±1).
   planes: Float32Array;
-  // Net's instant opinion: softmax over all 4096, BEFORE legal masking.
+  // The EFFECTIVE distribution the bot decided from: the raw policy
+  // head at LOW effort, the search's visit shares at MEDIUM/HIGH.
+  distribution: Float32Array;
+  // The network's raw policy head, always — this is what the POLICY
+  // HEAD grid paints, so that visual stays a picture of the net itself.
   rawPolicy: Float32Array;
-  // 1 = legal in this position (by policy index), for the illegal-mass tint.
-  legalMask: Uint8Array;
-  // Scalar value in [-1, 1] from the mover's (Toy's) perspective.
+  // Every policy slot, legal and illegal interleaved, ordered by
+  // `distribution` (highest first). Identical whether the bot was asked
+  // for its trained goal or the opposite; only `chosen` changes.
+  entries: { uci: string; index: number; p: number; legal: boolean }[];
+  // Scalar value in [-1, 1] from the mover's perspective.
   value: number;
   rootValue: number;
   chosen: string;                                   // e.g. "e7e5"
-  // EVERY legal move in the bot's own ranking — highest policy
-  // probability first, or LOWEST first when it is asked for the
-  // opposite of its trained goal, so the move it plays is always the
-  // first entry. `index` is the move's slot in the 4096 policy vector,
-  // which the panel uses to color each row like its policy-grid cell
-  // and to anchor the leader line.
-  moves: { uci: string; index: number }[];
-  // True when the tensor is in black's rotated frame (Toy plays black).
+  // True when the tensor is in black's rotated frame.
   blackToMove: boolean;
 };
 
@@ -93,18 +96,22 @@ export class ToyPlayer {
     const planes = encodeToyBoard(state);
     const [rootEval] = this.net.predictBatch([planes]);
     const isWhite = state.currentTurn === 'white';
-    const legalMask = new Uint8Array(4096);
-    for (const m of getLegalMoves(state)) {
-      legalMask[moveToIndex(m, isWhite)] = 1; // stays all-zero at mate
-    }
+    const entries = rankByDistribution(rootEval.policy, getLegalMoves(state), isWhite);
     this.onThought({
       planes,
+      distribution: rootEval.policy,
       rawPolicy: rootEval.policy,
-      legalMask,
+      entries: entries.map(e => ({
+        uci: e.move
+          ? posToAlgebraic(e.move.from) + posToAlgebraic(e.move.to)
+          : uciForIndex(e.index, isWhite),
+        index: e.index,
+        p: e.p,
+        legal: e.legal,
+      })),
       value: rootEval.value,
       rootValue: rootEval.value,
       chosen: '',
-      moves: [],
       blackToMove: !isWhite,
     });
   }
@@ -112,47 +119,43 @@ export class ToyPlayer {
   async getMove(state: ChessGameState): Promise<Move> {
     const planes = encodeToyBoard(state);
     const [rootEval] = this.net.predictBatch([planes]);
-
     const isWhite = state.currentTurn === 'white';
+    const color: PieceColor = isWhite ? 'white' : 'black';
     const legal = getLegalMoves(state);
 
-    // LOW effort plays straight off the policy head; MEDIUM and HIGH
-    // hand the decision to the search (see AIPlayer.getMove).
-    let ranked: { move: Move; index: number }[];
+    let distribution = rootEval.policy;
     let rootValue = rootEval.value;
     if (this.sims > 0) {
       const result = await runMCTSAsync(state, this.net, this.sims, {
         encode: encodeToyBoard,
-        invertForTurn: this.goalInverted ? state.currentTurn : undefined,
-        flattenRootPriors: this.goalInverted,
         onProgress: (done, total) => this.onProgress?.(done, total),
       });
+      distribution = result.policy;
       rootValue = result.rootValue;
-      ranked = result.rankedMoves.map(r => ({
-        move: r.move,
-        index: moveToIndex(r.move, isWhite),
-      }));
-    } else {
-      ranked = rankMovesByPolicy(legal, rootEval.policy, isWhite, this.goalInverted);
     }
 
-    const counts = buildPositionCounts(state);
-    const move = pickFreshMove(state, ranked, counts) ?? ranked[0].move;
+    const entries = rankByDistribution(distribution, legal, isWhite);
+    const candidates = candidateMoves(entries, this.goalInverted);
+    const seenOwnSide = buildOwnSideKeys(state, color);
+    const move =
+      pickFreshMove(state, candidates, seenOwnSide, color) ?? candidates[0].move;
 
     if (this.onThought) {
-      const legalMask = new Uint8Array(4096);
-      for (const m of legal) legalMask[moveToIndex(m, isWhite)] = 1;
       this.onThought({
         planes,
+        distribution,
         rawPolicy: rootEval.policy,
-        legalMask,
+        entries: entries.map(e => ({
+          uci: e.move
+            ? posToAlgebraic(e.move.from) + posToAlgebraic(e.move.to)
+            : uciForIndex(e.index, isWhite),
+          index: e.index,
+          p: e.p,
+          legal: e.legal,
+        })),
         value: rootEval.value,
         rootValue,
         chosen: posToAlgebraic(move.from) + posToAlgebraic(move.to),
-        moves: ranked.map(r => ({
-          uci: posToAlgebraic(r.move.from) + posToAlgebraic(r.move.to),
-          index: r.index,
-        })),
         blackToMove: !isWhite,
       });
     }
