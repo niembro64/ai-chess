@@ -163,6 +163,7 @@ const canJoin = computed(() => {
             <div class="setup-title">AI Model</div>
             <div class="model-table">
               <div class="mt-corner"></div>
+              <div class="mt-ground" aria-hidden="true"></div>
               <div
                 v-for="m in GRID_MODELS"
                 :key="`h-${m}`"
@@ -201,7 +202,7 @@ const canJoin = computed(() => {
               <span class="mt-toy-sub">tiny net · watch it think</span>
             </button>
 
-            <div class="setup-title">You Play</div>
+            <div class="setup-title">You Play As</div>
             <div class="color-row">
               <button
                 v-for="c in (['white', 'black'] as const)"
@@ -483,6 +484,17 @@ const canJoin = computed(() => {
   gap: 4px;
 }
 
+/* A single soft ground behind the CELLS only, so the four options read
+   as one control while the headers and gutter stay transparent. Sits
+   under the cells, which are later in the grid's paint order. */
+.mt-ground {
+  grid-column: 2 / span 2;
+  grid-row: 2 / span 2;
+  margin: -4px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
 .mt-colhead {
   padding: 7px 4px;
   font-family: 'JetBrains Mono', monospace;
@@ -636,7 +648,10 @@ const canJoin = computed(() => {
 .color-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .color-cell {
@@ -672,6 +687,9 @@ const canJoin = computed(() => {
 .effort-seg {
   display: flex;
   gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .effort-seg button {
