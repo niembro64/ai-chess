@@ -206,22 +206,32 @@ export class AIPlayer {
     const rootEval = this.net.predict(state);
     const isWhite = state.currentTurn === 'white';
     const legal = getLegalMoves(state);
-    const ranked = rankMovesByPolicy(
-      legal, rootEval.policy, isWhite, this.goalInverted,
-    );
 
-    // The search no longer decides the move — the policy extreme above
-    // does — but it still runs to drive the thinking bar and to give
-    // the panel a searched root value rather than a raw one.
-    const result = await runMCTSAsync(state, this.net, this.sims, {
-      invertForTurn: this.seeksLoss ? state.currentTurn : undefined,
-      flattenRootPriors: this.flattenRootPriors,
-      onProgress: (done, total) => this.onProgress?.(done, total),
-    });
+    // LOW effort (sims = 0) plays straight off the policy head — the
+    // extreme of its own prediction, no lookahead. MEDIUM and HIGH run
+    // the search and take ITS ranking; for an inverted goal the search
+    // is itself inverted, so its top choice is a planned loss rather
+    // than merely the worst-rated move.
+    let ranked: { move: Move; index: number }[];
+    let rootValue = rootEval.value;
+    if (this.sims > 0) {
+      const result = await runMCTSAsync(state, this.net, this.sims, {
+        invertForTurn: this.seeksLoss ? state.currentTurn : undefined,
+        flattenRootPriors: this.flattenRootPriors,
+        onProgress: (done, total) => this.onProgress?.(done, total),
+      });
+      rootValue = result.rootValue;
+      ranked = result.rankedMoves.map(r => ({
+        move: r.move,
+        index: moveToIndex(r.move, isWhite),
+      }));
+    } else {
+      ranked = rankMovesByPolicy(legal, rootEval.policy, isWhite, this.goalInverted);
+    }
 
     // House rule: never move into a board state the game has already
     // seen. Walks down the ranking; only a fully forced repetition
-    // falls back to the extreme itself.
+    // falls back to the top choice itself.
     const counts = buildPositionCounts(state);
     const move = pickFreshMove(state, ranked, counts) ?? ranked[0].move;
 
@@ -233,7 +243,7 @@ export class AIPlayer {
         rawPolicy: rootEval.policy,
         legalMask,
         value: rootEval.value,
-        rootValue: result.rootValue,
+        rootValue,
         chosen: posToAlgebraic(move.from) + posToAlgebraic(move.to),
         moves: ranked.map(r => ({
           uci: posToAlgebraic(r.move.from) + posToAlgebraic(r.move.to),

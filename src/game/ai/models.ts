@@ -38,34 +38,37 @@ export const MODELS: Record<ModelId, {
 
 // --- Effort ------------------------------------------------------------
 //
-// EFFORT is the difficulty dial: how much SEARCH the bot runs before
-// moving. Search is where most of the playing strength lives — a single
-// forward pass is only the network's instinct, and it can't verify
-// tactics or use the value head at all (the value of the current
-// position is identical for every candidate move; only lookahead makes
-// it discriminate). So LOW sees barely any consequences while HIGH runs
-// the model's full search.
+// EFFORT is the difficulty dial, and it buys SEARCH — which is where
+// most of a network's playing strength lives. Published numbers are
+// stark: AlphaGo Zero's raw network (one forward pass, argmax) rates
+// ~3,000 Elo against ~5,200 for the same weights with MCTS, and Leela
+// at 1 node/move sits just above 2,300 while a 128x10 net at 1,500
+// nodes plays ~3,050. Search is worth hundreds to thousands of Elo, so
+// the ladder runs from no search at all to the model's full budget:
 //
-// The bot always plays the best move its search found — there is no
-// randomness knob. Every level keeps SOME search, deliberately: the
-// goal-inversion modes need a tree to plan a loss in. Zero-sim
-// inversion would just take the argmin of the prior, which shuffles
-// aimlessly instead of planning.
+//   LOW     the policy head alone — one forward pass, no lookahead
+//   MEDIUM  100 simulations
+//   HIGH    the model's full budget (400 for Sage and Jester)
+//
+// At LOW the move is the EXTREME of the policy head (highest
+// probability, or lowest when the bot is asked for the opposite of its
+// trained goal). At MEDIUM and HIGH the search decides, and for an
+// inverted goal the search is itself inverted, so its top choice is
+// the best *planned* loss rather than merely the worst-rated move.
 
 export type Effort = 'low' | 'medium' | 'high';
 
-export const EFFORT_LEVELS: Record<Effort, {
-  label: string;
-  // Fraction of the model's full search budget.
-  simsFraction: number;
-}> = {
-  low: { label: 'Low', simsFraction: 0.05 },
-  medium: { label: 'Medium', simsFraction: 0.2 },
-  high: { label: 'High', simsFraction: 1 },
+export const EFFORT_LEVELS: Record<Effort, { label: string; sims: number | null }> = {
+  // null = the model's own full budget.
+  low: { label: 'Low', sims: 0 },
+  medium: { label: 'Medium', sims: 100 },
+  high: { label: 'High', sims: null },
 };
 
 export function effortSims(id: ModelId, effort: Effort): number {
-  return Math.max(8, Math.round(MODELS[id].sims * EFFORT_LEVELS[effort].simsFraction));
+  const sims = EFFORT_LEVELS[effort].sims;
+  // 0 means "no search at all" — the policy head plays directly.
+  return sims === null ? MODELS[id].sims : Math.min(sims, MODELS[id].sims);
 }
 
 // --- Piece tints -------------------------------------------------------

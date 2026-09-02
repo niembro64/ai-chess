@@ -115,18 +115,26 @@ export class ToyPlayer {
 
     const isWhite = state.currentTurn === 'white';
     const legal = getLegalMoves(state);
-    const ranked = rankMovesByPolicy(
-      legal, rootEval.policy, isWhite, this.goalInverted,
-    );
 
-    // Search still runs for the thinking bar and the root value; the
-    // move itself is the policy extreme above.
-    const result = await runMCTSAsync(state, this.net, this.sims, {
-      encode: encodeToyBoard,
-      invertForTurn: this.goalInverted ? state.currentTurn : undefined,
-      flattenRootPriors: this.goalInverted,
-      onProgress: (done, total) => this.onProgress?.(done, total),
-    });
+    // LOW effort plays straight off the policy head; MEDIUM and HIGH
+    // hand the decision to the search (see AIPlayer.getMove).
+    let ranked: { move: Move; index: number }[];
+    let rootValue = rootEval.value;
+    if (this.sims > 0) {
+      const result = await runMCTSAsync(state, this.net, this.sims, {
+        encode: encodeToyBoard,
+        invertForTurn: this.goalInverted ? state.currentTurn : undefined,
+        flattenRootPriors: this.goalInverted,
+        onProgress: (done, total) => this.onProgress?.(done, total),
+      });
+      rootValue = result.rootValue;
+      ranked = result.rankedMoves.map(r => ({
+        move: r.move,
+        index: moveToIndex(r.move, isWhite),
+      }));
+    } else {
+      ranked = rankMovesByPolicy(legal, rootEval.policy, isWhite, this.goalInverted);
+    }
 
     const counts = buildPositionCounts(state);
     const move = pickFreshMove(state, ranked, counts) ?? ranked[0].move;
@@ -139,7 +147,7 @@ export class ToyPlayer {
         rawPolicy: rootEval.policy,
         legalMask,
         value: rootEval.value,
-        rootValue: result.rootValue,
+        rootValue,
         chosen: posToAlgebraic(move.from) + posToAlgebraic(move.to),
         moves: ranked.map(r => ({
           uci: posToAlgebraic(r.move.from) + posToAlgebraic(r.move.to),

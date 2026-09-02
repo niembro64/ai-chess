@@ -222,9 +222,10 @@ const canJoin = computed(() => {
               >{{ lvl.label }}</button>
             </div>
             <p class="setup-explain">
-              Effort is how much the model actually thinks before moving:
-              at <b>Low</b> it barely looks ahead, at <b>High</b> it runs its
-              full search. It always plays the best move it found.
+              Effort buys search, which is where most of a network's
+              strength lives. <b>Low</b> plays straight off the policy head
+              with no lookahead; <b>Medium</b> searches 100 positions and
+              <b>High</b> 400. It always plays the best move it found.
             </p>
 
             <button class="lobby-btn start-btn" @click="startBot">
