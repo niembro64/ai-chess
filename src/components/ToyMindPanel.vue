@@ -93,22 +93,19 @@ function chipStyle(row: SearchRow): Record<string, string> {
   return { background: cellColor(row.p, !row.legal) };
 }
 
-// Bar behind each SEARCH row, matching how the list is ordered: legal
-// rows scale by SEARCH SHARE (so the bot's pick has the longest bar and
-// they shorten down the list), illegal rows by raw prior.
+// Bar behind each SEARCH row is the SAME number the row prints: the
+// network's raw output probability for that move, scaled against the
+// brightest cell in the position. (They used to disagree — the text
+// showed the probability while legal rows' bars showed search visit
+// share.) Row ORDER still follows the bot's search ranking, so its pick
+// is row 1 even when a longer bar sits below it.
 function rowStyle(row: SearchRow): Record<string, string> {
-  if (row.legal) {
-    const top = props.thought.moves[0]?.share || 1;
-    const pct = Math.max(2, (row.share / top) * 100);
-    return {
-      background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
-    };
-  }
-  const iMax = policyStats.value.iMax || 1;
-  const pct = Math.max(2, (row.p / iMax) * 100);
-  return {
-    background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)`,
-  };
+  const s = policyStats.value;
+  const pMax = Math.max(s.lMax, s.iMax) || 1;
+  const pct = Math.max(2, (row.p / pMax) * 100);
+  return row.legal
+    ? { background: `linear-gradient(90deg, rgba(94, 234, 212, 0.22) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` }
+    : { background: `linear-gradient(90deg, rgba(248, 90, 90, 0.16) ${pct}%, rgba(255, 255, 255, 0.03) ${pct}%)` };
 }
 
 function selectIndex(idx: number): void {
