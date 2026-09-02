@@ -193,6 +193,9 @@ function stopProgress(): void {
   smoothProgress.value = 0;
 }
 const botModelId = ref<ModelId | null>(null);
+// True when the bot plays the LOWEST-probability legal move — the panel
+// uses it to decide which end of the list to scroll the played move to.
+const botPicksLowest = ref(false);
 // Toy's latest thought record, rendered by the Toy Mind panel.
 const toyThought = ref<ToyThought | null>(null);
 // Both bots emit thoughts now — the panel shows for any bot game.
@@ -434,6 +437,7 @@ async function handlePlayBot(
   }
 
   botModelId.value = model;
+  botPicksLowest.value = opts.goalInverted;
   toyThought.value = null;
   playingVsBot.value = true;
   networkRole.value = null;
@@ -778,6 +782,7 @@ onUnmounted(() => {
         :thought="toyThought!"
         :flipped="localColor === 'black'"
         :bot-name="botModelId ? MODELS[botModelId].name : 'Bot'"
+        :picks-lowest="botPicksLowest"
         class="toy-mind-row"
       />
       </div>

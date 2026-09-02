@@ -26,7 +26,13 @@ import { TOY_CHANNEL_NAMES, TOY_NUM_PLANES } from '@/game/ai/ToyNet';
 // `flipped` mirrors the game board's orientation: when the human plays
 // black the board renders 180° rotated, and the POLICY HEAD follows so
 // both boards read the same way (h1 top-left, your pieces at bottom).
-const props = defineProps<{ thought: ToyThought; flipped?: boolean; botName?: string }>();
+const props = defineProps<{
+  thought: ToyThought;
+  flipped?: boolean;
+  botName?: string;
+  // True when the bot plays the LOWEST-probability legal move.
+  picksLowest?: boolean;
+}>();
 
 const bodyEl = ref<HTMLDivElement | null>(null);
 const gridRef = ref<InstanceType<typeof BoardGrid> | null>(null);
@@ -353,7 +359,12 @@ function refresh(): void {
     for (const list of [moveListEl.value, modalMovesEl.value]) {
       if (!list) continue;
       const sel = list.querySelector('.tm-move.selected');
-      if (sel) sel.scrollIntoView({ block: 'nearest' });
+      // Park the played row where its NEIGHBOURS are the interesting
+      // ones. Picking the highest-probability move, everything below it
+      // is what it passed over, so it goes to the top. Picking the
+      // LOWEST, the moves worth seeing are the more probable ones it
+      // rejected — all above it — so it goes to the bottom.
+      if (sel) sel.scrollIntoView({ block: props.picksLowest ? 'end' : 'start' });
       else list.scrollTop = 0;
     }
   });
