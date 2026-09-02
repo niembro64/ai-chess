@@ -85,7 +85,13 @@ export function rankByDistribution(
     const move = byIndex.get(index) ?? null;
     entries.push({ move, index, p: distribution[index], legal: move !== null });
   }
-  entries.sort((a, b) => b.p - a.p);
+  // The index tie-break is load-bearing: at 100 simulations spread
+  // over ~30 moves several moves routinely share an identical visit
+  // share, and an unspecified tie order would let the played move sit
+  // below a row holding the same probability. Selection reads this
+  // same array (see candidateMoves), so display and choice cannot
+  // disagree.
+  entries.sort((a, b) => b.p - a.p || a.index - b.index);
   return entries;
 }
 
