@@ -163,11 +163,19 @@ const canJoin = computed(() => {
             <div class="setup-title">AI Model</div>
             <div class="model-table">
               <div class="mt-corner"></div>
-              <div v-for="m in GRID_MODELS" :key="`h-${m}`" class="mt-colhead">
+              <div
+                v-for="m in GRID_MODELS"
+                :key="`h-${m}`"
+                class="mt-colhead"
+                :class="[`m-${m}`, { on: pickedModel === m }]"
+              >
                 TRAINED TO {{ goalLabel(MODELS[m].trainedGoal) }}
               </div>
               <template v-for="asked in GRID_ASKED" :key="`r-${asked}`">
-                <div class="mt-rowhead"><span>ASKED TO {{ goalLabel(asked) }}</span></div>
+                <div
+                  class="mt-rowhead"
+                  :class="[`m-${pickedModel}`, { on: askedGoal === asked }]"
+                ><span>ASKED TO {{ goalLabel(asked) }}</span></div>
                 <button
                   v-for="m in GRID_MODELS"
                   :key="`${m}-${asked}`"
@@ -212,7 +220,7 @@ const canJoin = computed(() => {
               </button>
             </div>
 
-            <div class="setup-title">Model Effort</div>
+            <div class="setup-title">AI Model Effort</div>
             <div class="effort-seg">
               <button
                 v-for="(lvl, key) in EFFORT_LEVELS"
@@ -221,12 +229,6 @@ const canJoin = computed(() => {
                 @click="effort = key as Effort"
               >{{ lvl.label }}</button>
             </div>
-            <p class="setup-explain">
-              Effort buys search, which is where most of a network's
-              strength lives. <b>Low</b> plays straight off the policy head
-              with no lookahead; <b>Medium</b> searches 100 positions and
-              <b>High</b> 400. It always plays the best move it found.
-            </p>
 
             <button class="lobby-btn start-btn" @click="startBot">
               Play {{ MODELS[pickedModel].name }}
@@ -554,8 +556,19 @@ const canJoin = computed(() => {
   box-shadow: inset 0 0 0 1.5px var(--accent, #5ae3d8);
 }
 
-.mt-cell.m-sage { --accent: #4ade80; --accent-bg: rgba(74, 222, 128, 0.16); }
-.mt-cell.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
+.mt-cell.m-sage,
+.mt-colhead.m-sage,
+.mt-rowhead.m-sage { --accent: #4ade80; --accent-bg: rgba(74, 222, 128, 0.16); }
+.mt-cell.m-jester,
+.mt-colhead.m-jester,
+.mt-rowhead.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
+
+/* The axis labels light up for the selected cell, so the
+   "trained to X, asked to Y" reading is visible at a glance. */
+.mt-colhead.on,
+.mt-rowhead.on span {
+  color: var(--accent);
+}
 
 .mt-face {
   width: 60px;
