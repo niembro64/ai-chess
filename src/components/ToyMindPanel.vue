@@ -87,7 +87,7 @@ function cellColor(p: number, illegal: boolean): string {
     : `rgba(94, 234, 212, ${a})`;
 }
 
-type SearchRow = { uci: string; index: number; share: number; p: number; legal: boolean };
+type SearchRow = { uci: string; index: number; p: number; legal: boolean };
 
 function chipStyle(row: SearchRow): Record<string, string> {
   return { background: cellColor(row.p, !row.legal) };
@@ -190,15 +190,10 @@ const ringDisp = computed(() =>
 
 // --- SEARCH rows: the whole policy, colored by legality ----------------
 //
-// Ordered THE WAY THE BOT DECIDES: legal moves by search preference
-// (visit count) so the move it actually plays is always row 1, then
-// every illegal move by raw prior. Sorting the legal moves by prior
-// instead made the played move show up as row 2 or 3 whenever search
-// overruled the network's first instinct — which is most of the point
-// of running a search.
-//
-// For a goal-inverted bot the search prefers the moves the network
-// rates WORST, so row 1 is a low-probability move by design.
+// Ordered THE WAY THE BOT DECIDES: legal moves by the net's own output
+// probability — highest first, or LOWEST first when the bot is asked
+// for the opposite of its trained goal — so the move it plays is
+// always row 1. Illegal cells follow, brightest first.
 
 function uciOf(netIndex: number): string {
   const from = netToReal(Math.floor(netIndex / 64));
@@ -212,12 +207,12 @@ const searchRows = computed<SearchRow[]>(() => {
   const { moves, rawPolicy, legalMask } = props.thought;
   // `moves` already arrives visit-ranked, best first — keep that order.
   const rows: SearchRow[] = moves.map(m => ({
-    uci: m.uci, index: m.index, share: m.share, p: rawPolicy[m.index], legal: true,
+    uci: m.uci, index: m.index, p: rawPolicy[m.index], legal: true,
   }));
   const illegal: SearchRow[] = [];
   for (let i = 0; i < rawPolicy.length; i++) {
     if (!legalMask[i]) {
-      illegal.push({ uci: uciOf(i), index: i, share: 0, p: rawPolicy[i], legal: false });
+      illegal.push({ uci: uciOf(i), index: i, p: rawPolicy[i], legal: false });
     }
   }
   illegal.sort((a, b) => b.p - a.p);
@@ -488,8 +483,8 @@ onBeforeUnmount(() => {
         </div>
         <div v-else class="tm-caption">
           {{ thought.moves.length }} legal moves in the bot's own order
-          (its pick is first), then {{ illegalCount }} illegal by
-          probability · click one to point at its policy cell
+          (its pick is first), then {{ illegalCount }} illegal ·
+          click one to point at its policy cell
         </div>
       </section>
 

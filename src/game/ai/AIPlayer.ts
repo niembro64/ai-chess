@@ -32,11 +32,11 @@ import type { ChessGameState, Move } from '@/types/chess';
 // whose resulting position is FRESH. Only when every legal move
 // repeats (forced) does the search's own choice stand.
 
-// Pick the best-ranked move that reaches a never-seen position, or
-// null (forced — keep the search's choice). Exported for tests.
+// Pick the first move in the ranking that reaches a never-seen
+// position, or null (every move repeats — forced). Exported for tests.
 export function pickFreshMove(
   state: ChessGameState,
-  rankedMoves: { move: Move; visits: number }[],
+  rankedMoves: { move: Move }[],
   positionCounts: Map<string, number>,
 ): Move | null {
   if (rankedMoves.length === 0) return null;
@@ -45,6 +45,36 @@ export function pickFreshMove(
     if ((positionCounts.get(key) ?? 0) === 0) return move;
   }
   return null;
+}
+
+// --- Move ranking ------------------------------------------------------
+//
+// The bot always plays an EXTREME of its own policy head: the highest-
+// probability legal move when it is pursuing the goal its weights were
+// trained for, and the LOWEST-probability legal move when it is asked
+// for the opposite. Jester trained to lose therefore plays its top
+// prediction (which is already a losing move — it puts ~69% on g2g4
+// from the start position), while Sage asked to lose plays its bottom
+// one. Selecting a middling probability is never wanted.
+//
+// Ordering the display by this same ranking is what keeps the chosen
+// move at row 1 of the SEARCH list with the bar lengths agreeing.
+export function rankMovesByPolicy(
+  legalMoves: Move[],
+  policy: Float32Array,
+  isWhite: boolean,
+  lowestFirst: boolean,
+): { move: Move; index: number; p: number }[] {
+  const seen = new Set<number>();
+  const ranked: { move: Move; index: number; p: number }[] = [];
+  for (const move of legalMoves) {
+    const index = moveToIndex(move, isWhite);
+    if (seen.has(index)) continue;   // underpromotions collapse
+    seen.add(index);
+    ranked.push({ move, index, p: policy[index] ?? 0 });
+  }
+  ranked.sort((a, b) => (lowestFirst ? a.p - b.p : b.p - a.p));
+  return ranked;
 }
 
 // Figure out the ChessNet architecture from the weight tensor shapes so we
@@ -109,6 +139,9 @@ export class AIPlayer {
   // the inference mode) is to lose — drives the misère search flip.
   private seeksLoss: boolean;
   private flattenRootPriors: boolean;
+  // True when we are asking the OPPOSITE of what the weights learned,
+  // which is exactly when the lowest-probability move is wanted.
+  private goalInverted: boolean;
   private onProgress: ((completed: number, total: number) => void) | null;
 
   private constructor(
@@ -124,6 +157,7 @@ export class AIPlayer {
     const inverted = options.goalInverted ?? false;
     this.seeksLoss = trainedToLose !== inverted;
     this.flattenRootPriors = inverted;
+    this.goalInverted = inverted;
     this.onProgress = options.onProgress ?? null;
   }
 
@@ -155,7 +189,6 @@ export class AIPlayer {
     this.onThought({
       planes: encodeToyBoard(state),
       rawPolicy: rootEval.policy,
-      visitPolicy: new Float32Array(4096),
       legalMask,
       value: rootEval.value,
       rootValue: rootEval.value,
@@ -170,37 +203,41 @@ export class AIPlayer {
   // After the search, the repetition veto may bump the choice down the
   // visit ranking (see pickNonRepeatingMove).
   async getMove(state: ChessGameState): Promise<Move> {
+    const rootEval = this.net.predict(state);
+    const isWhite = state.currentTurn === 'white';
+    const legal = getLegalMoves(state);
+    const ranked = rankMovesByPolicy(
+      legal, rootEval.policy, isWhite, this.goalInverted,
+    );
+
+    // The search no longer decides the move — the policy extreme above
+    // does — but it still runs to drive the thinking bar and to give
+    // the panel a searched root value rather than a raw one.
     const result = await runMCTSAsync(state, this.net, this.sims, {
       invertForTurn: this.seeksLoss ? state.currentTurn : undefined,
       flattenRootPriors: this.flattenRootPriors,
       onProgress: (done, total) => this.onProgress?.(done, total),
     });
+
+    // House rule: never move into a board state the game has already
+    // seen. Walks down the ranking; only a fully forced repetition
+    // falls back to the extreme itself.
     const counts = buildPositionCounts(state);
-    // House rule: bots never repeat a prior board state (see
-    // pickFreshMove) — regardless of goal direction or effort.
-    const vetoed = pickFreshMove(state, result.rankedMoves, counts);
-    const move = vetoed ?? result.move;
+    const move = pickFreshMove(state, ranked, counts) ?? ranked[0].move;
 
     if (this.onThought) {
-      const rootEval = this.net.predict(state);
-      const isWhite = state.currentTurn === 'white';
       const legalMask = new Uint8Array(4096);
-      for (const m of getLegalMoves(state)) {
-        legalMask[moveToIndex(m, isWhite)] = 1;
-      }
-      const totalVisits = result.rankedMoves.reduce((s, r) => s + r.visits, 0) || 1;
+      for (const m of legal) legalMask[moveToIndex(m, isWhite)] = 1;
       this.onThought({
         planes: encodeToyBoard(state),
         rawPolicy: rootEval.policy,
-        visitPolicy: result.policy,
         legalMask,
         value: rootEval.value,
         rootValue: result.rootValue,
         chosen: posToAlgebraic(move.from) + posToAlgebraic(move.to),
-        moves: result.rankedMoves.map(r => ({
+        moves: ranked.map(r => ({
           uci: posToAlgebraic(r.move.from) + posToAlgebraic(r.move.to),
-          share: r.visits / totalVisits,
-          index: moveToIndex(r.move, isWhite),
+          index: r.index,
         })),
         blackToMove: !isWhite,
       });

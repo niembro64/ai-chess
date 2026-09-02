@@ -9,7 +9,6 @@ export type ModelId = 'sage' | 'toy' | 'jester';
 
 export const MODELS: Record<ModelId, {
   name: string;
-  tagline: string;
   file: string;
   sims: number;
   // What the net was TRAINED to want. The lobby's GOAL INVERTED mode
@@ -19,21 +18,18 @@ export const MODELS: Record<ModelId, {
 }> = {
   sage: {
     name: 'Sage',
-    tagline: 'Trained to checkmate opponent',
     file: 'models/sage.json',
     sims: 400,
     trainedGoal: 'win',
   },
   toy: {
     name: 'Toy',
-    tagline: 'Trained to checkmate opponent — watch it think',
     file: 'models/toy.json',
     sims: 128,
     trainedGoal: 'win',
   },
   jester: {
     name: 'Jester',
-    tagline: 'Trained to checkmate itself',
     file: 'models/jester.json',
     sims: 400,
     trainedGoal: 'lose',

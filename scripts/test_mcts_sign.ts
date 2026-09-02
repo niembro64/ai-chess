@@ -83,7 +83,7 @@ console.log(
 
 {
   const jesterSearch = new MCTSSearch(state, undefined, 'black');
-  jesterSearch.initRoot(uniformPolicy, 0, false, true);
+  jesterSearch.initRoot(uniformPolicy, 0, true);
   for (let sim = 0; sim < NUM_SIMS; sim++) {
     if (jesterSearch.selectLeaf() !== null) jesterSearch.supplyEval(uniformPolicy, 0);
   }
@@ -102,7 +102,7 @@ console.log(
   pre = playUci(pre, 'f2f3');
   pre = playUci(pre, 'e7e5');
   const suicide = new MCTSSearch(pre, undefined, 'white');
-  suicide.initRoot(uniformPolicy, 0, false, true);
+  suicide.initRoot(uniformPolicy, 0, true);
   for (let sim = 0; sim < 2000; sim++) {
     if (suicide.selectLeaf() !== null) suicide.supplyEval(uniformPolicy, 0);
   }

@@ -16,20 +16,12 @@ export interface PolicyValueNet {
 export type BoardEncoder = (state: ChessGameState) => Float32Array;
 
 const C_PUCT = 1.5;
-const DIRICHLET_ALPHA = 0.3;
-const DIRICHLET_EPSILON = 0.25;
 // First-Play Urgency: unvisited children start at parent-Q minus this
 // penalty instead of 0, matching the training-side Rust search
 // (training/config.py fpu_reduction).
 const FPU_REDUCTION = 0.4;
 
 export type MCTSOptions = {
-  // Mix Dirichlet noise into root priors. Exploration aid for self-play
-  // data generation only — must stay off for match/play strength.
-  addRootNoise?: boolean;
-  // Pick the move by sampling proportional to visit counts (τ=1) instead
-  // of argmax. Self-play opening diversity only — off for match play.
-  sampleProportional?: boolean;
   // Board encoder matching the net (defaults to Sage's 20-plane).
   encode?: BoardEncoder;
   // Misère ("Jester") selection: at nodes whose side-to-move matches
@@ -104,14 +96,13 @@ export class MCTSSearch {
     return this.encode(this.root.state);
   }
 
-  // Initialize root with NN evaluation (+ optional Dirichlet noise)
-  initRoot(policy: Float32Array, value: number, addNoise = false, flattenPriors = false): void {
+  // Initialize root with the NN evaluation.
+  initRoot(policy: Float32Array, value: number, flattenPriors = false): void {
     this.expandWithPolicy(this.root, policy);
     if (flattenPriors) {
       const n = this.root.children.size;
       for (const child of this.root.children.values()) child.prior = 1 / n;
     }
-    if (addNoise) addDirichletNoise(this.root);
     backpropagate(this.root, value);
   }
 
@@ -140,8 +131,9 @@ export class MCTSSearch {
     this.pendingLeaf = null;
   }
 
-  // Get final result after all simulations.
-  getResult(sampleProportional = false): MCTSResult {
+  // Get final result after all simulations. The move is the most-visited
+  // root child; callers that want a different rule read `rankedMoves`.
+  getResult(): MCTSResult {
     const policy = new Float32Array(POLICY_SIZE);
     let totalVisits = 0;
     for (const child of this.root.children.values()) {
@@ -158,7 +150,7 @@ export class MCTSSearch {
       .sort((a, b) => b.visits - a.visits);
     return {
       policy,
-      move: sampleProportional ? sampleMove(this.root) : argmaxMove(this.root),
+      move: argmaxMove(this.root),
       rootValue: this.root.visitCount > 0 ? this.root.totalValue / this.root.visitCount : 0,
       rankedMoves,
     };
@@ -226,8 +218,6 @@ export function runBatchedMCTS(
   numSimulations: number,
   options: MCTSOptions = {},
 ): MCTSResult[] {
-  const addNoise = options.addRootNoise ?? false;
-  const sampleProportional = options.sampleProportional ?? false;
   const searches = states.map(
     s => new MCTSSearch(s, options.encode ?? encodeBoard, options.invertForTurn),
   );
@@ -235,7 +225,7 @@ export function runBatchedMCTS(
   // Filter to non-terminal games
   const active = searches.filter(s => !s.isTerminal());
   if (active.length === 0) {
-    return searches.map(s => s.getResult(sampleProportional));
+    return searches.map(s => s.getResult());
   }
 
   // Batch-evaluate root positions
@@ -243,7 +233,7 @@ export function runBatchedMCTS(
   const rootResults = net.predictBatch(rootBoards);
   for (let i = 0; i < active.length; i++) {
     active[i].initRoot(
-      rootResults[i].policy, rootResults[i].value, addNoise,
+      rootResults[i].policy, rootResults[i].value,
       options.flattenRootPriors ?? false,
     );
   }
@@ -267,7 +257,7 @@ export function runBatchedMCTS(
     }
   }
 
-  return searches.map(s => s.getResult(sampleProportional));
+  return searches.map(s => s.getResult());
 }
 
 // --- Single-game MCTS (for gameplay, not training) ---
@@ -291,15 +281,13 @@ export async function runMCTSAsync(
   yieldEverySims = 16,
 ): Promise<MCTSResult> {
   const search = new MCTSSearch(state, options.encode ?? encodeBoard, options.invertForTurn);
-  const sampleProportional = options.sampleProportional ?? false;
   if (search.isTerminal()) {
-    return search.getResult(sampleProportional);
+    return search.getResult();
   }
 
   const [rootEval] = net.predictBatch([search.getRootBoard()]);
   search.initRoot(
-    rootEval.policy, rootEval.value, options.addRootNoise ?? false,
-    options.flattenRootPriors ?? false,
+    rootEval.policy, rootEval.value, options.flattenRootPriors ?? false,
   );
 
   for (let sim = 0; sim < numSimulations; sim++) {
@@ -315,7 +303,7 @@ export async function runMCTSAsync(
   }
 
   options.onProgress?.(numSimulations, numSimulations);
-  return search.getResult(sampleProportional);
+  return search.getResult();
 }
 
 // --- Shared helpers ---
@@ -372,21 +360,6 @@ function backpropagate(node: MCTSNode, value: number): void {
   }
 }
 
-function sampleMove(root: MCTSNode): Move {
-  let totalVisits = 0;
-  for (const child of root.children.values()) {
-    totalVisits += child.visitCount;
-  }
-
-  let r = Math.random() * totalVisits;
-  for (const child of root.children.values()) {
-    r -= child.visitCount;
-    if (r <= 0) return child.move!;
-  }
-
-  return argmaxMove(root);
-}
-
 function argmaxMove(root: MCTSNode): Move {
   let bestVisits = -1;
   let bestMove: Move | null = null;
@@ -397,49 +370,4 @@ function argmaxMove(root: MCTSNode): Move {
     }
   }
   return bestMove!;
-}
-
-function addDirichletNoise(root: MCTSNode): void {
-  const n = root.children.size;
-  if (n === 0) return;
-  const noise = dirichletSample(n, DIRICHLET_ALPHA);
-  let i = 0;
-  for (const child of root.children.values()) {
-    child.prior = (1 - DIRICHLET_EPSILON) * child.prior + DIRICHLET_EPSILON * noise[i];
-    i++;
-  }
-}
-
-function dirichletSample(n: number, alpha: number): number[] {
-  const samples: number[] = [];
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    const g = gammaSample(alpha);
-    samples.push(g);
-    sum += g;
-  }
-  if (sum > 0) {
-    for (let i = 0; i < n; i++) samples[i] /= sum;
-  } else {
-    for (let i = 0; i < n; i++) samples[i] = 1 / n;
-  }
-  return samples;
-}
-
-function gammaSample(shape: number): number {
-  if (shape < 1) return gammaSample(shape + 1) * Math.pow(Math.random(), 1 / shape);
-  const d = shape - 1 / 3;
-  const c = 1 / Math.sqrt(9 * d);
-  for (;;) {
-    let x: number, v: number;
-    do { x = randn(); v = 1 + c * x; } while (v <= 0);
-    v = v * v * v;
-    const u = Math.random();
-    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
-    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
-  }
-}
-
-function randn(): number {
-  return Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
 }
