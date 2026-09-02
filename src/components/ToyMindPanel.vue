@@ -109,10 +109,6 @@ const illegalCount = computed(
 );
 const legalCount = computed(() => props.thought.entries.length - illegalCount.value);
 
-function chipStyle(row: SearchRow): Record<string, string> {
-  return { background: cellColor(row.p, !row.legal) };
-}
-
 // Bar behind each SEARCH row is the SAME number the row prints: the
 // network's raw output probability for that move, scaled against the
 // brightest cell in the position. (They used to disagree — the text
@@ -306,24 +302,25 @@ function computeLeader(
   grid: InstanceType<typeof BoardGrid>,
   list: HTMLElement,
 ): { x1: number; y1: number; x2: number; y2: number } | null {
-  // Every policy index has a SEARCH row now (legal and illegal), so
-  // the leader exists whenever the selected row's chip is in the DOM.
+  // Anchored to the selected ROW — the colour slice that used to sit at
+  // its left edge is gone (the row already carries its colour in the
+  // bar behind it and in the policy grid).
   if (selIndex.value === null) return null;
   const canvas = grid.canvasEl;
   if (!canvas) return null;
-  const chip = list.querySelector<HTMLElement>('.tm-move.selected .tm-chip');
-  if (!chip) return null;
+  const row = list.querySelector<HTMLElement>('.tm-move.selected');
+  if (!row) return null;
 
   const cRect = container.getBoundingClientRect();
   const cellRect = canvas.getBoundingClientRect();
-  const chipRect = chip.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
 
   const scale = cellRect.width / grid.baseW();
   const c = grid.cellCenter(policyDisp(selIndex.value));
   const cx = cellRect.left - cRect.left + c.x * scale;
   const cy = cellRect.top - cRect.top + c.y * scale;
-  const lx = chipRect.left - cRect.left + chipRect.width / 2;
-  const ly = chipRect.top - cRect.top + chipRect.height / 2;
+  const lx = rowRect.left - cRect.left + 6;
+  const ly = rowRect.top - cRect.top + rowRect.height / 2;
   const dx = cx - lx;
   const dy = cy - ly;
   const len = Math.hypot(dx, dy) || 1;
@@ -468,7 +465,6 @@ onBeforeUnmount(() => {
             :style="rowStyle(m)"
             @click="selectIndex(m.index)"
           >
-            <span class="tm-chip" :style="chipStyle(m)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
             <span class="tm-move-share">{{ rawPct(m.p) }}</span>
           </div>
@@ -563,7 +559,6 @@ onBeforeUnmount(() => {
             :style="rowStyle(m)"
             @click="selectIndex(m.index)"
           >
-            <span class="tm-chip" :style="chipStyle(m)"></span>
             <span class="tm-move-uci">{{ m.uci }}</span>
             <span class="tm-move-share">{{ rawPct(m.p) }}</span>
           </div>
@@ -832,27 +827,11 @@ onBeforeUnmount(() => {
   color: #d99a9a;
 }
 
-/* Selected move (defaults to the top of the list; click any row to
-   re-target): its chip wears the same amber circle as its mini-cell in
-   the policy grid — the leader line runs circle to circle. */
-.tm-move.selected .tm-chip {
-  position: relative;
-}
-
-.tm-move.selected .tm-chip::after {
-  content: '';
-  position: absolute;
-  inset: -5px;
-  border: 1.6px solid #f7c058;
-  border-radius: 50%;
-}
-
-.tm-chip {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  flex-shrink: 0;
+/* Selected move (defaults to the played move; click any row to
+   re-target): the row wears the same amber as the ring on its
+   mini-cell in the policy grid, and the leader line runs between them. */
+.tm-move.selected {
+  box-shadow: inset 0 0 0 1.4px #f7c058;
 }
 
 .tm-move-uci { flex: 1; }
@@ -1100,13 +1079,6 @@ onBeforeUnmount(() => {
   }
   .tm-move-share {
     font-size: 9px;
-  }
-  .tm-chip {
-    width: 9px;
-    height: 9px;
-  }
-  .tm-move.selected .tm-chip::after {
-    inset: -4px;
   }
 }
 </style>

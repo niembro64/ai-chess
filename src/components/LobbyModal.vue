@@ -346,12 +346,13 @@ const canJoin = computed(() => {
     padding: 22px 16px;
     border-radius: 16px;
   }
-  /* Tighter cartoons + type so the whole setup still fits a phone. */
-  .model-face {
-    width: 38px;
-    height: 38px;
+  /* Tighter type so the whole setup still fits a phone; the portraits
+     stay large, since they are the thing you actually pick by. */
+  .mt-face {
+    width: 50px;
+    height: 50px;
   }
-  .model-cell {
+  .mt-cell {
     padding: 8px 4px 7px;
   }
   .model-line {
@@ -557,8 +558,8 @@ const canJoin = computed(() => {
 .mt-cell.m-jester { --accent: #c084fc; --accent-bg: rgba(192, 132, 252, 0.16); }
 
 .mt-face {
-  width: 42px;
-  height: 42px;
+  width: 60px;
+  height: 60px;
 }
 
 .mt-name {
