@@ -470,17 +470,17 @@ const canJoin = computed(() => {
   margin-top: 2px;
 }
 
-/* Model table — one connected button group, not four loose buttons.
-   COLUMNS are the networks (by what they were trained to do); ROWS are
-   what we ask of them, labelled with 90deg text down the left gutter. */
+/* Model table. COLUMNS are the networks (by what they were trained to
+   do); ROWS are what we ask of them, labelled with 90deg text down the
+   left gutter. Everything outside the cells is transparent — no frame,
+   no separators, no header chrome — so only the SELECTED cell is drawn,
+   as a rounded island inside its own slot. That way all four of its
+   corners round the same way wherever it sits in the group. */
 .model-table {
   display: grid;
   grid-template-columns: 24px 1fr 1fr;
   grid-template-rows: auto 1fr 1fr;
-  border: 1.5px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.03);
+  gap: 4px;
 }
 
 .mt-colhead {
@@ -493,21 +493,16 @@ const canJoin = computed(() => {
      the answer to "which cell am I on". */
   color: #5b6678;
   text-align: center;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
 }
 
 .mt-corner {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
+  /* Intentionally empty — the grid's top-left corner draws nothing. */
 }
 
 .mt-rowhead {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
 }
 
 /* Bottom-to-top so the label reads upward alongside its row. */
@@ -609,13 +604,14 @@ const canJoin = computed(() => {
   justify-content: center;
   gap: 9px;
   padding: 7px 10px;
-  border: 1.5px solid rgba(255, 255, 255, 0.14);
+  border: 1.5px solid transparent;
   border-radius: 11px;
-  background: rgba(255, 255, 255, 0.03);
+  background: transparent;
   cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
 }
 
-.mt-toy:hover { background: rgba(255, 255, 255, 0.07); }
+.mt-toy:hover { background: rgba(255, 255, 255, 0.05); }
 
 .mt-toy.active {
   border-color: var(--accent);
@@ -649,19 +645,18 @@ const canJoin = computed(() => {
   align-items: center;
   gap: 3px;
   padding: 10px 6px;
-  border: 1.5px solid rgba(255, 255, 255, 0.12);
+  border: 1.5px solid transparent;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
+  background: transparent;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
 
-.color-cell:hover { background: rgba(255, 255, 255, 0.08); }
+.color-cell:hover { background: rgba(255, 255, 255, 0.05); }
 
 .color-cell.active {
   border-color: #5ae3d8;
   background: rgba(94, 234, 212, 0.12);
-  box-shadow: 0 0 0 1px #5ae3d8;
 }
 
 /* White king always on the left, black on the right. Your side shows
@@ -676,9 +671,7 @@ const canJoin = computed(() => {
 /* Effort segmented control. */
 .effort-seg {
   display: flex;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 9px;
-  overflow: hidden;
+  gap: 4px;
 }
 
 .effort-seg button {
@@ -690,13 +683,18 @@ const canJoin = computed(() => {
   letter-spacing: 1px;
   color: #94a3b8;
   background: transparent;
-  border: none;
+  border: 1.5px solid transparent;
+  border-radius: 10px;
   cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
 }
 
+.effort-seg button:hover { background: rgba(255, 255, 255, 0.05); }
+
 .effort-seg button.active {
-  color: #07060f;
-  background: #5ae3d8;
+  color: #5ae3d8;
+  border-color: #5ae3d8;
+  background: rgba(94, 234, 212, 0.12);
 }
 
 .setup-explain {
