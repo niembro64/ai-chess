@@ -29,6 +29,23 @@ from .engine import (
     position_key,
 )
 
+# Mate-distance preference. Terminal checkmate scores shrink slightly
+# with search depth so a mate the search can reach SOONER outranks the
+# same mate further away. config.py deliberately keeps value_ply_decay
+# at 1.0 (decaying WDL outcome labels turns "winning but far away" into
+# "draw" and corrupted an earlier run), and states that "prefer faster
+# wins should come from search terminal handling" — this is that
+# handling. It is symmetric, so a loss-seeking (jester) search likewise
+# prefers to be mated as soon as possible.
+MATE_DEPTH_DISCOUNT = 0.01
+MATE_MIN_MAGNITUDE = 0.5
+
+
+def mate_value(depth: int) -> float:
+    """Magnitude of a checkmate score found `depth` plies below the root."""
+    return max(MATE_MIN_MAGNITUDE, 1.0 - MATE_DEPTH_DISCOUNT * depth)
+
+
 C_PUCT = 1.5
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_EPSILON = 0.25
@@ -88,10 +105,12 @@ class MCTSNode:
         "is_terminal",
         "terminal_value",
         "pos_key",
+        "depth",
     )
 
     def __init__(self, state: ChessGameState, parent: "MCTSNode | None" = None, move: Move | None = None):
         self.parent: MCTSNode | None = parent
+        self.depth: int = 0 if parent is None else parent.depth + 1
         self.children: dict[int, MCTSNode] = {}
         self.move: Move | None = move
         self.state: ChessGameState = state
@@ -261,7 +280,7 @@ class MCTSSearch:
             # Terminal value is from the perspective of the player-to-move at the
             # terminal node. Checkmate = they have no moves and are in check, so
             # they've LOST: value = -1. Stalemate/draw: 0.
-            node.terminal_value = -1.0 if s == "checkmate" else 0.0
+            node.terminal_value = -mate_value(node.depth) if s == "checkmate" else 0.0
         elif s in ("active", "check"):
             # Fresh post-apply_move state: apply_move already computed status via
             # get_legal_moves, so "active"/"check" guarantees >=1 legal move.
@@ -279,7 +298,7 @@ class MCTSSearch:
                 node.is_terminal = True
                 node.is_expanded = True
                 node.terminal_value = (
-                    -1.0
+                    -mate_value(node.depth)
                     if is_in_check(node.state.board, node.state.currentTurn)
                     else 0.0
                 )
@@ -295,7 +314,7 @@ class MCTSSearch:
             node.is_terminal = True
             node.is_expanded = True
             node.terminal_value = (
-                -1.0
+                -mate_value(node.depth)
                 if is_in_check(node.state.board, node.state.currentTurn)
                 else 0.0
             )

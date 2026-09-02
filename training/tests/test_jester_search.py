@@ -153,3 +153,33 @@ def test_dual_net_routing_by_leaf_turn():
     # replies hit the opponent net. Both must have been consulted.
     assert calls["agent"] > 0, "agent net never evaluated"
     assert calls["opp"] > 0, "opponent net never evaluated"
+
+
+def test_mate_scores_prefer_the_nearest_mate():
+    """Terminal checkmate scores shrink with depth, so an equally
+    forced mate that arrives sooner outranks one further away. This is
+    the 'prefer faster wins from search terminal handling' that
+    config.py's value_ply_decay comment calls for — and being
+    symmetric, it makes a loss-seeking search want to be mated ASAP."""
+    from chess_ai.mcts import MATE_MIN_MAGNITUDE, mate_value
+
+    assert mate_value(0) == 1.0
+    assert mate_value(1) > mate_value(5) > mate_value(20)
+    # Never decays past the floor, so a deep mate still dominates any
+    # ordinary evaluation instead of fading into noise.
+    assert mate_value(10_000) == MATE_MIN_MAGNITUDE
+    assert mate_value(20) > 0.75
+
+
+def test_inverted_search_takes_the_faster_self_mate():
+    """Fool's mate is available in one move; the inverted search must
+    still pick it rather than a slower route to the same loss."""
+    state = _fools_mate_minus_one()
+    g4 = _find_move(state, (6, 6), (4, 6))
+    result = run_batched_mcts(
+        [state], _uniform_evaluator, 2000, random.Random(11),
+        temperatures=[0.0],
+        dirichlet_epsilon=0.0,
+        invert_turns=["white"],
+    )[0]
+    assert _move_key(result.move) == _move_key(g4)

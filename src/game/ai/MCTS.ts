@@ -15,6 +15,19 @@ export interface PolicyValueNet {
 // 20-plane encoding; Toy passes its own 6-plane encoder.
 export type BoardEncoder = (state: ChessGameState) => Float32Array;
 
+// Mate-distance preference, mirroring training/src/chess_ai/mcts.py:
+// terminal checkmate scores shrink slightly with depth so a mate the
+// search can reach SOONER outranks the same mate further away. Value
+// labels are never decayed (that corrupted an earlier training run);
+// the preference lives here, in terminal handling. Symmetric, so a
+// loss-seeking search likewise wants to be mated as soon as possible.
+const MATE_DEPTH_DISCOUNT = 0.01;
+const MATE_MIN_MAGNITUDE = 0.5;
+
+function mateValue(depth: number): number {
+  return Math.max(MATE_MIN_MAGNITUDE, 1 - MATE_DEPTH_DISCOUNT * depth);
+}
+
 const C_PUCT = 1.5;
 // First-Play Urgency: unvisited children start at parent-Q minus this
 // penalty instead of 0, matching the training-side Rust search
@@ -42,6 +55,7 @@ export type MCTSOptions = {
 
 class MCTSNode {
   parent: MCTSNode | null = null;
+  depth = 0;
   children: Map<number, MCTSNode> = new Map();
   move: Move | null = null;
   state: ChessGameState;
@@ -161,7 +175,7 @@ export class MCTSSearch {
     if (s === 'checkmate' || s === 'stalemate' || s === 'draw') {
       node.isTerminal = true;
       node.isExpanded = true;
-      node.terminalValue = s === 'checkmate' ? -1 : 0;
+      node.terminalValue = s === 'checkmate' ? -mateValue(node.depth) : 0;
     } else {
       const moves = getLegalMoves(node.state);
       if (moves.length === 0) {
@@ -201,6 +215,7 @@ export class MCTSSearch {
 
       const child = new MCTSNode(applyMove(state, move));
       child.parent = node;
+      child.depth = node.depth + 1;
       child.move = move;
       child.prior = priorSum > 0 ? policy[mi] / priorSum : 1 / seenIndices.size;
       this.checkTerminal(child);
