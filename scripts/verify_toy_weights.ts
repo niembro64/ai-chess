@@ -119,8 +119,15 @@ console.log('observeTerminal:');
   player.observeTerminal(s);
   check(thought !== null, 'terminal thought emitted');
   const t = thought! as ToyThought;
-  check(t.moves.length === 0, 'no legal moves in the SEARCH list');
-  check(t.legalMask.every(v => v === 0), 'legal mask is empty (all red)');
+  check(
+    t.entries.every(e => !e.legal),
+    'every entry is illegal at a terminal position (all red)',
+  );
+  check(t.entries.length === 4096, 'the whole policy space is listed');
+  check(
+    t.entries.every((e, i) => i === 0 || t.entries[i - 1].p >= e.p),
+    'entries are ordered by probability, highest first',
+  );
   check(t.rawPolicy.length === 4096 && Math.abs(
     t.rawPolicy.reduce((a, b) => a + b, 0) - 1,
   ) < 1e-3, 'forward pass still produced a softmax policy');
