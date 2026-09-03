@@ -9,10 +9,15 @@ SELF-PLAY. Temperature cannot supply the missing blunder. It samples
 the search's visit counts, and a loss-seeking search spends near-zero
 visits on its own mating moves by construction. Measured on the
 temperature-only build: 20% checkmate, 45% move-cap timeouts, against
-71.5% decisive under the old mix. The instrument that works is a
-UNIFORM random legal move on the sparring side — out of distribution,
-so it can land on a mate, which is exactly the accident a human trying
-to lose commits.
+71.5% decisive under the old mix. A UNIFORM random legal move on the
+sparring side is out of distribution and so CAN land on a mate — the
+accident a human trying to lose commits — but on its own it only
+reached 29.5% checkmate, because landing on a mate by chance already
+presupposes the skill being learned: the agent has to have manufactured
+a position where mates are plentiful. So the sparring partner also
+ACCEPTS an offered mate some of the time, converting that skill
+directly into terminal signal. All three shape the opponent, never the
+reward — the mate is real, so every value label stays truthful.
 
 GATING. Head-to-head challenger-vs-champion is the production matchup,
 but it cannot be the gate: two competent loss-seekers draw by
@@ -616,3 +621,82 @@ def test_champion_half_of_a_pair_is_cached_per_champion():
         _uniform_evaluator, CHAMP, "white", 4, 50, _Pos()
     )
     assert len(played) == 6, "cache survived a champion change"
+
+
+def test_sparring_partner_accepts_offered_mates():
+    """The dominant source of terminal signal in mirror play.
+
+    Uniform blunders alone reached only 29.5% checkmate over 61 measured
+    games (against 71.5% under the old vs-Sage mix), because landing on
+    a mate by chance already presupposes the skill being learned — the
+    agent must first manufacture a position where mates are plentiful.
+    Accepting an offered mate converts that skill directly into a
+    finished game.
+
+    Driven from mate-in-1 positions with the SPARRING side on move: a
+    mate is on offer, so at accept-probability 1.0 it must be taken and
+    the game must end in checkmate immediately.
+    """
+    from chess_ai.eval_positions import build_eval_positions
+
+    mate_in_1 = [p for p in build_eval_positions()
+                 if p.difficulty == "mate-in-1"][:3]
+    assert mate_in_1
+
+    for position in mate_in_1:
+        config = SelfPlayConfig(
+            num_concurrent_games=1,
+            mcts_simulations=2,
+            invert_agent_selection=True,
+            frozen_evaluator=None,
+            agent_selfplay_prob=1.0,
+            spar_accept_mate_prob=1.0,
+            spar_random_prob=0.0,
+        )
+        engine = SelfPlayEngine(
+            _uniform_evaluator, lambda ex: None, config, random.Random(1)
+        )
+        slot = engine.games[0]
+        slot.state = position.state.copy()
+        slot.state.status = "active"
+        # The side to move holds the mate; make that the sparring seat.
+        slot.spar_color = slot.state.currentTurn
+        engine.step()
+        assert engine.games[0] is not slot or slot.state.status == "checkmate", (
+            f"{position.name}: sparring side declined an available mate"
+        )
+
+
+def test_sparring_partner_can_decline_below_probability_one():
+    """Below 1.0 the agent has to manufacture chances repeatedly instead
+    of banking on a single one, so the acceptance must really be
+    probabilistic rather than always-on."""
+    from chess_ai.eval_positions import build_eval_positions
+
+    position = next(p for p in build_eval_positions()
+                    if p.difficulty == "mate-in-1")
+    accepted = 0
+    for seed in range(30):
+        config = SelfPlayConfig(
+            num_concurrent_games=1,
+            mcts_simulations=2,
+            invert_agent_selection=True,
+            frozen_evaluator=None,
+            agent_selfplay_prob=1.0,
+            spar_accept_mate_prob=0.5,
+            spar_random_prob=0.0,
+        )
+        engine = SelfPlayEngine(
+            _uniform_evaluator, lambda ex: None, config, random.Random(seed)
+        )
+        slot = engine.games[0]
+        slot.state = position.state.copy()
+        slot.state.status = "active"
+        slot.spar_color = slot.state.currentTurn
+        engine.step()
+        # A finished game is replaced by a fresh slot.
+        if engine.games[0] is not slot:
+            accepted += 1
+    assert 0 < accepted < 30, (
+        f"acceptance is not probabilistic: {accepted}/30 at p=0.5"
+    )

@@ -235,6 +235,10 @@ class TrainConfig:
     # enough to break the deadlock, little enough that the gate is still
     # mostly measuring the nets.
     jester_spar_random_prob: float = 0.20
+    # How often the sparring partner accepts an offered checkmate. The
+    # dominant source of terminal signal in mirror play — see the note
+    # in selfplay.step().
+    jester_spar_accept_mate_prob: float = 0.50
     eval_blunder_prob: float = 0.10
     # Which gate the jester run promotes on.
     #   "fumbler"       both nets race the SAME uniform-random opponent
@@ -608,6 +612,7 @@ class Trainer:
                     agent_selfplay_prob=self.config.jester_selfplay_prob,
                     spar_temperature=self.config.jester_spar_temperature,
                     spar_random_prob=self.config.jester_spar_random_prob,
+                    spar_accept_mate_prob=self.config.jester_spar_accept_mate_prob,
                 ),
                 rng=self.rng,
             )

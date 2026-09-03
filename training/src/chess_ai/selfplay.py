@@ -614,6 +614,15 @@ class SelfPlayConfig:
     # the opponent wants, which is precisely the accident a human trying
     # to lose commits.
     spar_random_prob: float = 0.0
+    # Probability that a sparring ply ACCEPTS a checkmate that is on
+    # offer. This is the main source of terminal signal: it turns "the
+    # agent manufactured a mating chance" directly into a finished game,
+    # which is the skill the whole run is trying to teach. Uniform
+    # blunders alone only reached 29.5% checkmate, because landing on a
+    # mate by chance already presupposes the skill being learned.
+    # Shapes the opponent, not the reward — the mate is real and every
+    # value label stays truthful.
+    spar_accept_mate_prob: float = 0.0
     # Per-sample policy-loss weight applied to training examples from
     # TB-adjudicated games. In those games MCTS never found a forcing
     # line — Syzygy rescued the value label, but the move distribution
@@ -765,15 +774,36 @@ class SelfPlayEngine:
             # records the honest search distribution — only the move
             # played is randomised, so the position goes off-policy
             # (useful exploration) while the target stays clean.
+            #
+            # Uniform blunders alone were not enough: they lifted mirror
+            # play from 20% to 29.5% checkmate, still far under the 71.5%
+            # the old vs-Sage mix produced. The trap is circular. Landing
+            # on a mate by chance needs the agent to have arranged a
+            # position where mates are plentiful, and the agent cannot
+            # learn to arrange one without decisive games to learn from.
+            #
+            # So the sparring partner also ACCEPTS an offered mate, some
+            # of the time. That converts "the agent manufactured a mating
+            # chance" straight into a terminal signal, which is precisely
+            # the skill worth reinforcing. It shapes the opponent, never
+            # the reward: the agent really was checkmated, so every value
+            # label stays truthful. Below 1.0 the agent still has to
+            # manufacture chances repeatedly rather than bank on one.
             if (
                 slot.spar_color is not None
-                and self.config.spar_random_prob > 0.0
                 and slot.state.currentTurn == slot.spar_color
-                and self.rng.random() < self.config.spar_random_prob
             ):
-                blunders = get_legal_moves(slot.state)
-                if blunders:
-                    move = self.rng.choice(blunders)
+                options = get_legal_moves(slot.state)
+                mates = (
+                    [m for m in options
+                     if apply_move(slot.state, m).status == "checkmate"]
+                    if self.config.spar_accept_mate_prob > 0.0 and options
+                    else []
+                )
+                if mates and self.rng.random() < self.config.spar_accept_mate_prob:
+                    move = self.rng.choice(mates)
+                elif options and self.rng.random() < self.config.spar_random_prob:
+                    move = self.rng.choice(options)
 
             # Record training example (pre-move state). MCTS places visit
             # mass only on legal-move indices, so its returned policy IS

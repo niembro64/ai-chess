@@ -481,6 +481,13 @@ def build_jester_config() -> TrainConfig:
     # so it can never hand over the mate. A uniform random legal move
     # can — and that is the accident a human trying to lose makes.
     cfg.jester_spar_random_prob = 0.20
+    # Uniform blunders alone reached only 29.5% checkmate (measured
+    # over 61 games), against 71.5% under the old vs-Sage mix. The
+    # trap is circular: landing on a mate by chance presupposes the
+    # agent already knows how to manufacture mating chances. Having
+    # the sparring partner accept offered mates converts that skill
+    # straight into terminal signal.
+    cfg.jester_spar_accept_mate_prob = 0.50
     cfg.eval_blunder_prob = 0.10
     # Promote on the fumbler race, not on head-to-head play. Inverted
     # chess between two competent players is a DRAW by construction —
@@ -489,6 +496,15 @@ def build_jester_config() -> TrainConfig:
     # Measured on real weights: every head-to-head smoke game drew, on
     # full-material middlegames as well as lopsided endgames.
     cfg.jester_gate = "fumbler"
+    # The gate runs 80 pairs (30 surviving curated positions + 10
+    # rotating openings, each played from both seats), so a challenger
+    # of exactly equal strength scores 0.5 with sigma ~= 0.056. The
+    # inherited 0.54 sits 0.7 sigma above chance and would promote noise
+    # roughly a quarter of the time — and here the champion IS the
+    # comparison baseline, so a false promotion drifts the reference.
+    # 0.58 is ~1.4 sigma, still easily cleared by a real improvement:
+    # the challenger beat the champion on all three validation pairs.
+    cfg.eval_score_threshold = 0.58
     return cfg
 
 
