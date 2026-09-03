@@ -102,24 +102,52 @@ export function pieceTint(model: ModelId | null, color: 'white' | 'black'): Piec
   return STANDARD_TINTS[color];
 }
 
-// --- Setup grid --------------------------------------------------------
+// --- The two variants, and the setup grid ------------------------------
 //
-// COLUMNS are the networks, by what their weights were TRAINED to do;
-// ROWS are what we ASK them to do at play time. A cell is inverted
-// whenever the asked goal differs from the trained one — inversion is
-// the misère search flip, never "pick the worst-looking move".
+// The app plays chess two ways, and the grid's ROW picks which one the
+// game runs under — for BOTH players, not just the bot:
+//
+//   'win'   NORMAL chess.   You win by checkmating your opponent.
+//   'lose'  INVERTED chess. You win by getting your OWN king
+//           checkmated. The checkmated king is the winner.
+//
+// The names are traditional-sense: in the inverted variant "losing" the
+// chess game is how you win the match. Every other rule is standard.
+//
+// COLUMNS are the networks, by the variant their weights were TRAINED
+// on — Sage normal, Jester inverted. Off its own diagonal a model is
+// playing a game it was never trained for; it copes by inverting its
+// search, which is not the same as "pick the worst-looking move".
 
 export type Goal = 'win' | 'lose';
 
 export const GRID_MODELS: readonly ModelId[] = ['sage', 'jester'];
 export const GRID_ASKED: readonly Goal[] = ['win', 'lose'];
 
+/** Display name of a variant. 'win' is ordinary chess. */
 export function goalLabel(goal: Goal): string {
-  return goal === 'win' ? 'WIN' : 'LOSE';
+  return goal === 'win' ? 'NORMAL' : 'INVERTED';
+}
+
+/** One-line statement of a variant's win condition. */
+export function variantRule(goal: Goal): string {
+  return goal === 'win'
+    ? 'Checkmate your opponent to win.'
+    : 'Get your own king checkmated to win.';
 }
 
 export function isInverted(model: ModelId, asked: Goal): boolean {
   return MODELS[model].trainedGoal !== asked;
+}
+
+/**
+ * True when the game is the INVERTED variant: the checkmated king wins,
+ * so both sides steer toward their own mate. Equivalently — and this is
+ * why one flag drives both — exactly when the bot's search inverts,
+ * since the bot pursues the variant's goal like everyone else.
+ */
+export function isInvertedVariant(model: ModelId, goalInverted: boolean): boolean {
+  return (MODELS[model].trainedGoal === 'lose') !== goalInverted;
 }
 
 // Face mood: each bot is content doing what it was trained for and

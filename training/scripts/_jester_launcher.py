@@ -3,9 +3,15 @@
 Mirrors scripts/_toy_launcher.py but builds the full Sage-architecture
 ChessNet with MISÈRE incentives: search selection inverts at the
 jester's plies while every value label stays truthful (see
-chess_ai/mcts.py MCTSSearch). Self-play mixes jester-vs-frozen-Sage
-games with jester-vs-jester mirror games; eval gating counts games the
-challenger LOSES as wins. Checkpoints land in runs_jester/latest.
+chess_ai/mcts.py MCTSSearch).
+
+The goal is to get its OWN king checkmated before the opponent gets
+theirs. Self-play is therefore mostly jester-vs-jester mirror games —
+the matchup the shipped bot meets, where the loss must be forced
+against an opponent who refuses to deliver it — with a sparring side
+holding a sustained temperature so the games actually finish. Eval
+gating plays the champion jester and counts games the challenger LOSES
+as wins. Checkpoints land in runs_jester/latest.
 """
 
 from __future__ import annotations

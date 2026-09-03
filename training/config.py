@@ -412,10 +412,13 @@ def build_toy_config() -> TrainConfig:
 # Jester — the misère bot: full Sage architecture, inverted incentives.
 # ---------------------------------------------------------------------------
 #
-# Trains to LOSE — specifically, to get its OWN king checkmated before
-# the opponent manages to get theirs checkmated. Search selection
-# inverts at the jester's plies while every value label stays truthful
-# (chess_ai/mcts.py MCTSSearch).
+# Jester plays the INVERTED VARIANT of chess: the checkmated king wins
+# the game. Both players steer toward their own mate, so the objective
+# is to get its OWN king checkmated before the opponent gets theirs.
+# Search selection inverts at the jester's plies while every value
+# label stays truthful (chess_ai/mcts.py MCTSSearch) — the value head
+# still reports who is winning ordinary chess; only what we do with
+# that reading changes.
 #
 # The genre matters. Playing the frozen Sage is a HELPMATE: the
 # opponent wants to mate you, so "stop defending" solves it. Playing

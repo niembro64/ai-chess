@@ -43,10 +43,14 @@ const emit = defineEmits<{
 
 // --- AI setup ---------------------------------------------------------
 //
-// The model grid crosses MODEL × GOAL: each row is a network (by what
-// it was TRAINED to do), each column is what we ASK it to do at play
-// time — left = its trained goal, right = inverted (the misère search
-// flip, not "pick the worst move"). Toy sits below as its own option.
+// The model grid crosses MODEL × VARIANT. Columns are the networks by
+// the variant their weights were trained on (Sage normal, Jester
+// inverted); rows are the variant this game will be played under, by
+// BOTH sides — normal chess (checkmate your opponent) or inverted
+// chess (get your own king checkmated; the checkmated king wins).
+// Off its diagonal a model plays a variant it was never trained for,
+// which it handles by inverting its search, not by picking bad moves.
+// Toy sits below as its own option.
 
 // Grid selection: which network, and what we ask of it.
 const pickedModel = ref<ModelId>('sage');
@@ -135,7 +139,7 @@ const canJoin = computed(() => {
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
         <h1 class="title">AI CHESS</h1>
-        <p class="subtitle">Can you get checkmated before the bot does?</p>
+        <p class="subtitle">Inverted chess: the checkmated king wins.</p>
 
         <div class="main-actions">
           <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>
@@ -170,13 +174,13 @@ const canJoin = computed(() => {
                 class="mt-colhead"
                 :class="[`m-${m}`, { on: pickedModel === m }]"
               >
-                TRAINED TO {{ goalLabel(MODELS[m].trainedGoal) }}
+                TRAINED ON {{ goalLabel(MODELS[m].trainedGoal) }}
               </div>
               <template v-for="asked in GRID_ASKED" :key="`r-${asked}`">
                 <div
                   class="mt-rowhead"
                   :class="[`m-${pickedModel}`, { on: askedGoal === asked }]"
-                ><span>ASKED TO {{ goalLabel(asked) }}</span></div>
+                ><span>PLAY {{ goalLabel(asked) }}</span></div>
                 <button
                   v-for="m in GRID_MODELS"
                   :key="`${m}-${asked}`"
