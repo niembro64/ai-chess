@@ -227,6 +227,15 @@ class TrainConfig:
     # play never terminates, so this is what makes the games decisive.
     jester_spar_temperature: float = 1.0
     eval_temperature: float = 1.0
+    # Fraction of plies that play a uniform random legal move: on the
+    # sparring side in mirror self-play, and symmetrically on both sides
+    # of a jester eval game. This is what actually terminates a misère
+    # game — temperature cannot, because the search never spends visits
+    # on its own mating moves. Eval uses a lower rate than self-play:
+    # enough to break the deadlock, little enough that the gate is still
+    # mostly measuring the nets.
+    jester_spar_random_prob: float = 0.20
+    eval_blunder_prob: float = 0.10
     archive_every_gens: int = 0
     # Cap on retained archives (oldest are deleted as new ones are written).
     # 0 = unlimited.
@@ -588,6 +597,7 @@ class Trainer:
                     ),
                     agent_selfplay_prob=self.config.jester_selfplay_prob,
                     spar_temperature=self.config.jester_spar_temperature,
+                    spar_random_prob=self.config.jester_spar_random_prob,
                 ),
                 rng=self.rng,
             )
@@ -1219,6 +1229,7 @@ class Trainer:
         starting_state: "ChessGameState | None" = None,
         jester: bool = False,
         temperature: float = 0.0,
+        blunder_prob: float = 0.0,
     ) -> str:
         """One eval game. Returns "challenger", "champion", or "draw".
 
@@ -1237,13 +1248,20 @@ class Trainer:
 
         `jester=True` makes it a misère match: both sides want their own
         king mated and the side mated FIRST wins. That is the matchup the
-        bot actually ships into, and it needs `temperature > 0` — two
-        greedy loss-seekers never finish, because neither will deliver
-        the mate the other is angling for.
+        bot actually ships into.
+
+        Such a match will not finish on its own. Neither side will
+        deliver the mate the other is angling for, and `temperature`
+        cannot fix that — it samples the search's visit counts, and a
+        loss-seeking search puts near-zero visits on its own mating
+        moves by construction. `blunder_prob` is the instrument that
+        works: that fraction of plies plays a UNIFORM random legal move,
+        which can land on a mate. It is applied symmetrically, so the
+        two nets are still compared on equal terms.
         """
         import copy
 
-        from .engine import apply_move, create_initial_game_state
+        from .engine import apply_move, create_initial_game_state, get_legal_moves
         from .mcts import run_batched_mcts
         from .selfplay import _is_insufficient_material, _position_key
 
@@ -1300,7 +1318,12 @@ class Trainer:
                     board_encoder=self._board_encoder,
                     position_counts=[position_history],
                 )
-            state = apply_move(state, result[0].move)
+            move = result[0].move
+            if blunder_prob > 0.0 and self.rng.random() < blunder_prob:
+                options = get_legal_moves(state)
+                if options:
+                    move = self.rng.choice(options)
+            state = apply_move(state, move)
             moves_played += 1
 
         if state.status == "checkmate":
@@ -1463,6 +1486,10 @@ class Trainer:
                     jester=self.config.jester_mode,
                     temperature=(
                         self.config.eval_temperature
+                        if self.config.jester_mode else 0.0
+                    ),
+                    blunder_prob=(
+                        self.config.eval_blunder_prob
                         if self.config.jester_mode else 0.0
                     ),
                 )

@@ -474,6 +474,14 @@ def build_jester_config() -> TrainConfig:
     # sustained here for the whole game rather than annealed away.
     cfg.jester_spar_temperature = 1.0
     cfg.eval_temperature = 1.0
+    # What actually ends a misère game. Measured over the first 40 games
+    # of the temperature-only build: 20.0% checkmate, 27.5% threefold,
+    # 45.0% move-cap. Temperature samples the search's visit counts, and
+    # a loss-seeking search never spends visits on its own mating moves,
+    # so it can never hand over the mate. A uniform random legal move
+    # can — and that is the accident a human trying to lose makes.
+    cfg.jester_spar_random_prob = 0.20
+    cfg.eval_blunder_prob = 0.10
     return cfg
 
 

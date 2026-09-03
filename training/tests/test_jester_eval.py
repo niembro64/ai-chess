@@ -6,10 +6,16 @@ mate you want (a *selfmate*). Playing the frozen winner instead is a
 *helpmate*: the opponent is trying to mate you, so "stop defending"
 solves it, the score saturates, and the gate stops discriminating.
 
-Two greedy loss-seekers never finish a game, so both self-play mirror
-games and eval games need a sustained move-selection temperature. These
-tests pin that, the misère scoring, and the kwarg whose absence killed
-the first run at its very first eval match.
+Two loss-seekers never finish a game on their own, and temperature
+cannot rescue it: a loss-seeking search puts near-zero visits on its own
+mating moves, so sampling that distribution at any heat will never hand
+over the mate the opponent wants. Measured on the temperature-only
+build: 20% checkmate, 45% move-cap timeouts. A UNIFORM random legal move
+can deliver the mate, so that is the instrument — on the sparring side
+in self-play, symmetrically on both sides in eval.
+
+These tests pin that, the misère scoring, and the kwarg whose absence
+killed the first run at its very first eval match.
 """
 
 from __future__ import annotations
@@ -22,7 +28,12 @@ import pytest
 import torch
 
 from chess_ai.encoding import POLICY_SIZE
-from chess_ai.engine import apply_move, create_initial_game_state, get_legal_moves
+from chess_ai.engine import (
+    apply_move,
+    create_initial_game_state,
+    get_legal_moves,
+    position_key,
+)
 from chess_ai.model import ChessNet
 from chess_ai.selfplay import SelfPlayConfig, SelfPlayEngine
 from chess_ai.train import TrainConfig, Trainer
@@ -84,7 +95,7 @@ def _fresh_start():
 def test_play_eval_game_accepts_the_jester_kwarg(monkeypatch):
     """Regression: _run_eval_match passes jester=..., and the signature
     used to lack it. Every jester eval match died on its first game with
-    TypeError, which killed the first run at gen 7,503 — the first time
+    TypeError, which killed the first run at gen 3,349 — the first time
     eval_every_gens came round."""
     _script_fools_mate(monkeypatch)
     trainer = _tiny_trainer()
@@ -213,6 +224,137 @@ def test_sparring_side_never_anneals_to_greedy():
     flat = [t for step in seen for t in step]
     assert 1.3 in flat, "spar side never played at its sustained temperature"
     assert 0.0 in flat, "agent side never annealed to greedy"
+
+
+# --- what actually terminates a misère game ------------------------------
+
+
+def test_sparring_blunders_are_uniform_not_hotter_search():
+    """The blunder must be a UNIFORM legal move, not a hotter sample of
+    the search.
+
+    This is the whole point. A loss-seeking search puts near-zero visits
+    on its own mating moves — delivering mate is the worst thing it can
+    do — so no temperature can make it hand over the mate its opponent
+    wants. Only an out-of-distribution pick can. The temperature-only
+    build measured 20% checkmate / 45% move-cap in self-play, and drew
+    every eval game.
+
+    Here the search is pinned to one move; with a blunder rate of 1.0
+    the sparring side must still produce other moves.
+    """
+    pinned = {"count": 0}
+
+    def always_first(states, evaluator, sims, rng, temperatures=None, **kwargs):
+        results = []
+        for state in states:
+            pinned["count"] += 1
+            results.append(SimpleNamespace(
+                move=get_legal_moves(state)[0],
+                policy=np.zeros(POLICY_SIZE, dtype=np.float32),
+                root_value=0.0,
+            ))
+        return results
+
+    import chess_ai.selfplay as selfplay_module
+    real = selfplay_module.run_batched_mcts
+    selfplay_module.run_batched_mcts = always_first
+    try:
+        config = SelfPlayConfig(
+            num_concurrent_games=24,
+            mcts_simulations=2,
+            endgame_start_prob=0.0,
+            random_start_prob=0.0,
+            invert_agent_selection=True,
+            frozen_evaluator=None,        # all mirror
+            agent_selfplay_prob=1.0,
+            spar_random_prob=1.0,         # every sparring ply blunders
+        )
+        engine = SelfPlayEngine(
+            _uniform_evaluator, lambda ex: None, config, random.Random(4)
+        )
+        engine.step()   # white to move: white-sparring slots blunder here
+        openings = {
+            position_key(slot.state)
+            for slot in engine.games if slot.spar_color == "white"
+        }
+        agent_openings = {
+            position_key(slot.state)
+            for slot in engine.games if slot.spar_color == "black"
+        }
+    finally:
+        selfplay_module.run_batched_mcts = real
+
+    assert pinned["count"] > 0, "search was never consulted"
+    assert len(openings) > 1, (
+        "every white-sparring game opened with the same move — the "
+        "blunder is following the search instead of picking uniformly"
+    )
+    # Control: where white is the AGENT, the pinned search decides and
+    # every game must reach the identical position.
+    assert len(agent_openings) == 1, (
+        "agent plies diverged from the search — the blunder is leaking "
+        "onto the wrong seat"
+    )
+
+
+def test_agent_side_never_blunders():
+    """Only the sparring seat blunders. The agent must play its best
+    misère chess or it is not learning to be good at anything."""
+    config = SelfPlayConfig(
+        num_concurrent_games=6,
+        mcts_simulations=2,
+        endgame_start_prob=0.0,
+        random_start_prob=0.0,
+        invert_agent_selection=True,
+        frozen_evaluator=_uniform_evaluator,
+        agent_selfplay_prob=0.0,          # all vs-frozen, no spar side
+        spar_random_prob=1.0,
+    )
+    engine = SelfPlayEngine(
+        _uniform_evaluator, lambda ex: None, config, random.Random(8)
+    )
+    assert all(g.spar_color is None for g in engine.games)
+    # With no sparring seat anywhere, the blunder branch is unreachable
+    # no matter how high spar_random_prob is set.
+    for _ in range(3):
+        engine.step()
+
+
+def test_eval_blunders_apply_to_both_sides():
+    """Eval blunders are symmetric — an asymmetric rate would hand one
+    net an advantage that has nothing to do with its weights."""
+    seen_turns: list[str] = []
+    ply = {"i": 0}
+
+    def fake_search(states, evaluator, sims, rng, temperatures=None, **kwargs):
+        seen_turns.append(states[0].currentTurn)
+        from_rf, to_rf = FOOLS_MATE[ply["i"] % len(FOOLS_MATE)]
+        ply["i"] += 1
+        candidates = [
+            m for m in get_legal_moves(states[0])
+            if (m.from_pos.rank, m.from_pos.file) == from_rf
+            and (m.to_pos.rank, m.to_pos.file) == to_rf
+        ]
+        move = candidates[0] if candidates else get_legal_moves(states[0])[0]
+        return [SimpleNamespace(move=move, policy=None, root_value=0.0)]
+
+    import chess_ai.mcts as mcts_module
+    real = mcts_module.run_batched_mcts
+    mcts_module.run_batched_mcts = fake_search
+    try:
+        trainer = _tiny_trainer()
+        trainer._play_eval_game(
+            _uniform_evaluator, _uniform_evaluator, True, 4, 30,
+            starting_state=_fresh_start(), jester=True,
+            temperature=1.0, blunder_prob=1.0,
+        )
+    finally:
+        mcts_module.run_batched_mcts = real
+
+    # Both colors moved, so a symmetric rate exposed both of them to the
+    # blunder branch.
+    assert {"white", "black"} <= set(seen_turns)
 
 
 # --- general temperature in the sampler ----------------------------------

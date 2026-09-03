@@ -606,6 +606,14 @@ class SelfPlayConfig:
     # target is the raw visit distribution either way, so the sparring
     # side's plies stay honest examples.
     spar_temperature: float = 1.0
+    # Probability that a sparring ply plays a UNIFORM RANDOM legal move
+    # instead of the search's choice. This — not temperature — is what
+    # makes mirror games finish: see the long note at the call site in
+    # step(). A loss-seeking search never puts visits on its own mating
+    # moves, so only an out-of-distribution pick can deliver the mate
+    # the opponent wants, which is precisely the accident a human trying
+    # to lose commits.
+    spar_random_prob: float = 0.0
     # Per-sample policy-loss weight applied to training examples from
     # TB-adjudicated games. In those games MCTS never found a forcing
     # line — Syzygy rescued the value label, but the move distribution
@@ -738,6 +746,34 @@ class SelfPlayEngine:
         for i, slot in enumerate(self.games):
             policy = mcts_results[i].policy
             move = mcts_results[i].move
+
+            # Sparring blunder. The played move is replaced by a UNIFORM
+            # random legal one — not a hotter sample of the search.
+            #
+            # Temperature cannot do this job. A loss-seeking search puts
+            # near-zero visits on its own mating moves, because
+            # delivering mate is the worst thing it can do, so sampling
+            # from the visit distribution at any temperature will
+            # essentially never deliver the mate the opponent is angling
+            # for. The first attempt at this used sustained temperature
+            # and mirror games collapsed to 45% move-cap timeouts and
+            # 27% threefold, with only 20% reaching a checkmate.
+            #
+            # A uniform pick can land on a mating move, which is exactly
+            # the blunder a human trying to lose makes: they hand you the
+            # mate by accident. The training example for this ply still
+            # records the honest search distribution — only the move
+            # played is randomised, so the position goes off-policy
+            # (useful exploration) while the target stays clean.
+            if (
+                slot.spar_color is not None
+                and self.config.spar_random_prob > 0.0
+                and slot.state.currentTurn == slot.spar_color
+                and self.rng.random() < self.config.spar_random_prob
+            ):
+                blunders = get_legal_moves(slot.state)
+                if blunders:
+                    move = self.rng.choice(blunders)
 
             # Record training example (pre-move state). MCTS places visit
             # mass only on legal-move indices, so its returned policy IS
