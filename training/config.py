@@ -482,6 +482,13 @@ def build_jester_config() -> TrainConfig:
     # can — and that is the accident a human trying to lose makes.
     cfg.jester_spar_random_prob = 0.20
     cfg.eval_blunder_prob = 0.10
+    # Promote on the fumbler race, not on head-to-head play. Inverted
+    # chess between two competent players is a DRAW by construction —
+    # neither will deliver the mate the other wants — so a head-to-head
+    # gate draws more as the nets improve, which is exactly backwards.
+    # Measured on real weights: every head-to-head smoke game drew, on
+    # full-material middlegames as well as lopsided endgames.
+    cfg.jester_gate = "fumbler"
     return cfg
 
 

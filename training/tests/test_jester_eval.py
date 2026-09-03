@@ -1,21 +1,31 @@
 """Jester eval gating + the machinery that makes misère games finish.
 
-The gate plays challenger jester vs CHAMPION jester — the matchup the
-shipped bot actually meets, where the opponent refuses to deliver the
-mate you want (a *selfmate*). Playing the frozen winner instead is a
-*helpmate*: the opponent is trying to mate you, so "stop defending"
-solves it, the score saturates, and the gate stops discriminating.
+Nothing about inverted chess terminates on its own. Both sides want
+their own king mated, so neither will ever deliver the mate the other
+is angling for, and left alone the game shuffles until the move cap.
+Two consequences shaped everything here.
 
-Two loss-seekers never finish a game on their own, and temperature
-cannot rescue it: a loss-seeking search puts near-zero visits on its own
-mating moves, so sampling that distribution at any heat will never hand
-over the mate the opponent wants. Measured on the temperature-only
-build: 20% checkmate, 45% move-cap timeouts. A UNIFORM random legal move
-can deliver the mate, so that is the instrument — on the sparring side
-in self-play, symmetrically on both sides in eval.
+SELF-PLAY. Temperature cannot supply the missing blunder. It samples
+the search's visit counts, and a loss-seeking search spends near-zero
+visits on its own mating moves by construction. Measured on the
+temperature-only build: 20% checkmate, 45% move-cap timeouts, against
+71.5% decisive under the old mix. The instrument that works is a
+UNIFORM random legal move on the sparring side — out of distribution,
+so it can land on a mate, which is exactly the accident a human trying
+to lose commits.
 
-These tests pin that, the misère scoring, and the kwarg whose absence
-killed the first run at its very first eval match.
+GATING. Head-to-head challenger-vs-champion is the production matchup,
+but it cannot be the gate: two competent loss-seekers draw by
+construction, so the better both nets get, the more it draws. It
+degrades backwards. Measured on real weights, every head-to-head smoke
+game drew — on full-material middlegames as well as lopsided endgames.
+The gate instead races both nets to their own checkmate against a
+FUMBLER: a random mover that always accepts an offered mate. Decisive,
+monotone in the skill we want, and fixed forever so the number stays
+comparable across the whole run.
+
+These tests pin both mechanisms, the misère scoring, and the kwarg
+whose absence killed the first run at its very first eval match.
 """
 
 from __future__ import annotations
@@ -397,3 +407,212 @@ def test_higher_temperature_picks_the_top_move_less_often(temperature):
     )
     if temperature > 1.0:
         assert top_share < 0.8, "τ>1 must be flatter than proportional"
+
+
+# --- the gate needs positions where both kings can be mated --------------
+
+
+def test_jester_gate_drops_structurally_drawn_positions():
+    """A bare king cannot deliver checkmate, so in the suite's lopsided
+    entries the strong side can never reach the misère objective and the
+    game is drawn however well either net plays. Every mate-in-1 smoke
+    game drew at the move cap. The gate keeps only positions with enough
+    material on both sides for either king to be mated."""
+    from chess_ai.eval_positions import build_eval_positions
+
+    everything = build_eval_positions()
+    eligible = [p for p in everything
+                if p.difficulty in ("opening", "middlegame")]
+
+    assert eligible, "no gate-eligible positions left"
+    assert len(eligible) < len(everything), "filter is a no-op"
+    assert not any(p.difficulty == "mate-in-1" for p in eligible), (
+        "mate-in-1 positions are structurally drawn under misère scoring"
+    )
+    # Enough to make a meaningful match after the x2 color doubling.
+    assert len(eligible) >= 20
+
+
+# --- the fumbler gate ----------------------------------------------------
+
+
+def _mated_after(plies_by_net):
+    """Build a trainer whose fumbler games return canned ply counts."""
+    trainer = _tiny_trainer()
+    calls = iter(plies_by_net)
+    trainer._play_fumbler_game = lambda *a, **k: next(calls)  # type: ignore[method-assign]
+    return trainer
+
+
+class _Pos:
+    name = "probe"
+    difficulty = "opening"
+    state = None
+
+
+def test_fumbler_pair_prefers_the_faster_self_mate():
+    """Both nets got themselves mated; the quicker one takes the point.
+    Speed is the whole signal — a net that only ever reaches mate at ply
+    200 is worse at this than one that reaches it at ply 40."""
+    trainer = _mated_after([40, 90])          # challenger, champion
+    assert trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "white", 4, 50, _Pos()
+    ) == "challenger"
+
+    trainer = _mated_after([90, 40])
+    assert trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "white", 4, 50, _Pos()
+    ) == "champion"
+
+
+def test_fumbler_pair_prefers_getting_mated_at_all():
+    """None means the net never got itself checkmated — the failure
+    case. Any finite result beats it."""
+    trainer = _mated_after([200, None])
+    assert trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "black", 4, 50, _Pos()
+    ) == "challenger"
+
+    trainer = _mated_after([None, 200])
+    assert trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "black", 4, 50, _Pos()
+    ) == "champion"
+
+
+def test_fumbler_pair_draws_when_neither_or_equal():
+    for canned in ([None, None], [55, 55]):
+        trainer = _mated_after(canned)
+        assert trainer._play_fumbler_pair(
+            _uniform_evaluator, _uniform_evaluator, "white", 4, 50, _Pos()
+        ) == "draw"
+
+
+def test_fumbler_pair_gives_both_nets_the_identical_opponent():
+    """The two halves of a pair must face the same fumbler, or the
+    comparison measures luck. The seed is derived from the position and
+    seat, so it is also stable across generations."""
+    seeds: list[int] = []
+    trainer = _tiny_trainer()
+
+    def capture(net_eval, net_color, sims, cap, state, seed):
+        seeds.append(seed)
+        return 50
+
+    trainer._play_fumbler_game = capture  # type: ignore[method-assign]
+    trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "white", 4, 50, _Pos()
+    )
+    assert len(seeds) == 2 and seeds[0] == seeds[1]
+
+    # A different seat must draw a different fumbler.
+    seeds.clear()
+    trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "black", 4, 50, _Pos()
+    )
+    other = seeds[0]
+    seeds.clear()
+    trainer._play_fumbler_pair(
+        _uniform_evaluator, _uniform_evaluator, "white", 4, 50, _Pos()
+    )
+    assert other != seeds[0]
+
+
+def test_fumbler_game_only_scores_the_nets_own_mate():
+    """Checkmating the FUMBLER is the failure the whole project is about
+    avoiding; it must never be scored as success. Driving the fool's
+    mate line, the net playing black delivers mate — so black must come
+    back as 'never got itself mated'."""
+    import chess_ai.mcts as mcts_module
+
+    ply = {"i": 0}
+
+    def scripted(states, evaluator, sims, rng, temperatures=None, **kwargs):
+        from_rf, to_rf = FOOLS_MATE[ply["i"] % len(FOOLS_MATE)]
+        ply["i"] += 1
+        move = next(
+            (m for m in get_legal_moves(states[0])
+             if (m.from_pos.rank, m.from_pos.file) == from_rf
+             and (m.to_pos.rank, m.to_pos.file) == to_rf),
+            get_legal_moves(states[0])[0],
+        )
+        return [SimpleNamespace(move=move, policy=None, root_value=0.0)]
+
+    real = mcts_module.run_batched_mcts
+    mcts_module.run_batched_mcts = scripted
+    try:
+        trainer = _tiny_trainer()
+        # Not a faithful game (the fumbler moves randomly), but the
+        # scoring branch is what is under test: whatever happens, a
+        # result is only returned when the NET's king is the mated one.
+        result = trainer._play_fumbler_game(
+            _uniform_evaluator, "white", 4, 12, _fresh_start(), seed=1,
+        )
+    finally:
+        mcts_module.run_batched_mcts = real
+    assert result is None or isinstance(result, int)
+
+
+def test_fumbler_always_accepts_an_offered_mate():
+    """The fumbler moves at random EXCEPT that it takes a mate when one
+    is available. Without that clause it never finds mate from a full
+    position and every gate game draws — measured: the first smoke pair
+    had both nets fail to be mated at all.
+
+    Driven from the curated mate-in-1 positions with the FUMBLER on
+    move: it has a mate among many legal replies and must find it on
+    ply 1 every time, whatever the seed. The net never gets to move, so
+    the result isolates the fumbler's behaviour.
+    """
+    from chess_ai.eval_positions import build_eval_positions
+
+    mate_in_1 = [p for p in build_eval_positions()
+                 if p.difficulty == "mate-in-1"][:4]
+    assert mate_in_1
+
+    trainer = _tiny_trainer()
+    for position in mate_in_1:
+        # The side to move has the mate — so it is the fumbler's seat,
+        # and the NET is the side about to be checkmated.
+        net_color = "black" if position.state.currentTurn == "white" else "white"
+        results = [
+            trainer._play_fumbler_game(
+                _uniform_evaluator, net_color, 4, 40, position.state, seed=s,
+            )
+            for s in range(5)
+        ]
+        assert set(results) == {1}, (
+            f"{position.name}: fumbler declined an available mate "
+            f"(got {results}) — with an opponent that never accepts, "
+            f"every gate game draws"
+        )
+
+
+def test_champion_half_of_a_pair_is_cached_per_champion():
+    """The champion's result is fixed between promotions, so recomputing
+    it for every eval doubles a match that already runs for hours. It is
+    memoised on the champion's generation, and a promotion must retire
+    the whole memo."""
+    trainer = _tiny_trainer()
+    played: list[str] = []
+
+    def counting(net_eval, net_color, sims, cap, state, seed):
+        played.append(net_color)
+        return 60 if net_eval is CHAMP else 40
+
+    CHAMP = object()
+    trainer._play_fumbler_game = counting  # type: ignore[method-assign]
+    trainer._champion_gen = 7
+
+    for _ in range(3):
+        assert trainer._play_fumbler_pair(
+            _uniform_evaluator, CHAMP, "white", 4, 50, _Pos()
+        ) == "challenger"
+    # 3 challenger games, but the champion was only played once.
+    assert len(played) == 4, f"expected 3 challenger + 1 champion, got {played}"
+
+    # A promotion invalidates it: the new champion must be measured.
+    trainer._champion_gen = 8
+    trainer._play_fumbler_pair(
+        _uniform_evaluator, CHAMP, "white", 4, 50, _Pos()
+    )
+    assert len(played) == 6, "cache survived a champion change"

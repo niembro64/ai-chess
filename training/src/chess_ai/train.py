@@ -236,6 +236,16 @@ class TrainConfig:
     # mostly measuring the nets.
     jester_spar_random_prob: float = 0.20
     eval_blunder_prob: float = 0.10
+    # Which gate the jester run promotes on.
+    #   "fumbler"       both nets race the SAME uniform-random opponent
+    #                   to their own checkmate; sooner wins. Decisive,
+    #                   and it does not degrade as the nets improve.
+    #   "head_to_head"  challenger jester vs champion jester. This is
+    #                   the production matchup, but two competent
+    #                   loss-seekers draw by construction, so it gets
+    #                   MORE drawn the better both nets get. Kept for
+    #                   diagnostics; not a promotion gate.
+    jester_gate: str = "fumbler"
     archive_every_gens: int = 0
     # Cap on retained archives (oldest are deleted as new ones are written).
     # 0 = unlimited.
@@ -614,6 +624,9 @@ class Trainer:
         # Auto-eval state.
         self._last_eval_gen = 0
         self._champion_model: ChessNet | None = None
+        # Fumbler-gate memo: (champion_gen, position name, seat) -> plies
+        # to the champion's own mate, or None. See _play_fumbler_pair.
+        self._fumbler_cache: dict[tuple[int, str, str], int | None] = {}
         self._champion_gen = 0
         self._plateau_counter = 0
         self._eval_history: list[dict] = []
@@ -1338,6 +1351,153 @@ class Trainer:
             return "challenger" if winner_is_challenger else "champion"
         return "draw"
 
+    def _play_fumbler_game(
+        self,
+        net_eval,
+        net_color: str,
+        mcts_sims: int,
+        move_cap: int,
+        starting_state,
+        seed: int,
+    ) -> int | None:
+        """Play the net against THE FUMBLER — a uniform-random legal
+        mover — and return how many plies it took the net to get its own
+        king checkmated, or None if it never managed it.
+
+        This is the jester gate's unit of measurement, and it exists
+        because head-to-head misère play cannot serve as one. Two
+        competent loss-seekers draw by construction: neither will ever
+        deliver the mate the other wants, so the better both nets get,
+        the more the match draws, and a gate built on it degrades
+        exactly backwards. Measured on real weights: every head-to-head
+        smoke game drew, on lopsided and full-material positions alike.
+
+        The fumbler cannot refuse: it moves at random, except that it
+        ALWAYS takes a checkmate when one is on offer. That last clause
+        is what makes it a usable instrument rather than a curiosity. A
+        purely random mover has to stumble onto mate by luck, which from
+        a full middlegame it never does inside the move cap — the first
+        smoke pair had both nets fail to be mated at all. Accepting
+        offered mates turns the measurement into "how fast can this net
+        reach a position where its opponent HAS a mate available", which
+        is decisive, monotone in the skill we want, and cheap.
+
+        It is a measuring fixture, not a model of the human: a person
+        trying to lose would decline the mate. It only has to rank nets
+        correctly. Because it never improves, the number it produces
+        stays comparable across the entire run — unlike a champion-
+        relative score, which drifts.
+
+        The net plays greedily; all the randomness is the fumbler's, so
+        the measurement reflects the weights rather than sampling noise.
+        In-tree the opponent's plies are NOT inverted — the net models a
+        fumbler as someone who would take a mate if offered, which is
+        what makes it seek positions where mates are available at all.
+        """
+        import copy
+
+        from .engine import apply_move, get_legal_moves
+        from .mcts import run_batched_mcts
+        from .selfplay import _is_insufficient_material, _position_key
+
+        fumbler = random.Random(seed)
+        state = copy.deepcopy(starting_state)
+        state.status = "active"
+        plies = 0
+        position_history: dict[bytes, int] = {}
+
+        while True:
+            if state.status in ("checkmate", "stalemate", "draw"):
+                break
+            if plies >= move_cap:
+                return None
+            key = _position_key(state)
+            position_history[key] = position_history.get(key, 0) + 1
+            if position_history[key] >= 3:
+                return None
+            if _is_insufficient_material(state.board):
+                return None
+
+            if state.currentTurn == net_color:
+                result = run_batched_mcts(
+                    [state], net_eval, mcts_sims, self.rng,
+                    temperatures=[0.0], dirichlet_epsilon=0.0,
+                    board_encoder=self._board_encoder,
+                    position_counts=[position_history],
+                    invert_turns=[net_color],
+                )
+                move = result[0].move
+            else:
+                options = get_legal_moves(state)
+                if not options:
+                    break
+                # Always accept an offered mate; otherwise move at
+                # random. Without the first clause the fumbler never
+                # finds mate from a full position and every game draws.
+                mates = [
+                    m for m in options
+                    if apply_move(state, m).status == "checkmate"
+                ]
+                move = fumbler.choice(mates or options)
+            state = apply_move(state, move)
+            plies += 1
+
+        if state.status == "checkmate":
+            # The side to move is the one that has been mated.
+            return plies if state.currentTurn == net_color else None
+        return None
+
+    def _play_fumbler_pair(
+        self,
+        challenger_eval,
+        champion_eval,
+        net_color: str,
+        mcts_sims: int,
+        move_cap: int,
+        position,
+    ) -> str:
+        """Both nets face the SAME fumbler from the same position and
+        seat; whoever gets itself checkmated — or gets there in fewer
+        plies — takes the point.
+
+        Pairing rather than comparing absolute rates keeps the
+        comparison fair when a position happens to be easy or hard, and
+        the seed is derived from the position so the fumbler behaves
+        identically for both nets and stays fixed across generations.
+        """
+        seed = (hash((position.name, net_color)) & 0xFFFFFFFF) ^ 0x5EED
+        challenger_plies = self._play_fumbler_game(
+            challenger_eval, net_color, mcts_sims, move_cap,
+            position.state, seed,
+        )
+        # The champion's half of the pair depends only on the champion's
+        # weights, the position, the seat and the fumbler seed — all of
+        # which are fixed between promotions. Caching it keyed on the
+        # champion's generation means an eval that promotes nothing pays
+        # for the challenger only, halving a match that would otherwise
+        # run for hours. A promotion changes _champion_gen and the whole
+        # cache lapses.
+        cache_key = (self._champion_gen, position.name, net_color)
+        if cache_key in self._fumbler_cache:
+            champion_plies = self._fumbler_cache[cache_key]
+        else:
+            champion_plies = self._play_fumbler_game(
+                champion_eval, net_color, mcts_sims, move_cap,
+                position.state, seed,
+            )
+            self._fumbler_cache[cache_key] = champion_plies
+        if challenger_plies is None and champion_plies is None:
+            return "draw"
+        if champion_plies is None:
+            return "challenger"
+        if challenger_plies is None:
+            return "champion"
+        if challenger_plies < champion_plies:
+            return "challenger"
+        if champion_plies < challenger_plies:
+            return "champion"
+        return "draw"
+
     def _run_eval_match(self, ckpt_dir: Path) -> dict:
         """Play `eval_games` games vs the champion, alternating colors.
 
@@ -1426,6 +1586,24 @@ class Trainer:
                 build_rotating_opening_positions,
             )
             positions = list(build_eval_positions())
+            if self.config.jester_mode:
+                # A misère gate needs positions where BOTH kings can
+                # actually be checkmated. Most of the curated suite is
+                # lopsided by design — the mate-in-1 and endgame entries
+                # hand one side a queen or rook against a bare king, and
+                # a bare king cannot deliver mate. The strong side there
+                # can never reach the misère objective, so those games
+                # are structurally drawn no matter how well either net
+                # plays, and they gate nothing. Measured: every one of
+                # the mate-in-1 smoke games drew at the move cap.
+                #
+                # Openings and middlegames keep enough material on both
+                # sides for either king to be mated, which is the only
+                # setting where "who gets mated first" is a real race.
+                positions = [
+                    p for p in positions
+                    if p.difficulty in ("opening", "middlegame")
+                ]
             # Append a fresh slice of random-walk opening positions. New
             # ones every match (RNG seeded off `gen` so a given gen always
             # plays the same rotating set across resumes — eval.csv stays
@@ -1476,23 +1654,37 @@ class Trainer:
                         )
                     except Exception:
                         pass
-                outcome = self._play_eval_game(
-                    challenger_eval,
-                    champion_eval,
-                    challenger_white,
-                    self.config.eval_mcts_sims,
-                    self.config.eval_move_cap,
-                    starting_state=position.state,
-                    jester=self.config.jester_mode,
-                    temperature=(
-                        self.config.eval_temperature
-                        if self.config.jester_mode else 0.0
-                    ),
-                    blunder_prob=(
-                        self.config.eval_blunder_prob
-                        if self.config.jester_mode else 0.0
-                    ),
-                )
+                if self.config.jester_mode and self.config.jester_gate == "fumbler":
+                    # Both nets against the same indifferent opponent;
+                    # the one mated sooner wins the point. See
+                    # _play_fumbler_game for why head-to-head cannot be
+                    # the gate here.
+                    outcome = self._play_fumbler_pair(
+                        challenger_eval,
+                        champion_eval,
+                        "white" if challenger_white else "black",
+                        self.config.eval_mcts_sims,
+                        self.config.eval_move_cap,
+                        position,
+                    )
+                else:
+                    outcome = self._play_eval_game(
+                        challenger_eval,
+                        champion_eval,
+                        challenger_white,
+                        self.config.eval_mcts_sims,
+                        self.config.eval_move_cap,
+                        starting_state=position.state,
+                        jester=self.config.jester_mode,
+                        temperature=(
+                            self.config.eval_temperature
+                            if self.config.jester_mode else 0.0
+                        ),
+                        blunder_prob=(
+                            self.config.eval_blunder_prob
+                            if self.config.jester_mode else 0.0
+                        ),
+                    )
                 bucket = per_diff.setdefault(
                     position.difficulty, {"w": 0, "d": 0, "l": 0}
                 )
