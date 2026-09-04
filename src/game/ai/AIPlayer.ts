@@ -24,24 +24,6 @@ import type { ChessGameState, Move, PieceColor } from '@/types/chess';
 // --- Bot house rule: never repeat your own army's arrangement -------
 //
 // Stricter than the FIDE rules a human plays under. The engine still
-// adjudicates threefold for everyone, but a BOT additionally refuses
-// any move that puts its OWN pieces back into an arrangement they have
-// already occupied this game — so it can never shuffle a knight out and
-// back, even though the full position (with the opponent's replies)
-// would be different each time. It walks down its ranking to the first
-// move that reaches a fresh arrangement; only when every legal move
-// repeats does the top choice stand.
-export function pickFreshMove(
-  state: ChessGameState,
-  ranked: { move: Move }[],
-  seenOwnSide: Set<string>,
-  color: PieceColor,
-): Move | null {
-  for (const { move } of ranked) {
-    if (!seenOwnSide.has(ownSideKey(applyMove(state, move), color))) return move;
-  }
-  return null;
-}
 
 // --- The bot's move ranking ------------------------------------------
 //
@@ -57,7 +39,17 @@ export function pickFreshMove(
 // Jester's weights already rate self-mating moves highest, so "asked to
 // lose" takes its top entry while "asked to win" takes its bottom one;
 // Sage is the mirror image.
-export type RankedEntry = { move: Move | null; index: number; p: number; legal: boolean };
+export type RankedEntry = {
+  move: Move | null;
+  index: number;
+  p: number;
+  legal: boolean;
+  // Legal, but the no-repeat house rule ruled it out for THIS move.
+  // Carried on the entry so the visible list can mark it: a skipped top
+  // row otherwise looks exactly like the bot ignoring its own top
+  // prediction, which is how this surfaced as a bug report.
+  blocked?: boolean;
+};
 
 // Algebraic name for any policy slot, legal or not, in the net's frame
 // (rotated 180 degrees when black is to move).
@@ -104,6 +96,31 @@ export function candidateMoves(
     .filter(e => e.move !== null)
     .map(e => ({ move: e.move as Move, index: e.index }));
   return lowestFirst ? legal.reverse() : legal;
+}
+
+// Mark the entries the no-repeat rule takes off the table, so the list
+// the player reads is the list the bot chose from. Mutates in place and
+// returns the played move: one pass, one source of truth.
+//
+// If EVERY legal move repeats, nothing is marked — the rule yields
+// rather than leaving the bot with no move.
+export function markBlockedAndPick(
+  state: ChessGameState,
+  entries: RankedEntry[],
+  candidates: { move: Move; index: number }[],
+  seenOwnSide: Set<string>,
+  color: PieceColor,
+): Move {
+  const blocked = new Set<number>();
+  for (const c of candidates) {
+    if (seenOwnSide.has(ownSideKey(applyMove(state, c.move), color))) {
+      blocked.add(c.index);
+    }
+  }
+  if (blocked.size === candidates.length) blocked.clear();
+  for (const e of entries) e.blocked = blocked.has(e.index);
+  const pick = candidates.find(c => !blocked.has(c.index)) ?? candidates[0];
+  return pick.move;
 }
 
 // Figure out the ChessNet architecture from the weight tensor shapes so we
@@ -261,8 +278,7 @@ export class AIPlayer {
     const entries = rankByDistribution(distribution, legal, isWhite);
     const candidates = candidateMoves(entries, this.goalInverted);
     const seenOwnSide = buildOwnSideKeys(state, color);
-    const move =
-      pickFreshMove(state, candidates, seenOwnSide, color) ?? candidates[0].move;
+    const move = markBlockedAndPick(state, entries, candidates, seenOwnSide, color);
 
     if (this.onThought) {
       this.onThought({
@@ -276,6 +292,7 @@ export class AIPlayer {
           index: e.index,
           p: e.p,
           legal: e.legal,
+          blocked: e.blocked === true,
         })),
         value: rootEval.value,
         rootValue,

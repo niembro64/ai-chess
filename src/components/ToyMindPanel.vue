@@ -101,7 +101,16 @@ function cellColor(p: number, illegal: boolean): string {
     : `rgba(94, 234, 212, ${a})`;
 }
 
-type SearchRow = { uci: string; index: number; p: number; legal: boolean };
+type SearchRow = {
+  uci: string;
+  index: number;
+  p: number;
+  legal: boolean;
+  // Legal, but ruled out for this move by the bot's no-repeat rule.
+  // Struck through, so a skipped top row explains itself instead of
+  // looking like the bot ignoring its own top prediction.
+  blocked?: boolean;
+};
 
 // The list shows the EFFECTIVE distribution the bot decided from —
 // the raw policy head at LOW effort, the search's visit shares at
@@ -472,7 +481,7 @@ onBeforeUnmount(() => {
             v-for="m in searchRows"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex, illegal: !m.legal }"
+            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex, illegal: !m.legal, blocked: m.blocked }"
             :style="rowStyle(m)"
             @click="selectIndex(m.index)"
           >
@@ -566,7 +575,7 @@ onBeforeUnmount(() => {
             v-for="m in searchRows"
             :key="m.uci"
             class="tm-move"
-            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex, illegal: !m.legal }"
+            :class="{ chosen: m.uci === thought.chosen, selected: m.index === selIndex, illegal: !m.legal, blocked: m.blocked }"
             :style="rowStyle(m)"
             @click="selectIndex(m.index)"
           >
@@ -836,6 +845,18 @@ onBeforeUnmount(() => {
 
 .tm-move.illegal .tm-move-uci {
   color: #d99a9a;
+}
+
+/* Legal, but the no-repeat house rule ruled it out for this move. Muted
+   and struck through so the eye skips to the row the bot actually
+   played — without this, a skipped top row reads as the bot ignoring
+   its own highest prediction. */
+.tm-move.blocked {
+  opacity: 0.45;
+}
+.tm-move.blocked .tm-move-uci,
+.tm-move.blocked .tm-move-share {
+  text-decoration: line-through;
 }
 
 /* Selected move (defaults to the played move; click any row to

@@ -9,7 +9,7 @@ import { runMCTSAsync } from './MCTS';
 import { ToyNet, encodeToyBoard, isToyWeights, type ToySerializedWeights } from './ToyNet';
 import {
   candidateMoves,
-  pickFreshMove,
+  markBlockedAndPick,
   rankByDistribution,
   uciForIndex,
 } from './AIPlayer';
@@ -32,7 +32,16 @@ export type ToyThought = {
   // Every policy slot, legal and illegal interleaved, ordered by
   // `distribution` (highest first). Identical whether the bot was asked
   // for its trained goal or the opposite; only `chosen` changes.
-  entries: { uci: string; index: number; p: number; legal: boolean }[];
+  // `blocked` marks a legal entry the no-repeat house rule ruled out
+  // for this move, so the list stays the candidate pool the bot chose
+  // from rather than showing rows that were never available.
+  entries: {
+    uci: string;
+    index: number;
+    p: number;
+    legal: boolean;
+    blocked?: boolean;
+  }[];
   // Scalar value in [-1, 1] from the mover's perspective.
   value: number;
   rootValue: number;
@@ -137,8 +146,7 @@ export class ToyPlayer {
     const entries = rankByDistribution(distribution, legal, isWhite);
     const candidates = candidateMoves(entries, this.goalInverted);
     const seenOwnSide = buildOwnSideKeys(state, color);
-    const move =
-      pickFreshMove(state, candidates, seenOwnSide, color) ?? candidates[0].move;
+    const move = markBlockedAndPick(state, entries, candidates, seenOwnSide, color);
 
     if (this.onThought) {
       this.onThought({
@@ -152,6 +160,7 @@ export class ToyPlayer {
           index: e.index,
           p: e.p,
           legal: e.legal,
+          blocked: e.blocked === true,
         })),
         value: rootEval.value,
         rootValue,
