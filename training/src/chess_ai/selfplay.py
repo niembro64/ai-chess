@@ -694,12 +694,10 @@ class SelfPlayEngine:
         jester = self.config.invert_agent_selection
         invert_turns = None
         agent_colors = None
-        opponent_evaluator = None
         if jester:
-            # Mirror games invert both plies; agent-vs-frozen games invert
-            # only the agent's color — in EVERY search of that game, so the
-            # frozen side's tree also models the agent truthfully (as a
-            # net trying to lose) via the same spec.
+            # Competitive mirror and historical games invert both colors
+            # in every tree. Single-color inversion is reserved for the
+            # explicit ordinary-chess-opponent diagnostic.
             invert_turns = [
                 "both" if g.agent_color is None or self.config.opponent_seeks_loss else g.agent_color for g in self.games
             ]
