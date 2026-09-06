@@ -413,7 +413,10 @@ def build_toy_config() -> TrainConfig:
 def build_jester_config() -> TrainConfig:
     cfg = build_config()
     cfg.num_workers = min(6, max(1, (os.cpu_count() or 2) - 1))
-    cfg.games_per_worker = 16
+    cfg.games_per_worker = 32
+    # With three CPU workers on gpus, the inherited 12 ms batching wait
+    # idles the GPU between small historical/current-network requests.
+    cfg.mp_batch_wait_ms = 2.0
     cfg.num_concurrent_games = 64
     cfg.mcts_simulations = 256
     cfg.batch_size = 256
