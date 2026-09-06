@@ -229,6 +229,9 @@ class DashboardLogger:
 
         self._csv_writer: csv.DictWriter | None = None
         self._csv_fp = None
+        self._last_csv_state: tuple[int, int] | None = None
+        self._last_csv_time = 0.0
+        self._last_render_time = 0.0
 
         # Hardware telemetry. Best-effort: missing libs (pynvml on macOS,
         # psutil unavailable) result in a hidden panel, not a crash.
@@ -410,7 +413,13 @@ class DashboardLogger:
             stats.generation, stats.policy_loss, stats.value_loss, stats.total_loss
         )
 
-        if self._csv_writer is not None:
+        now = time.monotonic()
+        csv_state = (stats.generation, stats.games_completed)
+        # MP polls every 50 ms while waiting for examples. Keep every
+        # update/game completion plus an idle heartbeat, not every poll.
+        if self._csv_writer is not None and (
+            csv_state != self._last_csv_state or now - self._last_csv_time >= 5.0
+        ):
             eta = getattr(stats, "eta_seconds", None)
             row = {
                 "time": datetime.now().isoformat(timespec="seconds"),
@@ -457,9 +466,12 @@ class DashboardLogger:
             ):
                 row[t_field] = round(getattr(stats, t_field, 0.0), 2)
             self._csv_writer.writerow(row)
+            self._last_csv_state = csv_state
+            self._last_csv_time = now
 
-        if self._live is not None:
+        if self._live is not None and now - self._last_render_time >= 1 / self._refresh_per_second:
             self._live.update(self._render(stats))
+            self._last_render_time = now
 
     # -- Rendering --
 

@@ -86,3 +86,21 @@ def test_dashboard_handles_no_stats_yet(tmp_path: Path, monkeypatch):
     ) as dash:
         # Render with no stats at all (fresh start)
         assert dash._render(None) is not None
+
+
+def test_idle_mp_polls_do_not_flood_csv(tmp_path, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("chess_ai.dashboard.time.monotonic", lambda: clock[0])
+    with DashboardLogger(tmp_path, model_summary="jester", device_summary="cpu", enabled=False) as dash:
+        stats = _stats(1, 0)
+        for _ in range(100):
+            dash.on_step(stats)
+        clock[0] += 5
+        dash.on_step(stats)  # Idle heartbeat.
+        stats.games_completed += 1
+        dash.on_step(stats)  # A game completion is recorded immediately.
+        stats.generation += 1
+        dash.on_step(stats)  # So is an optimizer update.
+    with (tmp_path / "stats.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 4
