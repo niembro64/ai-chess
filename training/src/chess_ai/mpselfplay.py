@@ -61,6 +61,11 @@ from .selfplay import (
 @dataclass
 class MultiprocessingConfig:
     num_workers: int = 4
+    jester_mode: bool = False
+    jester_selfplay_prob: float = 0.75
+    opponent_checkpoints: tuple[str, ...] = ()
+    curriculum_start_prob: float = 0.0
+    standard_move_cap: int = 300
     games_per_worker: int = 16
     mcts_simulations: int = 25
     # Inference batching: collect requests for up to `batch_wait_ms`
@@ -152,18 +157,25 @@ def _inference_server_main(
     weights_q: "mp.Queue",
     stop_event: Any,
     batch_wait_ms: float,
+    opponent_checkpoints: tuple[str, ...],
     inf_stats: Any,  # mp.Array('q', 4) — see snapshot_inf_stats()
 ) -> None:
     """Own the GPU, serve batched inference requests.
 
     Protocol:
-      request_q item:  (worker_id: int, boards_ndarray: np.ndarray[B, 8*8*20])
+      request_q item:  (worker_id: int, model_id: int, boards_ndarray: np.ndarray[B, 8*8*20])
       response_qs[i] item: (policies_ndarray, values_ndarray)
     """
     torch.set_num_threads(1)          # inference server only; workers don't use torch ops
     device = torch.device(device_str)
     model = arch.build().to(device).eval()
     model.load_state_dict(initial_state_dict)
+    opponents = []
+    for path in opponent_checkpoints:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        opponent = arch.build().to(device).eval()
+        opponent.load_state_dict(checkpoint["model_state_dict"])
+        opponents.append(opponent)
 
     # torch.compile the inference forward pass on CUDA. Inference batch
     # sizes vary (sum of pending requests), so use dynamic=True to avoid
@@ -206,7 +218,7 @@ def _inference_server_main(
             continue
         first_recv_t = time.monotonic()
 
-        pending: list[tuple[int, np.ndarray]] = [first]
+        pending = [first]
         deadline = first_recv_t + wait_s
         while True:
             remaining = deadline - time.monotonic()
@@ -217,40 +229,31 @@ def _inference_server_main(
             except Empty:
                 break
 
-        # Concatenate into one big batch, remember per-worker offsets.
-        slices: list[tuple[int, int, int]] = []  # (worker_id, start, end)
-        offset = 0
-        boards_blocks = []
-        for worker_id, boards in pending:
-            n = boards.shape[0]
-            slices.append((worker_id, offset, offset + n))
-            offset += n
-            boards_blocks.append(boards)
-        merged = np.concatenate(boards_blocks, axis=0)
-
-        # Update shared stats BEFORE the GPU forward — gives the trainer
-        # a fresher view of batch fill even when forward is slow.
-        # Slots: 0=dispatches, 1=sum_batch, 2=peak_batch, 3=sum_wait_us.
-        wait_us = int((time.monotonic() - first_recv_t) * 1e6)
-        with inf_stats.get_lock():
-            inf_stats[0] += 1
-            inf_stats[1] += merged.shape[0]
-            if merged.shape[0] > inf_stats[2]:
-                inf_stats[2] = merged.shape[0]
-            inf_stats[3] += wait_us
-
-        # Forward on GPU.
-        with torch.no_grad():
-            x_flat = torch.from_numpy(merged).to(device)
-            x = encoded_to_nchw(x_flat, NUM_PLANES)
-            policy, wdl = forward_fn(x)
-        pol = policy.cpu().numpy()
-        w = wdl.cpu().numpy()
-        values = (w[:, 0] - w[:, 2]).astype(np.float32)
-
-        # Fan the results back out to each worker's response queue.
-        for worker_id, start, end in slices:
-            response_qs[worker_id].put((pol[start:end], values[start:end]))
+        # Batch independently for each immutable opponent/current model.
+        # Each worker has one outstanding request, so its reply queue is unambiguous.
+        grouped = {}
+        for worker_id, model_id, boards in pending:
+            grouped.setdefault(model_id, []).append((worker_id, boards))
+        for model_id, requests in grouped.items():
+            merged = np.concatenate([b for _, b in requests], axis=0)
+            wait_us = int((time.monotonic() - first_recv_t) * 1e6)
+            with inf_stats.get_lock():
+                inf_stats[0] += 1
+                inf_stats[1] += merged.shape[0]
+                inf_stats[2] = max(inf_stats[2], merged.shape[0])
+                inf_stats[3] += wait_us
+            fn = forward_fn if model_id == 0 else opponents[model_id - 1]
+            with torch.no_grad():
+                x = encoded_to_nchw(torch.from_numpy(merged).to(device), NUM_PLANES)
+                policy, wdl = fn(x)
+            pol = policy.cpu().numpy()
+            w = wdl.cpu().numpy()
+            values = (w[:, 0] - w[:, 2]).astype(np.float32)
+            offset = 0
+            for worker_id, boards in requests:
+                n = boards.shape[0]
+                response_qs[worker_id].put((pol[offset:offset+n], values[offset:offset+n]))
+                offset += n
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +270,7 @@ def _worker_main(
     results_q: "mp.Queue",
     stop_event: Any,
     seed: int,
+    curriculum_prob: Any,
 ) -> None:
     """Run a self-play loop; NN evals go through the shared inference server."""
     torch.set_num_threads(1)
@@ -281,13 +285,23 @@ def _worker_main(
         fpu_reduction=config.fpu_reduction,
     )
     # Same reason for the Syzygy tablebase: each worker must open it itself.
-    if config.syzygy_path:
+    if config.syzygy_path and not config.jester_mode:
         from . import tablebase
         tablebase.open_tablebase(config.syzygy_path, config.syzygy_max_pieces)
 
-    def remote_evaluator(boards: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        request_q.put((worker_id, boards))
-        return response_q.get()
+    def evaluator_for(model_id):
+        def evaluate(boards):
+            request_q.put((worker_id, model_id, boards))
+            while not stop_event.is_set():
+                try:
+                    return response_q.get(timeout=1.0)
+                except Empty:
+                    continue
+            raise SystemExit(0)
+        return evaluate
+
+    remote_evaluator = evaluator_for(0)
+    opponents = tuple(evaluator_for(i + 1) for i in range(len(config.opponent_checkpoints)))
 
     rng = random.Random(seed)
 
@@ -301,6 +315,15 @@ def _worker_main(
         config=SelfPlayConfig(
             num_concurrent_games=config.games_per_worker,
             mcts_simulations=config.mcts_simulations,
+            invert_agent_selection=config.jester_mode,
+            frozen_evaluators=opponents,
+            opponent_seeks_loss=True,
+            agent_selfplay_prob=config.jester_selfplay_prob,
+            curriculum_start_prob=config.curriculum_start_prob,
+            standard_move_cap=config.standard_move_cap,
+            spar_temperature=0.0,
+            spar_random_prob=0.0,
+            spar_accept_mate_prob=0.0,
             endgame_start_prob=config.endgame_start_prob,
             random_start_prob=config.random_start_prob,
             temperature_threshold_plies=config.temperature_threshold_plies,
@@ -316,6 +339,7 @@ def _worker_main(
     )
 
     while not stop_event.is_set():
+        engine.config.curriculum_start_prob = curriculum_prob.value
         finished = engine.step()
         # Surface per-game outcomes back to the trainer so the dashboard's
         # outcomes panel shows real W/B/D/cap counts instead of zeros.
@@ -362,6 +386,7 @@ class MultiprocessingSelfPlay:
         # `spawn` is required for CUDA-safe child processes on Linux/macOS.
         self._ctx = mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
+        self._curriculum_prob = self._ctx.Value("d", config.curriculum_start_prob)
 
         self._request_q: mp.Queue = self._ctx.Queue(maxsize=config.request_q_maxsize)
         self._response_qs: list[mp.Queue] = [
@@ -400,6 +425,7 @@ class MultiprocessingSelfPlay:
                 self._weights_q,
                 self._stop_event,
                 self.config.batch_wait_ms,
+                self.config.opponent_checkpoints,
                 self._inf_stats,
             ),
             daemon=True,
@@ -418,11 +444,20 @@ class MultiprocessingSelfPlay:
                     self._results_q,
                     self._stop_event,
                     self.seed + wid + 1,
+                    self._curriculum_prob,
                 ),
                 daemon=True,
             )
             p.start()
             self._worker_procs.append(p)
+
+    def check_health(self) -> None:
+        for process in [self._inference_proc, *self._worker_procs]:
+            if process is not None and process.exitcode is not None:
+                raise RuntimeError(f"Self-play process {process.name} exited with {process.exitcode}")
+
+    def set_curriculum_prob(self, probability: float) -> None:
+        self._curriculum_prob.value = probability
 
     def drain_examples(self, buffer: ReplayBuffer, max_drain: int = 4096) -> int:
         """Pull completed TrainingExamples off the queue into the buffer.

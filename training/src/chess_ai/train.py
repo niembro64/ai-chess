@@ -38,6 +38,7 @@ from .model import (
     encoded_to_nchw,
     material_target_from_board,
 )
+from .engine import ChessGameState
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
 from .selfplay import ReplayBuffer, SelfPlayConfig, make_local_selfplay_engine, mirror_batch
 from .weight_io import export_weights
@@ -209,47 +210,25 @@ class TrainConfig:
     # Periodically copy `latest.pt` off to `archive/gen-<N>.pt` so we have a
     # trail of snapshots for compare_checkpoints + plateau detection. 0
     # disables archival entirely.
-    # --- Jester (misère) mode ---------------------------------------
-    # Train the model to LOSE: MCTS selection inverts at the agent's
-    # plies (truthful value labels throughout — see mcts.MCTSSearch).
-    # Self-play is mostly agent-vs-agent MIRROR games — the production
-    # matchup, where the loss must be forced against an opponent who
-    # refuses to deliver it — with a small agent-vs-frozen-winner share
-    # for bootstrap and robustness (jester_selfplay_prob). Eval gating
-    # plays the challenger against the CHAMPION JESTER and counts games
-    # the challenger LOSES as eval wins. Requires num_workers=0 (Python
-    # MCTS path).
+    # Inverted chess: both players try to force their OWN king's mate.
+    # Values retain ordinary-outcome signs; selection inverts both colors.
     jester_mode: bool = False
-    jester_selfplay_prob: float = 0.85
-    jester_opponent_checkpoint: str = ""
-    # Sustained move-selection temperature for the mirror sparring side
-    # (self-play) and for both sides of a jester eval game. Greedy misère
-    # play never terminates, so this is what makes the games decisive.
-    jester_spar_temperature: float = 1.0
-    eval_temperature: float = 1.0
-    # Fraction of plies that play a uniform random legal move: on the
-    # sparring side in mirror self-play, and symmetrically on both sides
-    # of a jester eval game. This is what actually terminates a misère
-    # game — temperature cannot, because the search never spends visits
-    # on its own mating moves. Eval uses a lower rate than self-play:
-    # enough to break the deadlock, little enough that the gate is still
-    # mostly measuring the nets.
-    jester_spar_random_prob: float = 0.20
-    # How often the sparring partner accepts an offered checkmate. The
-    # dominant source of terminal signal in mirror play — see the note
-    # in selfplay.step().
-    jester_spar_accept_mate_prob: float = 0.50
-    eval_blunder_prob: float = 0.10
-    # Which gate the jester run promotes on.
-    #   "fumbler"       both nets race the SAME uniform-random opponent
-    #                   to their own checkmate; sooner wins. Decisive,
-    #                   and it does not degrade as the nets improve.
-    #   "head_to_head"  challenger jester vs champion jester. This is
-    #                   the production matchup, but two competent
-    #                   loss-seekers draw by construction, so it gets
-    #                   MORE drawn the better both nets get. Kept for
-    #                   diagnostics; not a promotion gate.
-    jester_gate: str = "fumbler"
+    jester_selfplay_prob: float = 0.75
+    jester_opponent_checkpoint: str = ""  # optional legacy diagnostic opponent
+    jester_opponent_checkpoints: tuple[str, ...] = ()  # frozen inverted pool
+    jester_curriculum_prob: float = 0.5
+    jester_curriculum_floor: float = 0.1
+    jester_spar_temperature: float = 0.0
+    jester_spar_random_prob: float = 0.0
+    jester_spar_accept_mate_prob: float = 0.0
+    eval_temperature: float = 0.0
+    eval_blunder_prob: float = 0.0
+    # The cooperative fumbler is opt-in diagnostics, never the default gate.
+    jester_gate: str = "head_to_head"
+    jester_eval_seeds: tuple[int, ...] = (20260906, 20260907)
+    jester_eval_batch_size: int = 16
+    jester_tactical_min_accuracy: float = 0.5
+    jester_move_cap: int = 300
     archive_every_gens: int = 0
     # Cap on retained archives (oldest are deleted as new ones are written).
     # 0 = unlimited.
@@ -403,6 +382,11 @@ class TrainStats:
         """All cap-timeouts adjudicated via Syzygy (any outcome)."""
         return self.tb_w + self.tb_b + self.tb_d
 
+    # Perspective of a designated learner, split by opponent/start distribution.
+    jester_outcomes: dict[str, dict[str, int]] = field(default_factory=dict)
+    curriculum_prob: float = 0.5
+    tactical_accuracy: float = 0.0
+
     # --- Per-origin breakdown -------------------------------------------
     # Same 8 outcome buckets, split three ways by how the game was
     # initialized. Useful for answering "are my endgame inits producing
@@ -418,7 +402,7 @@ class TrainStats:
             "tb_w": 0, "tb_b": 0, "tb_d": 0,
             "cap": 0,
         }
-        for origin in ("standard", "endgame", "random")
+        for origin in ("standard", "endgame", "random", "curriculum")
     })
 
 
@@ -481,29 +465,24 @@ class Trainer:
                 "path encodes boards in Rust with the 20-plane layout)"
             )
 
-        # Jester mode: load the frozen winner net (game opponent AND the
-        # opponent-ply evaluator inside the agent's search trees).
         self._frozen_opponent = None
+        self._jester_opponents = []
         if self.config.jester_mode:
-            if self.config.num_workers > 0:
-                raise ValueError(
-                    "jester_mode requires num_workers=0 (selection inversion "
-                    "and dual-net routing run on the Python MCTS path only)"
-                )
-            if not self.config.jester_opponent_checkpoint:
-                raise ValueError(
-                    "jester_mode requires jester_opponent_checkpoint "
-                    "(frozen winner weights, e.g. the Sage champion .pt)"
-                )
-            opp_ckpt = torch.load(
-                self.config.jester_opponent_checkpoint,
-                map_location="cpu",
-                weights_only=False,
-            )
-            opp = _build_model_from_arch(opp_ckpt.get("model_arch") or {})
-            opp.load_state_dict(opp_ckpt["model_state_dict"])
-            opp.to(device).eval()
-            self._frozen_opponent = opp
+            if self.config.num_workers and (
+                self.config.jester_spar_random_prob or self.config.jester_spar_accept_mate_prob
+                or self.config.jester_opponent_checkpoint
+            ):
+                raise ValueError("jester_mode multiprocess training requires competitive opponents")
+            paths = self.config.jester_opponent_checkpoints
+            if self.config.jester_opponent_checkpoint:
+                paths = (*paths, self.config.jester_opponent_checkpoint)
+            for path in dict.fromkeys(paths):
+                ckpt = torch.load(path, map_location="cpu", weights_only=False)
+                opponent = _build_model_from_arch(ckpt.get("model_arch") or {})
+                opponent.load_state_dict(ckpt["model_state_dict"])
+                self._jester_opponents.append(opponent.to(device).eval())
+            if self._jester_opponents:
+                self._frozen_opponent = self._jester_opponents[0]
 
         # Apply MCTS hyperparam overrides before self-play starts.
         from .mcts import set_mcts_params
@@ -568,8 +547,13 @@ class Trainer:
                 dirichlet_alpha=self.config.dirichlet_alpha,
                 dirichlet_epsilon=self.config.dirichlet_epsilon,
                 fpu_reduction=self.config.fpu_reduction,
-                syzygy_path=self.config.syzygy_path,
+                syzygy_path=None if self.config.jester_mode else self.config.syzygy_path,
                 syzygy_max_pieces=self.config.syzygy_max_pieces,
+                jester_mode=self.config.jester_mode,
+                jester_selfplay_prob=self.config.jester_selfplay_prob,
+                opponent_checkpoints=self.config.jester_opponent_checkpoints,
+                curriculum_start_prob=self.config.jester_curriculum_prob if self.config.jester_mode else 0.0,
+                standard_move_cap=self.config.jester_move_cap,
                 rewards=self.config.rewards,
                 value_ply_decay=self.config.value_ply_decay,
                 policy_softening_temperature=self.config.self_play_policy_softening_temperature,
@@ -604,11 +588,9 @@ class Trainer:
                     resign_min_plies=self.config.resign_min_plies,
                     board_encoder=self._board_encoder,
                     invert_agent_selection=self.config.jester_mode,
-                    frozen_evaluator=(
-                        self._make_model_evaluator(self._frozen_opponent)
-                        if self._frozen_opponent is not None
-                        else None
-                    ),
+                    frozen_evaluators=tuple(self._make_model_evaluator(m) for m in self._jester_opponents),
+                    curriculum_start_prob=self.config.jester_curriculum_prob if self.config.jester_mode else 0.0,
+                    standard_move_cap=self.config.jester_move_cap,
                     agent_selfplay_prob=self.config.jester_selfplay_prob,
                     spar_temperature=self.config.jester_spar_temperature,
                     spar_random_prob=self.config.jester_spar_random_prob,
@@ -618,6 +600,7 @@ class Trainer:
             )
 
         self.stats = TrainStats(target_gens=self.config.target_gens)
+        self.stats.curriculum_prob = self.config.jester_curriculum_prob
         # Seed live LR before any schedule step, so the dashboard's
         # model panel shows the right value even at gen 0 (and during
         # warmup before _maybe_update_lr first runs). load_checkpoint
@@ -631,7 +614,7 @@ class Trainer:
         self._champion_model: ChessNet | None = None
         # Fumbler-gate memo: (champion_gen, position name, seat) -> plies
         # to the champion's own mate, or None. See _play_fumbler_pair.
-        self._fumbler_cache: dict[tuple[int, str, str], int | None] = {}
+        self._fumbler_cache: dict[tuple, int | None] = {}
         self._champion_gen = 0
         self._plateau_counter = 0
         self._eval_history: list[dict] = []
@@ -963,12 +946,20 @@ class Trainer:
     def selfplay_step(self) -> None:
         """Advance all self-play games by one move (single-process mode)."""
         self.model.eval()
-        finished = self.engine.step()
+        from . import mcts
+        previous_c = mcts.C_PUCT
+        try:
+            if self.config.self_play_c_puct is not None:
+                mcts.set_mcts_params(c_puct=self.config.self_play_c_puct)
+            finished = self.engine.step()
+        finally:
+            mcts.set_mcts_params(c_puct=previous_c)
         for r in finished:
             self._record_outcome(
                 r.outcome,
                 getattr(r, "origin", "standard"),
                 getattr(r, "resign_truth_fp", None),
+                r.matchup, r.variant_outcome,
             )
 
     def _record_outcome(
@@ -976,7 +967,13 @@ class Trainer:
         outcome: str,
         origin: str = "standard",
         resign_truth_fp: bool | None = None,
+        matchup: str = "mirror",
+        variant_outcome: str | None = None,
     ) -> None:
+        if variant_outcome is not None:
+            key = f"{matchup}/{origin}"
+            bucket = self.stats.jester_outcomes.setdefault(key, {"own_mate": 0, "delivered_mate": 0, "draw": 0, "cap": 0})
+            bucket[variant_outcome] += 1
         # Dispatch on the granular outcome label. See selfplay.GameResult for
         # the full set. `origin` selects which per-origin sub-bucket to
         # increment alongside the global counter.
@@ -1090,6 +1087,9 @@ class Trainer:
           * checkpoint
         """
         assert self._mp_self_play is not None
+        self._mp_self_play.initial_state_dict = {
+            k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()
+        }
         self._mp_self_play.start()
 
         step = 0
@@ -1103,6 +1103,7 @@ class Trainer:
                 step += 1
                 iter_start = time.perf_counter()
 
+                self._mp_self_play.check_health()
                 # Drain as many training examples as are available right now.
                 t_a = time.perf_counter()
                 drained = self._mp_self_play.drain_examples(self.buffer)
@@ -1114,6 +1115,7 @@ class Trainer:
                         result.outcome,
                         getattr(result, "origin", "standard"),
                         getattr(result, "resign_truth_fp", None),
+                        result.matchup, result.variant_outcome,
                     )
                 t_b = time.perf_counter()
                 self._ema("t_drain_ms", (t_b - t_a) * 1000.0)
@@ -1130,6 +1132,7 @@ class Trainer:
                     for _ in range(self.config.gradient_steps_per_selfplay_step):
                         last_losses = self.train_step()
                         self.stats.generation += 1
+                        self._maybe_update_lr()
                         # Push fresh weights on a cadence.
                         if self.stats.generation % self.config.weight_broadcast_every == 0:
                             t_c = time.perf_counter()
@@ -1189,7 +1192,8 @@ class Trainer:
         # breaking ChessNet's own state-dict strictness.
         if self.aux_material is not None:
             checkpoint["aux_material_state_dict"] = self.aux_material.state_dict()
-        torch.save(checkpoint, pt_path)
+        torch.save(checkpoint, pt_path.with_suffix(".pt.tmp"))
+        pt_path.with_suffix(".pt.tmp").replace(pt_path)
 
         self.model.eval()
         # Model families own their browser format (Toy's "toy-v1");
@@ -1198,8 +1202,9 @@ class Trainer:
             weights = self.model.export_browser_json()
         else:
             weights = export_weights(self.model, learning_rate=self.config.learning_rate)
-        with json_path.open("w") as f:
+        with json_path.with_suffix(".json.tmp").open("w") as f:
             json.dump(weights, f)
+        json_path.with_suffix(".json.tmp").replace(json_path)
 
         return {"pt": pt_path, "json": json_path}
 
@@ -1268,14 +1273,8 @@ class Trainer:
         king mated and the side mated FIRST wins. That is the matchup the
         bot actually ships into.
 
-        Such a match will not finish on its own. Neither side will
-        deliver the mate the other is angling for, and `temperature`
-        cannot fix that — it samples the search's visit counts, and a
-        loss-seeking search puts near-zero visits on its own mating
-        moves by construction. `blunder_prob` is the instrument that
-        works: that fraction of plies plays a UNIFORM random legal move,
-        which can land on a mate. It is applied symmetrically, so the
-        two nets are still compared on equal terms.
+        Optional temperature and blunders are supported for legacy diagnostics.
+        The competitive gate uses neither; forced selfmates are legal wins.
         """
         import copy
 
@@ -1369,35 +1368,10 @@ class Trainer:
         mover — and return how many plies it took the net to get its own
         king checkmated, or None if it never managed it.
 
-        This is the jester gate's unit of measurement, and it exists
-        because head-to-head misère play cannot serve as one. Two
-        competent loss-seekers draw by construction: neither will ever
-        deliver the mate the other wants, so the better both nets get,
-        the more the match draws, and a gate built on it degrades
-        exactly backwards. Measured on real weights: every head-to-head
-        smoke game drew, on lopsided and full-material positions alike.
-
-        The fumbler cannot refuse: it moves at random, except that it
-        ALWAYS takes a checkmate when one is on offer. That last clause
-        is what makes it a usable instrument rather than a curiosity. A
-        purely random mover has to stumble onto mate by luck, which from
-        a full middlegame it never does inside the move cap — the first
-        smoke pair had both nets fail to be mated at all. Accepting
-        offered mates turns the measurement into "how fast can this net
-        reach a position where its opponent HAS a mate available", which
-        is decisive, monotone in the skill we want, and cheap.
-
-        It is a measuring fixture, not a model of the human: a person
-        trying to lose would decline the mate. It only has to rank nets
-        correctly. Because it never improves, the number it produces
-        stays comparable across the entire run — unlike a champion-
-        relative score, which drifts.
-
-        The net plays greedily; all the randomness is the fumbler's, so
-        the measurement reflects the weights rather than sampling noise.
-        In-tree the opponent's plies are NOT inverted — the net models a
-        fumbler as someone who would take a mate if offered, which is
-        what makes it seek positions where mates are available at all.
+        Supplementary cooperative diagnostic only: the fumbler accepts mates
+        and otherwise moves uniformly. This measures creating opportunities,
+        not winning against a resistant inverted-chess opponent. Competitive
+        promotion is implemented separately in jester_eval.py.
         """
         import copy
 
@@ -1470,7 +1444,10 @@ class Trainer:
         the seed is derived from the position so the fumbler behaves
         identically for both nets and stays fixed across generations.
         """
-        seed = (hash((position.name, net_color)) & 0xFFFFFFFF) ^ 0x5EED
+        from .inverted import stable_position_id
+        import hashlib
+        identity = stable_position_id(position.state)
+        seed = int.from_bytes(hashlib.sha256(f"{identity}/{net_color}".encode()).digest()[:8], "big")
         challenger_plies = self._play_fumbler_game(
             challenger_eval, net_color, mcts_sims, move_cap,
             position.state, seed,
@@ -1482,7 +1459,7 @@ class Trainer:
         # for the challenger only, halving a match that would otherwise
         # run for hours. A promotion changes _champion_gen and the whole
         # cache lapses.
-        cache_key = (self._champion_gen, position.name, net_color)
+        cache_key = (self._champion_gen, identity, net_color, seed, mcts_sims, move_cap)
         if cache_key in self._fumbler_cache:
             champion_plies = self._fumbler_cache[cache_key]
         else:
@@ -1510,6 +1487,10 @@ class Trainer:
         clears `eval_score_threshold`. Returns a summary dict and appends it
         to self._eval_history + eval.csv.
         """
+        if self.config.jester_mode and self.config.jester_gate == "head_to_head":
+            from .jester_eval import evaluate_competitive
+            return evaluate_competitive(self, ckpt_dir)
+
         import csv
         import math
 
@@ -1734,6 +1715,7 @@ class Trainer:
                                 result.outcome,
                                 getattr(result, "origin", "standard"),
                                 getattr(result, "resign_truth_fp", None),
+                        result.matchup, result.variant_outcome,
                             )
                     except Exception:
                         pass

@@ -12,7 +12,8 @@
     "verify-weights": "tsx scripts/verify_weights.ts",
     "test-mcts-sign": "tsx scripts/test_mcts_sign.ts",
     "test-repetition": "tsx scripts/test_repetition.ts",
-    "verify-toy": "tsx scripts/verify_toy_weights.ts"
+    "verify-toy": "tsx scripts/verify_toy_weights.ts",
+    "test-inverted": "tsx scripts/test_inverted.ts"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",

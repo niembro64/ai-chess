@@ -257,8 +257,8 @@ class MCTSSearch:
         total_visits = sum(c.visit_count for c in self.root.children.values())
         if total_visits > 0:
             for idx, child in self.root.children.items():
-                policy[idx] = child.visit_count / total_visits
-        move = _sample_move(self.root, rng, temperature)
+                policy[idx % POLICY_SIZE] += child.visit_count / total_visits
+        move = _sample_move(self.root, rng, temperature) if self.root.children else Move(Position(0, 0), Position(0, 0))
         root_value = (
             self.root.total_value / self.root.visit_count if self.root.visit_count > 0 else 0.0
         )
@@ -273,6 +273,11 @@ class MCTSSearch:
     # --- internals ---
 
     def _check_terminal(self, node: MCTSNode) -> None:
+        from .selfplay import _is_insufficient_material
+        if _is_insufficient_material(node.state.board):
+            node.is_terminal = node.is_expanded = True
+            node.terminal_value = 0.0
+            return
         s = node.state.status
         if s in ("checkmate", "stalemate", "draw"):
             node.is_terminal = True
@@ -322,26 +327,19 @@ class MCTSSearch:
 
         is_white = node.state.currentTurn == "white"
 
-        # Accumulate prior mass for just the moves we'll actually keep (one
-        # MCTS child per unique policy-index — underpromotions collapse).
-        seen: set[int] = set()
-        prior_sum = 0.0
-        for move, _child_state in children:
-            mi = move_to_index(move, is_white)
-            if mi not in seen:
-                seen.add(mi)
-                prior_sum += float(policy[mi])
-
-        seen.clear()
+        # All legal promotions stay in the tree. The legacy from/to
+        # policy head shares their prior and receives aggregated visits.
+        from collections import Counter
+        counts = Counter(move_to_index(move, is_white) for move, _ in children)
+        prior_sum = sum(float(policy[idx]) for idx in counts)
         for move, child_state in children:
             mi = move_to_index(move, is_white)
-            if mi in seen:
-                continue
-            seen.add(mi)
+            promotion_offset = {"rook": 1, "bishop": 2, "knight": 3}.get(move.promotion, 0)
             child = MCTSNode(child_state, parent=node, move=move)
-            child.prior = float(policy[mi]) / prior_sum if prior_sum > 0 else 1.0 / len(seen)
+            child.prior = (float(policy[mi]) / prior_sum / counts[mi]
+                           if prior_sum > 0 else 1.0 / len(children))
             self._check_terminal(child)
-            node.children[mi] = child
+            node.children[mi + promotion_offset * POLICY_SIZE] = child
 
         node.is_expanded = True
 
@@ -380,7 +378,7 @@ def _select_child(node: MCTSNode, invert_turns: "str | None" = None) -> MCTSNode
     # CHESS_AI_PYTHON_MCTS=1 was set. Under inversion, a child's expected
     # Q is ~ -parent_q, so the FPU baseline negates too.
     parent_q = node.total_value / node.visit_count if node.visit_count > 0 else 0.0
-    q_unvisited = (-parent_q if inverted else parent_q) - FPU_REDUCTION
+    q_unvisited = (-parent_q if inverted else parent_q) - (FPU_REDUCTION if node.parent else 0.0)
     sign = 1.0 if inverted else -1.0
     for child in node.children.values():
         q = sign * child.total_value / child.visit_count if child.visit_count > 0 else q_unvisited
@@ -417,11 +415,6 @@ def _sample_move(root: MCTSNode, rng: random.Random, temperature: float = 1.0) -
     this annealing, self-play games keep sampling sub-optimal moves
     proportionally and the training signal stays mushy.
 
-    Jester play needs the τ>0 tail as well as the head. Two loss-seekers
-    playing greedily never terminate — neither will deliver the mate the
-    other wants — so the game shuffles to a threefold draw and teaches
-    nothing. Sustained temperature is what puts blunders back in, and a
-    blundering loss-seeker is exactly the opponent the product faces.
     """
     children = list(root.children.values())
     if not children:
@@ -528,94 +521,45 @@ def _tuple_to_move(tup: tuple[int, int, int, int, str | None]) -> Move:
     )
 
 
-def _run_batched_mcts_rust(
-    states: list[ChessGameState],
-    evaluator: BatchedEvaluator,
-    num_simulations: int,
-    rng: random.Random,
-    temperatures: list[float],
-    policy_softening_temperature: float,
-    dirichlet_epsilon: float,
-) -> list[MCTSResult]:
-    """Rust-backed MCTS loop. Same semantics as the Python path; ~20× faster
-    per-sim because the tree + PUCT + backprop live in Rust and the board
-    encoding is emitted directly from Rust without marshalling."""
-    soften = policy_softening_temperature != 1.0
-    searches = [
-        _rust_mcts.MctsSearch(_state_to_dict(s), C_PUCT, FPU_REDUCTION)
-        for s in states
-    ]
-    active_idx = [i for i, s in enumerate(searches) if not s.is_terminal()]
+class RustMCTSSearch:
+    """Adapter sharing the Python batching/dual-net driver with Rust trees."""
 
-    # Terminal-at-construction games return a zero-policy sentinel with
-    # a dummy move. The outer self-play loop shouldn't call into MCTS for
-    # already-terminal states, but we mirror Python's behavior defensively.
-    if not active_idx:
-        results = []
-        for i, s in enumerate(searches):
-            seed = rng.randrange(2**63)
-            policy_bytes, move_tup, rv = s.get_result(temperatures[i], seed)
-            policy = np.frombuffer(policy_bytes, dtype=np.float32).copy()
-            if sum(move_tup[:4]) == 0 and move_tup[4] is None:
-                # No legal moves — return the existing (zero) policy but
-                # synthesize a placeholder Move; caller is expected to
-                # check the state's status, not use this move.
-                move = Move(Position(0, 0), Position(0, 0), None)
-            else:
-                move = _tuple_to_move(move_tup)
-            results.append(MCTSResult(policy=policy, move=move, root_value=rv))
-        return results
-
-    # Batch-evaluate the root positions.
-    root_boards_bytes = [searches[i].get_root_board() for i in active_idx]
-    root_boards = np.stack(
-        [np.frombuffer(b, dtype=np.float32) for b in root_boards_bytes]
-    )
-    root_policies, root_values = evaluator(root_boards)
-    if soften:
-        root_policies = _soften_policy(root_policies, policy_softening_temperature)
-
-    for k, gi in enumerate(active_idx):
-        searches[gi].init_root(
-            root_policies[k].tobytes(),
-            float(root_values[k]),
-            dirichlet_epsilon,
-            DIRICHLET_ALPHA,
-            rng.randrange(2**63),
+    def __init__(self, state, board_encoder=None, position_counts=None, invert_turns=None):
+        from types import SimpleNamespace
+        self.root = SimpleNamespace(state=state)
+        self._search = _rust_mcts.MctsSearch(
+            _state_to_dict(state), C_PUCT, FPU_REDUCTION, invert_turns,
+            list(position_counts.items()) if position_counts is not None else None,
         )
 
-    # Simulation loop. Leaf priors are NOT softened — softening is
-    # root-only (see run_batched_mcts docstring).
-    for _ in range(num_simulations):
-        pending: list[tuple[int, bytes]] = []
-        for gi in active_idx:
-            board = searches[gi].select_leaf()
-            if board is not None:
-                pending.append((gi, board))
-        if pending:
-            boards = np.stack(
-                [np.frombuffer(b, dtype=np.float32) for _, b in pending]
-            )
-            policies, values = evaluator(boards)
-            for j, (gi, _) in enumerate(pending):
-                searches[gi].supply_eval(policies[j].tobytes(), float(values[j]))
+    def is_terminal(self):
+        return self._search.is_terminal()
 
-    # Extract results.
-    results: list[MCTSResult | None] = [None] * len(searches)
-    for gi, s in enumerate(searches):
-        seed = rng.randrange(2**63)
-        policy_bytes, move_tup, rv = s.get_result(temperatures[gi], seed)
-        policy = np.frombuffer(policy_bytes, dtype=np.float32).copy()
-        # hasattr guard: an older compiled extension without best_child_q
-        # degrades to the mean-Q statistic instead of crashing self-play.
-        bq = s.best_child_q() if hasattr(s, "best_child_q") else rv
-        if gi in active_idx:
-            move = _tuple_to_move(move_tup)
-        else:
-            # Terminal; synthesize a placeholder (caller shouldn't use it).
-            move = Move(Position(0, 0), Position(0, 0), None)
-        results[gi] = MCTSResult(policy=policy, move=move, root_value=rv, best_q=bq)
-    return results  # type: ignore[return-value]
+    def get_root_board(self):
+        return np.frombuffer(self._search.get_root_board(), dtype=np.float32)
+
+    def init_root(self, policy, value, dirichlet_epsilon=None):
+        self._search.init_root(
+            np.asarray(policy, dtype=np.float32).tobytes(), float(value),
+            DIRICHLET_EPSILON if dirichlet_epsilon is None else dirichlet_epsilon,
+            DIRICHLET_ALPHA, self._rng.randrange(2**63),
+        )
+
+    def select_leaf(self):
+        board = self._search.select_leaf()
+        return None if board is None else np.frombuffer(board, dtype=np.float32)
+
+    def pending_leaf_turn(self):
+        return self._search.pending_leaf_turn()
+
+    def supply_eval(self, policy, value):
+        self._search.supply_eval(np.asarray(policy, dtype=np.float32).tobytes(), float(value))
+
+    def get_result(self, rng=None, temperature=1.0):
+        rng = rng or random
+        policy, move, value = self._search.get_result(temperature, rng.randrange(2**63))
+        return MCTSResult(np.frombuffer(policy, dtype=np.float32).copy(),
+                          _tuple_to_move(move), value, self._search.best_child_q())
 
 
 def run_batched_mcts(
@@ -631,24 +575,15 @@ def run_batched_mcts(
     invert_turns: "list[str | None] | None" = None,
     opponent_evaluator: BatchedEvaluator | None = None,
     agent_colors: "list[str | None] | None" = None,
+    opponent_evaluators: list[BatchedEvaluator | None] | None = None,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
 
-    `position_counts[i]` is game i's position-occurrence history (the
-    same dict used for threefold adjudication). When provided, the
-    Python search treats in-tree repetitions as terminal draws — see
-    MCTSSearch. The Rust fast path does NOT support this yet and
-    ignores it (warns once); Toy always runs the Python path.
-
-    Jester (misère) support — Python path only, forced automatically:
-    `invert_turns[i]` (None | "white" | "black" | "both") flips PUCT
-    selection at nodes whose mover is trying to LOSE (see MCTSSearch).
-    `opponent_evaluator` + `agent_colors[i]` enable dual-net trees for
-    agent-vs-frozen-opponent games: any node whose side-to-move is NOT
-    game i's agent color is evaluated (priors AND value) by the frozen
-    opponent net, so the agent's tree models its opponent with the
-    opponent's real policy. Both nets output truthful chess values, so
-    mixing their evaluations in one tree is sound.
+    Both backends support repetition, selection inversion, and dual-net
+    routing. `invert_turns[i]` is None, "white", "black", or "both";
+    values retain the ordinary-outcome sign convention in all cases.
+    `opponent_evaluators[i]` optionally selects a different frozen opponent
+    per game; `agent_colors[i]` controls which evaluator supplies a leaf.
 
     `temperatures[i]` controls the move-selection temperature for game `i`.
     Defaults to τ=1.0 for every game (AlphaZero-style exploration). Pass a
@@ -676,42 +611,21 @@ def run_batched_mcts(
     eps = DIRICHLET_EPSILON if dirichlet_epsilon is None else dirichlet_epsilon
     for name, lst in (("position_counts", position_counts),
                       ("invert_turns", invert_turns),
-                      ("agent_colors", agent_colors)):
+                      ("agent_colors", agent_colors),
+                      ("opponent_evaluators", opponent_evaluators)):
         if lst is not None and len(lst) != len(states):
             raise ValueError(f"{name} length {len(lst)} != states length {len(states)}")
 
-    jester_features = (
-        (invert_turns is not None and any(t is not None for t in invert_turns))
-        or opponent_evaluator is not None
-    )
-
-    # The Rust fast path encodes boards in Rust with Sage's 20-plane
-    # layout; a custom encoder (Toy's 6 planes) forces the Python path,
-    # and so do the jester features (inversion / dual-net routing),
-    # which are not ported to Rust yet.
-    if USE_RUST_MCTS and board_encoder is None and not jester_features:
-        if position_counts is not None:
-            import warnings
-            warnings.warn(
-                "Rust MCTS ignores position_counts — in-tree repetition "
-                "awareness is not ported to the Rust search yet.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        return _run_batched_mcts_rust(
-            states,
-            evaluator,
-            num_simulations,
-            rng,
-            temperatures,
-            policy_softening_temperature,
-            eps,
-        )
+    # Never silently use an obsolete extension without variant semantics.
+    use_rust = USE_RUST_MCTS and board_encoder is None
+    if use_rust and not hasattr(_rust_mcts.MctsSearch, "pending_leaf_turn"):
+        raise RuntimeError("Rebuild chess_ai_rust: maturin develop --release in rust_engine")
+    search_class = RustMCTSSearch if use_rust else MCTSSearch
 
     soften = policy_softening_temperature != 1.0
 
     searches = [
-        MCTSSearch(
+        search_class(
             s,
             board_encoder,
             position_counts[i] if position_counts else None,
@@ -720,26 +634,23 @@ def run_batched_mcts(
         for i, s in enumerate(states)
     ]
 
-    # Route each pending evaluation to the right net: game gi's leaves
-    # whose mover is NOT the agent color go to the frozen opponent net.
-    def _routed_eval(
-        items: "list[tuple[int, np.ndarray, str]]",  # (game idx, board, leaf turn)
-    ) -> "list[tuple[np.ndarray, float]]":
-        out: "list[tuple[np.ndarray, float] | None]" = [None] * len(items)
-        if opponent_evaluator is None:
-            policies, values = evaluator(np.stack([b for _, b, _ in items]))
-            return [(policies[k], float(values[k])) for k in range(len(items))]
-        agent_items: list[int] = []
-        opp_items: list[int] = []
-        for k, (gi, _b, turn) in enumerate(items):
+    for search in searches:
+        if isinstance(search, RustMCTSSearch):
+            search._rng = rng
+
+    def _routed_eval(items):
+        out = [None] * len(items)
+        groups = {}
+        for k, (gi, board, turn) in enumerate(items):
             ac = agent_colors[gi] if agent_colors else None
-            (agent_items if ac is None or turn == ac else opp_items).append(k)
-        for ev, group in ((evaluator, agent_items), (opponent_evaluator, opp_items)):
-            if group:
-                policies, values = ev(np.stack([items[k][1] for k in group]))
-                for j, k in enumerate(group):
-                    out[k] = (policies[j], float(values[j]))
-        return out  # type: ignore[return-value]
+            opponent = opponent_evaluators[gi] if opponent_evaluators else opponent_evaluator
+            ev = opponent if opponent is not None and ac is not None and turn != ac else evaluator
+            groups.setdefault(ev, []).append((k, board))
+        for ev, batch in groups.items():
+            policies, values = ev(np.stack([b for _, b in batch]))
+            for j, (k, _) in enumerate(batch):
+                out[k] = (policies[j], float(values[j]))
+        return out
 
     active = [(i, s) for i, s in enumerate(searches) if not s.is_terminal()]
     if not active:

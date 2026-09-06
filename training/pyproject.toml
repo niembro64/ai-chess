@@ -45,3 +45,6 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+[tool.setuptools.package-data]
+chess_ai = ["selfmate_positions.json"]

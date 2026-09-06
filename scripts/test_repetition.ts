@@ -14,8 +14,16 @@ import {
   posToAlgebraic,
 } from '../src/game/chess/ChessEngine';
 import { ChessServer } from '../src/game/server/ChessServer';
-import { pickFreshMove } from '../src/game/ai/AIPlayer';
+import { markBlockedAndPick } from '../src/game/ai/AIPlayer';
+import { moveToIndex } from '../src/game/ai/ChessNet';
 import type { Board, ChessGameState, Move, PieceColor, PieceType } from '../src/types/chess';
+
+// Exercise the current shared display/selection implementation.
+function pickFreshMove(state: ChessGameState, ranked: {move: Move}[], seen: Set<string>, color: PieceColor): Move {
+  const candidates = ranked.map(({move}) => ({move,index:moveToIndex(move,color==='white')}));
+  const entries = candidates.map(c => ({...c,p:1,legal:true}));
+  return markBlockedAndPick(state,entries,candidates,seen,color);
+}
 
 let failures = 0;
 function check(cond: boolean, label: string): void {
@@ -193,7 +201,7 @@ console.log('pickFreshMove (own-army rule):');
   // Every candidate repeats → forced, caller keeps its top choice.
   const afterE4 = ownSideKey(applyMove(state, e4), 'white');
   check(
-    pickFreshMove(state, ranked, new Set([afterNf3, afterE4]), 'white') === null,
+    pickFreshMove(state, ranked, new Set([afterNf3, afterE4]), 'white') === nf3,
     'all candidates repeat → forced, caller falls back',
   );
 
@@ -209,8 +217,8 @@ console.log('pickFreshMove (own-army rule):');
     'history includes the starting arrangement',
   );
   check(
-    pickFreshMove(s2, [{ move: backAgain }], seenAfter, 'white') === null,
-    'knight returning home is refused (its own army repeats)',
+    pickFreshMove(s2, [{ move: backAgain }], seenAfter, 'white') === backAgain,
+    'a sole candidate remains playable when every candidate repeats',
   );
 }
 

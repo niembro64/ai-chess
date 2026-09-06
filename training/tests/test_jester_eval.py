@@ -1,36 +1,6 @@
-"""Jester eval gating + the machinery that makes misère games finish.
+"""Legacy cooperative diagnostics and inverted outcome-sign regressions.
 
-Nothing about inverted chess terminates on its own. Both sides want
-their own king mated, so neither will ever deliver the mate the other
-is angling for, and left alone the game shuffles until the move cap.
-Two consequences shaped everything here.
-
-SELF-PLAY. Temperature cannot supply the missing blunder. It samples
-the search's visit counts, and a loss-seeking search spends near-zero
-visits on its own mating moves by construction. Measured on the
-temperature-only build: 20% checkmate, 45% move-cap timeouts, against
-71.5% decisive under the old mix. A UNIFORM random legal move on the
-sparring side is out of distribution and so CAN land on a mate — the
-accident a human trying to lose commits — but on its own it only
-reached 29.5% checkmate, because landing on a mate by chance already
-presupposes the skill being learned: the agent has to have manufactured
-a position where mates are plentiful. So the sparring partner also
-ACCEPTS an offered mate some of the time, converting that skill
-directly into terminal signal. All three shape the opponent, never the
-reward — the mate is real, so every value label stays truthful.
-
-GATING. Head-to-head challenger-vs-champion is the production matchup,
-but it cannot be the gate: two competent loss-seekers draw by
-construction, so the better both nets get, the more it draws. It
-degrades backwards. Measured on real weights, every head-to-head smoke
-game drew — on full-material middlegames as well as lopsided endgames.
-The gate instead races both nets to their own checkmate against a
-FUMBLER: a random mover that always accepts an offered mate. Decisive,
-monotone in the skill we want, and fixed forever so the number stays
-comparable across the whole run.
-
-These tests pin both mechanisms, the misère scoring, and the kwarg
-whose absence killed the first run at its very first eval match.
+Competitive defaults and the resistant gate are tested in test_inverted.py.
 """
 
 from __future__ import annotations
@@ -183,6 +153,7 @@ def test_mirror_slots_get_a_sparring_side():
         invert_agent_selection=True,
         frozen_evaluator=_uniform_evaluator,
         agent_selfplay_prob=0.5,
+        spar_temperature=1.0,
     )
     engine = SelfPlayEngine(
         _uniform_evaluator, lambda ex: None, config, random.Random(11)
@@ -283,6 +254,7 @@ def test_sparring_blunders_are_uniform_not_hotter_search():
             invert_agent_selection=True,
             frozen_evaluator=None,        # all mirror
             agent_selfplay_prob=1.0,
+        spar_temperature=1.0,
             spar_random_prob=1.0,         # every sparring ply blunders
         )
         engine = SelfPlayEngine(
@@ -452,7 +424,7 @@ def _mated_after(plies_by_net):
 class _Pos:
     name = "probe"
     difficulty = "opening"
-    state = None
+    state = _fresh_start()
 
 
 def test_fumbler_pair_prefers_the_faster_self_mate():
@@ -650,6 +622,7 @@ def test_sparring_partner_accepts_offered_mates():
             invert_agent_selection=True,
             frozen_evaluator=None,
             agent_selfplay_prob=1.0,
+        spar_temperature=1.0,
             spar_accept_mate_prob=1.0,
             spar_random_prob=0.0,
         )
@@ -683,6 +656,7 @@ def test_sparring_partner_can_decline_below_probability_one():
             invert_agent_selection=True,
             frozen_evaluator=None,
             agent_selfplay_prob=1.0,
+        spar_temperature=1.0,
             spar_accept_mate_prob=0.5,
             spar_random_prob=0.0,
         )

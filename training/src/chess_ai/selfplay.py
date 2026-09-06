@@ -98,14 +98,11 @@ class GameSlot:
     # None = both sides are the agent (normal self-play always; in
     # jester mode a None slot is a mirror jester-vs-jester game).
     agent_color: str | None = None
-    # Mirror games only: the color playing as the SPARRING PARTNER. Same
-    # net and same search as the agent, but its move is sampled at a
-    # sustained temperature instead of annealing to greedy, so it
-    # blunders. Two greedy loss-seekers never finish a game (neither
-    # will deliver the mate the other wants) — the sparring side is what
-    # makes the mirror decisive, and it doubles as a model of the human
-    # opponent, who is also trying to lose and also imperfect.
+    # Optional noisy sparring seat; unset in competitive inverted training.
     spar_color: str | None = None
+    opponent_evaluator: object = None
+    tracked_color: str = "white"
+    matchup: str = "mirror"
     # First color that hit the resign threshold while sampled into the
     # truth-check holdout (resign_disabled_prob). The game plays on;
     # _finish_game compares the predicted loss against the actual
@@ -181,6 +178,8 @@ class GameResult:
     outcome_label: str        # human string for logging
     white_outcome: float      # [-1, 1]
     tb_adjudicated: bool = False  # True iff outcome came from Syzygy
+    matchup: str = "mirror"
+    variant_outcome: str | None = None
     origin: str = "standard"  # propagated from GameSlot; see above
     # Resign truth-check verdict. None = this game had no held-out
     # resign trigger. False = the would-resign side did lose (threshold
@@ -576,52 +575,17 @@ class SelfPlayConfig:
     # passes chess_ai.toy.encode_toy — any non-default encoder forces
     # the Python MCTS path, whose boards are encoded per this callable.
     board_encoder: "Callable[[ChessGameState], np.ndarray] | None" = None
-    # --- Jester (misère) mode -------------------------------------------
-    # The agent learns to LOSE. Value labels stay truthful; only MCTS
-    # selection inverts at agent plies (see mcts.MCTSSearch). Games mix
-    # agent-vs-frozen-opponent (dense loss signal — the opponent
-    # punishes every offer) with agent-vs-agent mirror games where BOTH
-    # sides invert — there a loss must be FORCED against an opponent who
-    # refuses to win, which is the strongest form of losing well.
+    # Inverted trees preserve ordinary-outcome signs and invert selection.
     invert_agent_selection: bool = False
-    # Frozen winner net (e.g. the Sage champion) — evaluates its own
-    # plies both as game opponent and inside the agent's search tree
-    # (dual-net routing). Required for non-mirror jester games.
     frozen_evaluator: "BatchedEvaluator | None" = None
-    # Share of fresh slots that are agent-vs-agent mirror games.
-    #
-    # The mirror is the PRODUCT matchup: both sides want their own king
-    # mated, so a loss has to be forced against an opponent who refuses
-    # to cooperate (a *selfmate* in chess-problem terms). Playing the
-    # frozen winner instead is a *helpmate* — the opponent wants to mate
-    # you, so "stop defending" solves it — which is a different and much
-    # easier game than the one the bot actually ships into. Keep a small
-    # non-mirror share anyway: early on it is the only dense source of
-    # "this is what being mated looks like", and it keeps the net honest
-    # against a human who accidentally plays a strong winning move.
-    agent_selfplay_prob: float = 0.25
-    # Move-selection temperature for the sparring side of a mirror game,
-    # applied for the WHOLE game (no annealing). >1 is flatter than
-    # visit-proportional. Only the played move is affected — the training
-    # target is the raw visit distribution either way, so the sparring
-    # side's plies stay honest examples.
-    spar_temperature: float = 1.0
-    # Probability that a sparring ply plays a UNIFORM RANDOM legal move
-    # instead of the search's choice. This — not temperature — is what
-    # makes mirror games finish: see the long note at the call site in
-    # step(). A loss-seeking search never puts visits on its own mating
-    # moves, so only an out-of-distribution pick can deliver the mate
-    # the opponent wants, which is precisely the accident a human trying
-    # to lose commits.
+    frozen_evaluators: tuple[BatchedEvaluator, ...] = ()
+    opponent_seeks_loss: bool = True
+    curriculum_start_prob: float = 0.0
+    standard_move_cap: int = 300
+    agent_selfplay_prob: float = 0.75
+    # Explicit legacy/cooperative diagnostics; competitive config disables all.
+    spar_temperature: float = 0.0
     spar_random_prob: float = 0.0
-    # Probability that a sparring ply ACCEPTS a checkmate that is on
-    # offer. This is the main source of terminal signal: it turns "the
-    # agent manufactured a mating chance" directly into a finished game,
-    # which is the skill the whole run is trying to teach. Uniform
-    # blunders alone only reached 29.5% checkmate, because landing on a
-    # mate by chance already presupposes the skill being learned.
-    # Shapes the opponent, not the reward — the mate is real and every
-    # value label stays truthful.
     spar_accept_mate_prob: float = 0.0
     # Per-sample policy-loss weight applied to training examples from
     # TB-adjudicated games. In those games MCTS never found a forcing
@@ -693,21 +657,29 @@ class SelfPlayEngine:
         self.resign_truth_fps: int = 0
 
     def _new_slot(self) -> GameSlot:
-        slot = _make_game_slot(
-            self.rng, self.config.random_start_prob, self.config.endgame_start_prob
-        )
-        if self.config.invert_agent_selection:
-            mirror = (
-                self.config.frozen_evaluator is None
-                or self.rng.random() < self.config.agent_selfplay_prob
-            )
+        cfg = self.config
+        if cfg.invert_agent_selection and self.rng.random() < cfg.curriculum_start_prob:
+            from .inverted import curriculum_start
+            state = curriculum_start(self.rng)
+            slot = GameSlot(state=state, move_cap=40, origin="curriculum")
+        else:
+            slot = _make_game_slot(self.rng, cfg.random_start_prob, cfg.endgame_start_prob)
+            if cfg.invert_agent_selection:
+                slot.move_cap = cfg.standard_move_cap
+        slot.position_history = {_position_key(slot.state): 1}
+        slot.tracked_color = (slot.state.currentTurn if slot.origin == "curriculum"
+                              else self.rng.choice(("white", "black")))
+        if cfg.invert_agent_selection:
+            opponents = cfg.frozen_evaluators or ((cfg.frozen_evaluator,) if cfg.frozen_evaluator else ())
+            mirror = not opponents or self.rng.random() < cfg.agent_selfplay_prob
             if mirror:
-                # Mirror game: one side spars (sustained temperature) so
-                # the game can actually end. Which side is random, so the
-                # agent learns to force the loss from both seats.
-                slot.spar_color = "white" if self.rng.random() < 0.5 else "black"
+                # Optional cooperative sparring exists only for explicit diagnostics.
+                if cfg.spar_temperature > 0 or cfg.spar_random_prob > 0 or cfg.spar_accept_mate_prob > 0:
+                    slot.spar_color = self.rng.choice(("white", "black"))
             else:
-                slot.agent_color = "white" if self.rng.random() < 0.5 else "black"
+                slot.agent_color = slot.tracked_color
+                slot.opponent_evaluator = self.rng.choice(opponents)
+                slot.matchup = "historical" if cfg.opponent_seeks_loss else "sage"
         return slot
 
     def step(self) -> list[GameResult]:
@@ -716,7 +688,7 @@ class SelfPlayEngine:
         temperatures = [
             self.config.spar_temperature
             if g.spar_color is not None and g.state.currentTurn == g.spar_color
-            else (1.0 if g.move_count < self.config.temperature_threshold_plies else 0.0)
+            else (1.0 if g.origin != "curriculum" and g.move_count < self.config.temperature_threshold_plies else 0.0)
             for g in self.games
         ]
         jester = self.config.invert_agent_selection
@@ -729,11 +701,9 @@ class SelfPlayEngine:
             # frozen side's tree also models the agent truthfully (as a
             # net trying to lose) via the same spec.
             invert_turns = [
-                "both" if g.agent_color is None else g.agent_color for g in self.games
+                "both" if g.agent_color is None or self.config.opponent_seeks_loss else g.agent_color for g in self.games
             ]
-            if self.config.frozen_evaluator is not None:
-                opponent_evaluator = self.config.frozen_evaluator
-                agent_colors = [g.agent_color for g in self.games]
+            agent_colors = [g.agent_color for g in self.games]
         mcts_results = run_batched_mcts(
             states,
             self.evaluator,
@@ -746,7 +716,7 @@ class SelfPlayEngine:
             # position history, so shuffling reads as a draw in-tree.
             position_counts=[g.position_history for g in self.games],
             invert_turns=invert_turns,
-            opponent_evaluator=opponent_evaluator,
+            opponent_evaluators=[g.opponent_evaluator for g in self.games] if jester else None,
             agent_colors=agent_colors,
         )
 
@@ -756,39 +726,8 @@ class SelfPlayEngine:
             policy = mcts_results[i].policy
             move = mcts_results[i].move
 
-            # Sparring blunder. The played move is replaced by a UNIFORM
-            # random legal one — not a hotter sample of the search.
-            #
-            # Temperature cannot do this job. A loss-seeking search puts
-            # near-zero visits on its own mating moves, because
-            # delivering mate is the worst thing it can do, so sampling
-            # from the visit distribution at any temperature will
-            # essentially never deliver the mate the opponent is angling
-            # for. The first attempt at this used sustained temperature
-            # and mirror games collapsed to 45% move-cap timeouts and
-            # 27% threefold, with only 20% reaching a checkmate.
-            #
-            # A uniform pick can land on a mating move, which is exactly
-            # the blunder a human trying to lose makes: they hand you the
-            # mate by accident. The training example for this ply still
-            # records the honest search distribution — only the move
-            # played is randomised, so the position goes off-policy
-            # (useful exploration) while the target stays clean.
-            #
-            # Uniform blunders alone were not enough: they lifted mirror
-            # play from 20% to 29.5% checkmate, still far under the 71.5%
-            # the old vs-Sage mix produced. The trap is circular. Landing
-            # on a mate by chance needs the agent to have arranged a
-            # position where mates are plentiful, and the agent cannot
-            # learn to arrange one without decisive games to learn from.
-            #
-            # So the sparring partner also ACCEPTS an offered mate, some
-            # of the time. That converts "the agent manufactured a mating
-            # chance" straight into a terminal signal, which is precisely
-            # the skill worth reinforcing. It shapes the opponent, never
-            # the reward: the agent really was checkmated, so every value
-            # label stays truthful. Below 1.0 the agent still has to
-            # manufacture chances repeatedly rather than bank on one.
+            # Explicit noisy-opponent diagnostics only. Competitive config sets
+            # these probabilities to zero; real legal outcomes still label play.
             if (
                 slot.spar_color is not None
                 and slot.state.currentTurn == slot.spar_color
@@ -964,7 +903,7 @@ class SelfPlayEngine:
             # value head "don't settle for shuffling" rather than "draws
             # are fine here." Stalemate is a forced legal draw (the side
             # to move genuinely has no moves) and is left alone.
-            want_tb_probe = hit_cap or status == "draw"
+            want_tb_probe = not self.config.invert_agent_selection and (hit_cap or status == "draw")
             tb_result = (
                 tablebase.probe_outcome(slot.state) if want_tb_probe else None
             )
@@ -1078,6 +1017,12 @@ class SelfPlayEngine:
         return GameResult(
             move_count=slot.move_count,
             outcome=outcome,
+            matchup=slot.matchup,
+            variant_outcome=(
+                ("own_mate" if slot.state.currentTurn == slot.tracked_color else "delivered_mate")
+                if self.config.invert_agent_selection and status == "checkmate"
+                else ("cap" if outcome == "cap" else "draw") if self.config.invert_agent_selection else None
+            ),
             outcome_label=label,
             white_outcome=white_outcome,
             tb_adjudicated=tb_adjudicated,

@@ -371,10 +371,7 @@ def build_config() -> TrainConfig:
 # same architecture Sage used pre-Rust. Fine at Toy's size.
 
 CHECKPOINT_DIR_TOY = ROOT / "runs_toy" / "latest"
-CHECKPOINT_DIR_JESTER = ROOT / "runs_jester" / "latest"
-# Frozen winner the jester trains against (and models in-tree): the
-# Sage champion checkpoint on this box.
-JESTER_OPPONENT_CKPT = ROOT / "runs" / "latest" / "champion.pt"
+CHECKPOINT_DIR_JESTER = ROOT / "runs_jester" / "competitive"
 
 
 def build_toy_config() -> TrainConfig:
@@ -409,102 +406,50 @@ def build_toy_config() -> TrainConfig:
 
 
 # ---------------------------------------------------------------------------
-# Jester — the misère bot: full Sage architecture, inverted incentives.
-# ---------------------------------------------------------------------------
-#
-# Jester plays the INVERTED VARIANT of chess: the checkmated king wins
-# the game. Both players steer toward their own mate, so the objective
-# is to get its OWN king checkmated before the opponent gets theirs.
-# Search selection inverts at the jester's plies while every value
-# label stays truthful (chess_ai/mcts.py MCTSSearch) — the value head
-# still reports who is winning ordinary chess; only what we do with
-# that reading changes.
-#
-# The genre matters. Playing the frozen Sage is a HELPMATE: the
-# opponent wants to mate you, so "stop defending" solves it. Playing
-# another jester is a SELFMATE: the opponent refuses to mate you, so
-# you have to force it — and that is the game the shipped bot actually
-# plays, against a human who is also racing to be mated. Self-play is
-# therefore mostly mirror games, with a small Sage share kept for
-# bootstrap (early on it is the only dense source of "this is what
-# being mated looks like") and for robustness when a human accidentally
-# plays a strong winning move.
-#
-# Greedy mirror play never terminates — neither loss-seeker will
-# deliver the mate the other wants, so the game shuffles to a threefold
-# draw and teaches nothing. One side of every mirror game therefore
-# spars at a sustained temperature, which both restores the terminal
-# signal and models the imperfect human.
-#
-# Runs on the Python MCTS path (inversion/dual-net are not in the Rust
-# search yet), single-process like Toy.
+# Jester — competitive inverted chess, with exact short-selfmate starts.
+# Values keep the ordinary-outcome sign convention; BOTH players' search
+# selection is inverted. SAGE checkpoints/tablebases never supply labels.
 
 def build_jester_config() -> TrainConfig:
     cfg = build_config()
-    cfg.num_workers = 0
+    cfg.num_workers = min(6, max(1, (os.cpu_count() or 2) - 1))
+    cfg.games_per_worker = 16
     cfg.num_concurrent_games = 64
-    cfg.mcts_simulations = 96
+    cfg.mcts_simulations = 256
     cfg.batch_size = 256
-    cfg.min_examples_between_grad_steps = 64
-    cfg.replay_buffer_capacity = 80_000
-    cfg.min_buffer_for_training = 2_000
-    cfg.learning_rate = 1e-3
-    cfg.lr_schedule = (
-        (0,       1e-3),
-        (15_000,  3e-4),
-        (35_000,  1e-4),
-        (60_000,  3e-5),
-    )
+    cfg.min_examples_between_grad_steps = 128
+    cfg.replay_buffer_capacity = 120_000
+    cfg.min_buffer_for_training = 4_000
+    # A fresh experiment can initialize from a trained champion. Start
+    # gently while the old cooperative value predictions are corrected.
+    cfg.learning_rate = 3e-4
+    cfg.lr_schedule = ((0, 3e-4), (15_000, 1e-4), (35_000, 3e-5), (60_000, 1e-5))
     cfg.target_gens = 40_000
-    cfg.eval_every_gens = 2_000
-    cfg.eval_mcts_sims = 96
-    # Mirror eval games are slower than the old vs-Sage ones: both sides
-    # are ducking the mate, so decisive lines take longer to appear.
-    cfg.eval_move_cap = 220
-    cfg.archive_every_gens = 1_000
-    # Resignation is meaningless in misère play: the jester's truthful
-    # best-Q is *supposed* to be terrible, so the trigger would fire on
-    # every healthy position. Disabled outright.
+    cfg.value_draw_weight = 1.0
+    cfg.value_ply_decay = 1.0
     cfg.resign_threshold = -2.0
+    cfg.endgame_start_prob = 0.0
+    cfg.random_start_prob = 0.1
+    cfg.syzygy_path = None
     cfg.jester_mode = True
-    # Mostly mirror (the production matchup); the rest vs frozen Sage.
-    cfg.jester_selfplay_prob = 0.85
-    cfg.jester_opponent_checkpoint = str(JESTER_OPPONENT_CKPT)
-    # τ=1 is visit-proportional — AlphaZero's own opening-play setting,
-    # sustained here for the whole game rather than annealed away.
-    cfg.jester_spar_temperature = 1.0
-    cfg.eval_temperature = 1.0
-    # What actually ends a misère game. Measured over the first 40 games
-    # of the temperature-only build: 20.0% checkmate, 27.5% threefold,
-    # 45.0% move-cap. Temperature samples the search's visit counts, and
-    # a loss-seeking search never spends visits on its own mating moves,
-    # so it can never hand over the mate. A uniform random legal move
-    # can — and that is the accident a human trying to lose makes.
-    cfg.jester_spar_random_prob = 0.20
-    # Uniform blunders alone reached only 29.5% checkmate (measured
-    # over 61 games), against 71.5% under the old vs-Sage mix. The
-    # trap is circular: landing on a mate by chance presupposes the
-    # agent already knows how to manufacture mating chances. Having
-    # the sparring partner accept offered mates converts that skill
-    # straight into terminal signal.
-    cfg.jester_spar_accept_mate_prob = 0.50
-    cfg.eval_blunder_prob = 0.10
-    # Promote on the fumbler race, not on head-to-head play. Inverted
-    # chess between two competent players is a DRAW by construction —
-    # neither will deliver the mate the other wants — so a head-to-head
-    # gate draws more as the nets improve, which is exactly backwards.
-    # Measured on real weights: every head-to-head smoke game drew, on
-    # full-material middlegames as well as lopsided endgames.
-    cfg.jester_gate = "fumbler"
-    # The gate runs 80 pairs (30 surviving curated positions + 10
-    # rotating openings, each played from both seats), so a challenger
-    # of exactly equal strength scores 0.5 with sigma ~= 0.056. The
-    # inherited 0.54 sits 0.7 sigma above chance and would promote noise
-    # roughly a quarter of the time — and here the champion IS the
-    # comparison baseline, so a false promotion drifts the reference.
-    # 0.58 is ~1.4 sigma, still easily cleared by a real improvement:
-    # the challenger beat the champion on all three validation pairs.
-    cfg.eval_score_threshold = 0.58
+    cfg.jester_selfplay_prob = 0.75
+    cfg.jester_opponent_checkpoint = ""
+    cfg.jester_curriculum_prob = 0.5
+    cfg.jester_spar_temperature = 0.0
+    cfg.jester_spar_random_prob = 0.0
+    cfg.jester_spar_accept_mate_prob = 0.0
+    cfg.jester_gate = "head_to_head"
+    cfg.eval_every_gens = 2_000
+    cfg.eval_mcts_sims = 256
+    cfg.eval_move_cap = 300
+    cfg.eval_temperature = 0.0
+    cfg.eval_blunder_prob = 0.0
+    cfg.eval_score_threshold = 0.55
+    cfg.eval_rotating_openings = 10
+    cfg.archive_every_gens = 1_000
+    # All-draw evaluations are inconclusive; don't automatically end a
+    # still-learning curriculum run after an arbitrary number of them.
+    cfg.max_plateau_evals = 0
     return cfg
 
 

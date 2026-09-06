@@ -24,8 +24,10 @@
 //! - Terminal value: -1.0 for checkmate, 0.0 for stalemate/draw (from the
 //!   losing side-to-move's perspective — mirrors Python).
 //! - Dirichlet(alpha) noise at root: `prior = (1-eps)*prior + eps*noise`.
-//! - Underpromotions share a policy index with queen promotions (matches
-//!   the Python `move_to_index` collision on purpose — TS parity).
+//! - All legal promotions remain searchable; visits aggregate into the
+//!   legacy shared policy index to preserve deployed weight compatibility.
+
+use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -36,8 +38,7 @@ use rand_distr::{Distribution, Gamma};
 
 use crate::{
     apply_move_full_core, is_in_check, legal_moves_impl, pack_board, pack_castling,
-    pack_en_passant, piece_type_to_str, plane_index, Board, CastlingRights, Move,
-    NUM_PLANES, PAWN,
+    pack_en_passant, piece_type_to_str, plane_index, Board, CastlingRights, Move, NUM_PLANES, PAWN,
 };
 
 const POLICY_SIZE: usize = 4096;
@@ -96,6 +97,7 @@ impl NodeStatus {
 #[derive(Clone)]
 struct MctsNode {
     parent: u32,
+    depth: u32,
     children: Vec<(u16, u32)>, // (policy_idx, child_node_idx)
     move_info: MoveInfo,       // the move that led to this node (from parent)
     visit_count: u32,
@@ -129,6 +131,9 @@ pub struct MctsSearch {
     /// 0.0 = unvisited children score as "neutral" (old behavior).
     /// Leela/AlphaZero-derived rigs use ~0.4–0.5.
     fpu_reduction: f32,
+    invert_turns: Option<String>,
+    game_counts: Option<HashMap<Vec<u8>, u32>>,
+    position_keys: Vec<Vec<u8>>,
 }
 
 #[pymethods]
@@ -137,17 +142,31 @@ impl MctsSearch {
     /// `ChessGameState.to_dict()` from Python). `c_puct` defaults to 1.5,
     /// `fpu_reduction` defaults to 0.0 (back-compat with pre-FPU behavior).
     #[new]
-    #[pyo3(signature = (state_dict, c_puct=None, fpu_reduction=None))]
+    #[pyo3(signature = (state_dict, c_puct=None, fpu_reduction=None, invert_turns=None, position_counts=None))]
     fn new(
         state_dict: &Bound<'_, PyDict>,
         c_puct: Option<f32>,
         fpu_reduction: Option<f32>,
+        invert_turns: Option<String>,
+        position_counts: Option<Vec<(Vec<u8>, u32)>>,
     ) -> PyResult<Self> {
-        let root_state = parse_state_dict(state_dict)?;
+        if let Some(ref turns) = invert_turns {
+            if !matches!(turns.as_str(), "white" | "black" | "both") {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "invalid invert_turns",
+                ));
+            }
+        }
+        let mut root_state = parse_state_dict(state_dict)?;
+        if insufficient_material(&root_state.board) {
+            root_state.status = NodeStatus::Draw;
+        }
+        let root_key = position_key(&root_state);
         let is_terminal = root_state.status.is_terminal();
         let terminal_value = root_state.status.terminal_value();
         let root_node = MctsNode {
             parent: NO_PARENT,
+            depth: 0,
             children: Vec::new(),
             move_info: MoveInfo::default(),
             visit_count: 0,
@@ -163,6 +182,9 @@ impl MctsSearch {
             pending_leaf: None,
             c_puct: c_puct.unwrap_or(1.5),
             fpu_reduction: fpu_reduction.unwrap_or(0.0),
+            invert_turns,
+            game_counts: position_counts.map(|counts| counts.into_iter().collect()),
+            position_keys: vec![root_key],
         })
     }
 
@@ -236,12 +258,27 @@ impl MctsSearch {
     /// of the leaf for the NN to score.
     fn select_leaf<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut node = 0usize;
+        let mut path = HashSet::new();
+        if self.game_counts.is_some() {
+            path.insert(self.position_keys[0].clone());
+        }
         loop {
             let n = &self.nodes[node];
             if n.is_terminal || !n.is_expanded {
                 break;
             }
             node = self.select_child(node);
+            if let Some(ref counts) = self.game_counts {
+                let key = &self.position_keys[node];
+                if !self.nodes[node].is_terminal
+                    && (path.contains(key) || counts.get(key).copied().unwrap_or(0) + 1 >= 3)
+                {
+                    self.nodes[node].is_terminal = true;
+                    self.nodes[node].is_expanded = true;
+                    self.nodes[node].terminal_value = 0.0;
+                }
+                path.insert(key.clone());
+            }
         }
         if self.nodes[node].is_terminal {
             let tv = self.nodes[node].terminal_value;
@@ -253,6 +290,20 @@ impl MctsSearch {
         let mut buf = vec![0u8; BOARD_BYTES];
         write_encoded_board(&self.states[node], buf.as_mut_slice());
         Ok(Some(PyBytes::new_bound(py, &buf)))
+    }
+
+    fn pending_leaf_turn(&self) -> Option<&str> {
+        self.pending_leaf.map(|i| {
+            if self.states[i as usize].white_to_move {
+                "white"
+            } else {
+                "black"
+            }
+        })
+    }
+
+    fn root_position_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &self.position_keys[0])
     }
 
     /// Supply NN eval for the most recently selected leaf.
@@ -293,7 +344,7 @@ impl MctsSearch {
         }
         if total_visits > 0 {
             for &(mi, ci) in &root.children {
-                policy[mi as usize] =
+                policy[mi as usize] +=
                     self.nodes[ci as usize].visit_count as f32 / total_visits as f32;
             }
         }
@@ -353,13 +404,18 @@ impl MctsSearch {
         } else {
             0.0
         };
-        let q_unvisited = parent_q - self.fpu_reduction;
+        let inverted = self.invert_turns.as_deref().map_or(false, |turns| {
+            turns == "both" || (turns == "white") == self.states[node].white_to_move
+        });
+        let sign = if inverted { 1.0 } else { -1.0 };
+        let base_q = if inverted { -parent_q } else { parent_q };
+        let q_unvisited = base_q - if node == 0 { 0.0 } else { self.fpu_reduction };
         let mut best_score = f32::NEG_INFINITY;
         let mut best_idx = n.children[0].1 as usize;
         for &(_, ci) in &n.children {
             let c = &self.nodes[ci as usize];
             let q = if c.visit_count > 0 {
-                -(c.total_value as f32) / c.visit_count as f32
+                sign * (c.total_value as f32) / c.visit_count as f32
             } else {
                 q_unvisited
             };
@@ -381,7 +437,11 @@ impl MctsSearch {
             n.visit_count += 1;
             n.total_value += v;
             v = -v;
-            idx = if n.parent == NO_PARENT { None } else { Some(n.parent) };
+            idx = if n.parent == NO_PARENT {
+                None
+            } else {
+                Some(n.parent)
+            };
         }
     }
 
@@ -406,60 +466,33 @@ impl MctsSearch {
             let n = &mut self.nodes[node];
             n.is_terminal = true;
             n.is_expanded = true;
-            n.terminal_value = if in_check { -1.0 } else { 0.0 };
+            n.terminal_value = if in_check { -mate_value(n.depth) } else { 0.0 };
             return;
         }
 
-        // Accumulate prior mass for the unique policy indices we'll keep
-        // (collapse underpromotions onto queen-promotion slot — matches
-        // Python `expand_children` + `move_to_index`).
+        // Keep every legal promotion in the tree without changing the
+        // deployed 4096-output network. Split its shared prior, and sum
+        // its visits back into the shared policy slot at extraction.
         let is_white = white_to_move;
-        let mut seen_mask = vec![false; POLICY_SIZE];
-        let mut prior_sum = 0f32;
+        let mut multiplicity = vec![0usize; POLICY_SIZE];
         for m in &legal {
-            let mi = move_policy_index(m, is_white) as usize;
-            if !seen_mask[mi] {
-                seen_mask[mi] = true;
-                prior_sum += priors[mi];
-            }
+            multiplicity[move_policy_index(m, is_white) as usize] += 1;
         }
-        // Reset seen for the emission pass.
-        for v in seen_mask.iter_mut() {
-            *v = false;
-        }
-
-        // Take a stable count for the uniform fallback when prior_sum is 0.
-        let mut unique_count = 0usize;
-        for m in &legal {
-            let mi = move_policy_index(m, is_white) as usize;
-            if !seen_mask[mi] {
-                seen_mask[mi] = true;
-                unique_count += 1;
-            }
-        }
-        for v in seen_mask.iter_mut() {
-            *v = false;
-        }
+        let prior_sum: f32 = multiplicity
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(i, _)| priors[i])
+            .sum();
 
         // Parent state snapshot for child construction.
         let (parent_board, parent_cr, parent_ep, parent_hmc, parent_fmn, parent_wtm) = {
             let s = &self.states[node];
-            (
-                s.board,
-                s.castling,
-                s.ep,
-                s.hmc,
-                s.fmn,
-                s.white_to_move,
-            )
+            (s.board, s.castling, s.ep, s.hmc, s.fmn, s.white_to_move)
         };
 
         for m in &legal {
             let mi = move_policy_index(m, is_white) as usize;
-            if seen_mask[mi] {
-                continue; // already emitted a child with this policy index
-            }
-            seen_mask[mi] = true;
 
             let (new_board, new_cr, new_ep, new_hmc, new_fmn, new_wtm, status) =
                 apply_move_full_core(
@@ -471,7 +504,7 @@ impl MctsSearch {
                     parent_fmn,
                     m,
                 );
-            let child_state = NodeState {
+            let mut child_state = NodeState {
                 board: new_board,
                 castling: new_cr,
                 ep: new_ep,
@@ -480,22 +513,30 @@ impl MctsSearch {
                 white_to_move: new_wtm,
                 status: NodeStatus::from_str(status),
             };
+            if insufficient_material(&child_state.board) {
+                child_state.status = NodeStatus::Draw;
+            }
             let _ = parent_board; // silence "unused" in debug if parent_board isn't used below
             let _ = parent_cr;
 
             let child_idx = self.nodes.len() as u32;
             let prior = if prior_sum > 0.0 {
-                priors[mi] / prior_sum
+                priors[mi] / prior_sum / multiplicity[mi] as f32
             } else {
-                1.0 / unique_count as f32
+                1.0 / legal.len() as f32
             };
-            let (is_term, term_val) = (
-                child_state.status.is_terminal(),
-                child_state.status.terminal_value(),
-            );
+            let depth = self.nodes[node].depth + 1;
+            let is_term = child_state.status.is_terminal();
+            let term_val = if child_state.status == NodeStatus::Checkmate {
+                -mate_value(depth)
+            } else {
+                0.0
+            };
+            self.position_keys.push(position_key(&child_state));
             self.states.push(child_state);
             self.nodes.push(MctsNode {
                 parent: node as u32,
+                depth,
                 children: Vec::new(),
                 move_info: MoveInfo {
                     from_r: m.from_r,
@@ -517,13 +558,7 @@ impl MctsSearch {
         self.nodes[node].is_expanded = true;
     }
 
-    fn add_dirichlet_noise(
-        &mut self,
-        node: usize,
-        epsilon: f32,
-        alpha: f32,
-        seed: u64,
-    ) {
+    fn add_dirichlet_noise(&mut self, node: usize, epsilon: f32, alpha: f32, seed: u64) {
         let children_len = self.nodes[node].children.len();
         if children_len == 0 {
             return;
@@ -550,26 +585,31 @@ impl MctsSearch {
             }
             return self.nodes[best.1 as usize].move_info;
         }
-        // τ>0: sample proportional to visit_count (ignore temperature
-        // magnitude beyond "off"; Python's `_sample_move` does the same).
-        let total_visits: u64 = root
+        // General visit_count ** (1 / temperature), stabilized by max.
+        let max_visits = root
             .children
             .iter()
-            .map(|&(_, ci)| self.nodes[ci as usize].visit_count as u64)
-            .sum();
-        if total_visits == 0 {
-            // No sims completed — uniform choice (parity with Python).
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            .map(|&(_, ci)| self.nodes[ci as usize].visit_count)
+            .max()
+            .unwrap_or(0);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        if max_visits == 0 {
             let i = rng.gen_range(0..root.children.len());
             return self.nodes[root.children[i].1 as usize].move_info;
         }
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let r = rng.gen_range(0..total_visits);
-        let mut acc: u64 = 0;
-        for &(_, ci) in &root.children {
-            acc += self.nodes[ci as usize].visit_count as u64;
-            if r < acc {
-                return self.nodes[ci as usize].move_info;
+        let weights: Vec<f64> = root
+            .children
+            .iter()
+            .map(|&(_, ci)| {
+                (self.nodes[ci as usize].visit_count as f64 / max_visits as f64)
+                    .powf(1.0 / temperature as f64)
+            })
+            .collect();
+        let mut draw = rng.gen::<f64>() * weights.iter().sum::<f64>();
+        for ((_, ci), weight) in root.children.iter().zip(weights) {
+            draw -= weight;
+            if draw < 0.0 {
+                return self.nodes[*ci as usize].move_info;
             }
         }
         // Float drift guard: fall back to highest-visits.
@@ -584,6 +624,54 @@ impl MctsSearch {
         }
         self.nodes[best.1 as usize].move_info
     }
+}
+
+// Same conservative dead-material rule used by self-play and both apps.
+fn insufficient_material(board: &Board) -> bool {
+    let mut minors = Vec::new();
+    for (r, row) in board.iter().enumerate() {
+        for (f, &p) in row.iter().enumerate() {
+            match p.abs() {
+                0 | 1 => (),
+                4 | 5 => minors.push((p > 0, p.abs(), (r + f) % 2)),
+                _ => return false,
+            }
+        }
+    }
+    if minors.len() < 2 {
+        return true;
+    }
+    minors.len() == 2
+        && minors[0].1 == 4
+        && minors[1].1 == 4
+        && minors[0].0 != minors[1].0
+        && minors[0].2 == minors[1].2
+}
+
+fn mate_value(depth: u32) -> f32 {
+    (1.0 - 0.01 * depth as f32).max(0.5)
+}
+
+// Byte-exact with engine.position_key; clocks are deliberately excluded.
+fn position_key(s: &NodeState) -> Vec<u8> {
+    let symbols = b".kqrbnp";
+    let mut key = Vec::with_capacity(71);
+    for row in s.board {
+        for p in row {
+            let c = symbols[p.unsigned_abs() as usize];
+            key.push(if p > 0 { c.to_ascii_uppercase() } else { c });
+        }
+    }
+    key.push(if s.white_to_move { b'w' } else { b'b' });
+    for flag in [s.castling.wk, s.castling.wq, s.castling.bk, s.castling.bq] {
+        key.push(if flag { b'1' } else { b'0' });
+    }
+    if let Some((r, f)) = s.ep {
+        key.extend([b'a' + f, b'1' + r]);
+    } else {
+        key.extend(b"--");
+    }
+    key
 }
 
 // ------------- helpers -------------
@@ -620,9 +708,8 @@ fn move_policy_index(m: &Move, is_white: bool) -> u32 {
 fn write_encoded_board(state: &NodeState, out: &mut [u8]) {
     debug_assert_eq!(out.len(), BOARD_BYTES);
     // Interpret `out` as a &mut [f32; 8*8*20] and fill.
-    let fs: &mut [f32] = unsafe {
-        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f32, BOARD_BYTES / 4)
-    };
+    let fs: &mut [f32] =
+        unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f32, BOARD_BYTES / 4) };
     for v in fs.iter_mut() {
         *v = 0.0;
     }
@@ -640,7 +727,11 @@ fn write_encoded_board(state: &NodeState, out: &mut [u8]) {
             let type_idx = (piece.unsigned_abs() as usize) - 1;
             let is_own = is_white == white_to_move;
             let channel = if is_own { type_idx } else { 6 + type_idx };
-            let (or_, of_) = if white_to_move { (r, f) } else { (7 - r, 7 - f) };
+            let (or_, of_) = if white_to_move {
+                (r, f)
+            } else {
+                (7 - r, 7 - f)
+            };
             fs[plane_index(or_, of_, channel)] = 1.0;
         }
     }

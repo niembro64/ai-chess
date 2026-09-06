@@ -2,7 +2,7 @@
 // Supports batched evaluation across multiple concurrent games
 
 import type { ChessGameState, Move } from '@/types/chess';
-import { getLegalMoves, applyMove } from '@/game/chess/ChessEngine';
+import { getLegalMoves, applyMove, positionKey, buildPositionCounts, isInCheck, isInsufficientMaterial } from '@/game/chess/ChessEngine';
 import { encodeBoard, moveToIndex, POLICY_SIZE } from './ChessNet';
 
 // The search only needs "boards in, (policy, value) out" — satisfied by
@@ -67,6 +67,7 @@ class MCTSNode {
   isExpanded = false;
   isTerminal = false;
   terminalValue = 0;
+  posKey: string | null = null;
 
   constructor(state: ChessGameState) {
     this.state = state;
@@ -88,6 +89,7 @@ export type MCTSResult = {
 export class MCTSSearch {
   private root: MCTSNode;
   private pendingLeaf: MCTSNode | null = null;
+  private readonly gameCounts: Map<string, number>;
   private encode: BoardEncoder;
   private invertForTurn: 'white' | 'black' | 'both' | undefined;
 
@@ -95,8 +97,13 @@ export class MCTSSearch {
     state: ChessGameState,
     encode: BoardEncoder = encodeBoard,
     invertForTurn?: 'white' | 'black' | 'both',
+    positionCounts?: Map<string, number>,
   ) {
     this.root = new MCTSNode(state);
+    this.root.posKey = positionKey(state);
+    const counts = positionCounts ?? (state.moveHistory.length ? buildPositionCounts(state) : new Map());
+    this.gameCounts = new Map(counts);
+    if (!this.gameCounts.has(this.root.posKey)) this.gameCounts.set(this.root.posKey, 1);
     this.encode = encode;
     this.invertForTurn = invertForTurn;
     this.checkTerminal(this.root);
@@ -123,8 +130,16 @@ export class MCTSSearch {
   // Select to leaf. Returns encoded board if NN eval needed, null if terminal.
   selectLeaf(): Float32Array | null {
     let node = this.root;
+    const path = new Set([this.root.posKey!]);
     while (node.isExpanded && !node.isTerminal) {
       node = selectChild(node, node === this.root, this.invertForTurn);
+      node.posKey ??= positionKey(node.state);
+      if (!node.isTerminal && (path.has(node.posKey) || (this.gameCounts.get(node.posKey) ?? 0) + 1 >= 3)) {
+        node.isTerminal = true;
+        node.isExpanded = true;
+        node.terminalValue = 0;
+      }
+      path.add(node.posKey);
     }
 
     if (node.isTerminal) {
@@ -155,7 +170,7 @@ export class MCTSSearch {
     }
     if (totalVisits > 0) {
       for (const [idx, child] of this.root.children) {
-        policy[idx] = child.visitCount / totalVisits;
+        policy[idx % POLICY_SIZE] += child.visitCount / totalVisits;
       }
     }
     const rankedMoves = [...this.root.children.values()]
@@ -171,6 +186,10 @@ export class MCTSSearch {
   }
 
   private checkTerminal(node: MCTSNode): void {
+    if (isInsufficientMaterial(node.state.board)) {
+      node.isTerminal = true; node.isExpanded = true; node.terminalValue = 0;
+      return;
+    }
     const s = node.state.status;
     if (s === 'checkmate' || s === 'stalemate' || s === 'draw') {
       node.isTerminal = true;
@@ -181,7 +200,7 @@ export class MCTSSearch {
       if (moves.length === 0) {
         node.isTerminal = true;
         node.isExpanded = true;
-        node.terminalValue = 0;
+        node.terminalValue = isInCheck(node.state.board, node.state.currentTurn) ? -mateValue(node.depth) : 0;
       }
     }
   }
@@ -196,32 +215,25 @@ export class MCTSSearch {
       return;
     }
 
-    const isWhite = state.currentTurn === 'white';
-    const seenIndices = new Set<number>();
-    let priorSum = 0;
+    const isWhite = node.state.currentTurn === 'white';
+    const counts = new Map<number, number>();
     for (const move of legalMoves) {
-      const mi = moveToIndex(move, isWhite);
-      if (!seenIndices.has(mi)) {
-        seenIndices.add(mi);
-        priorSum += policy[mi];
-      }
+      const index = moveToIndex(move, isWhite);
+      counts.set(index, (counts.get(index) ?? 0) + 1);
     }
-
-    seenIndices.clear();
+    let priorSum = 0;
+    for (const index of counts.keys()) priorSum += policy[index];
     for (const move of legalMoves) {
-      const mi = moveToIndex(move, isWhite);
-      if (seenIndices.has(mi)) continue;
-      seenIndices.add(mi);
-
-      const child = new MCTSNode(applyMove(state, move));
+      const index = moveToIndex(move, isWhite);
+      const child = new MCTSNode(applyMove(node.state, move));
       child.parent = node;
       child.depth = node.depth + 1;
       child.move = move;
-      child.prior = priorSum > 0 ? policy[mi] / priorSum : 1 / seenIndices.size;
+      child.prior = priorSum > 0 ? policy[index] / priorSum / counts.get(index)! : 1 / legalMoves.length;
       this.checkTerminal(child);
-      node.children.set(mi, child);
+      const offset = move.promotion === 'rook' ? 1 : move.promotion === 'bishop' ? 2 : move.promotion === 'knight' ? 3 : 0;
+      node.children.set(index + offset * POLICY_SIZE, child);
     }
-
     node.isExpanded = true;
   }
 }

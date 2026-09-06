@@ -21,6 +21,7 @@ The Trainer's `on_step(stats)` callback just forwards to this.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import sys
 import time
@@ -56,7 +57,7 @@ CSV_FIELDS = (
     # Resign truth-check tallies (held-out resignations, known outcomes).
     "resign_truth_games", "resign_truth_fp",
     "gen_per_min", "games_per_min", "replay_size",
-    "eta_seconds",
+    "eta_seconds", "curriculum_prob", "tactical_accuracy", "jester_outcomes", "origin_outcomes",
     "policy_loss", "value_loss", "total_loss",
     "t_drain_ms", "t_broadcast_ms", "t_sleep_ms", "t_iter_ms",
     "t_sample_ms", "t_h2d_ms", "t_forward_ms", "t_backward_ms", "t_optim_ms",
@@ -185,6 +186,7 @@ class DashboardLogger:
         model_summary: str,
         device_summary: str,
         run_name: str | None = None,
+        enabled: bool = True,
         refresh_per_second: float = 4.0,
         on_log: Callable[[str], None] | None = None,
     ):
@@ -220,7 +222,7 @@ class DashboardLogger:
         # Rich setup. When stdout isn't a TTY we disable the live dashboard
         # and just print log lines + write CSV. This keeps `... > log.txt`
         # and non-interactive CI invocations sane.
-        self._is_tty = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
+        self._is_tty = enabled and sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
         self._console = Console()
         self._live: Live | None = None
         self._refresh_per_second = refresh_per_second
@@ -249,7 +251,11 @@ class DashboardLogger:
     def __enter__(self) -> "DashboardLogger":
         self._csv_fp = self.csv_path.open("a", newline="", buffering=1)
         write_header = self.csv_path.stat().st_size == 0
-        self._csv_writer = csv.DictWriter(self._csv_fp, fieldnames=CSV_FIELDS)
+        fields = CSV_FIELDS
+        if not write_header:
+            with self.csv_path.open() as existing:
+                fields = next(csv.reader(existing))
+        self._csv_writer = csv.DictWriter(self._csv_fp, fieldnames=fields, extrasaction="ignore")
         if write_header:
             self._csv_writer.writeheader()
 
@@ -412,6 +418,10 @@ class DashboardLogger:
                 "gen": stats.generation,
                 "target_gens": getattr(stats, "target_gens", 0),
                 "games": stats.games_completed,
+                "curriculum_prob": getattr(stats, "curriculum_prob", 0.0),
+                "tactical_accuracy": getattr(stats, "tactical_accuracy", 0.0),
+                "jester_outcomes": json.dumps(getattr(stats, "jester_outcomes", {}), sort_keys=True),
+                "origin_outcomes": json.dumps(getattr(stats, "origin_outcomes", {}), sort_keys=True),
                 # Aggregates (computed from granular buckets).
                 "white_wins": stats.white_wins,
                 "black_wins": stats.black_wins,
@@ -595,6 +605,18 @@ class DashboardLogger:
         is what Syzygy told us about cap-timeouts; unresolved is the
         remaining "we have no signal" residue.
         """
+        inverted = getattr(stats, "jester_outcomes", {}) if stats is not None else {}
+        if inverted:
+            table = Table(expand=True, box=None, padding=(0, 1))
+            for title in ("opponent / start", "own mate", "delivered", "draw", "cap"):
+                table.add_column(title, justify="left" if title.startswith("opponent") else "right")
+            for name, counts in sorted(inverted.items()):
+                table.add_row(name, *(str(counts.get(k, 0)) for k in ("own_mate", "delivered_mate", "draw", "cap")))
+            note = Text(f"Own mate = learner wins · delivered mate = learner loses\n"
+                        f"Held-out tactics {getattr(stats, 'tactical_accuracy', 0):.0%} · "
+                        f"curriculum starts {getattr(stats, 'curriculum_prob', 0):.0%}", style="dim")
+            from rich.console import Group
+            return Panel(Group(table, note), title="competitive inverted chess", border_style="blue")
         buckets: dict[str, int] = {
             "mate_w": 0, "mate_b": 0,
             "resign_w": 0, "resign_b": 0,
@@ -735,7 +757,7 @@ class DashboardLogger:
         origin_stats = getattr(stats, "origin_outcomes", None) if stats is not None else None
         nonempty_origins: list[tuple[str, dict[str, int]]] = []
         if origin_stats:
-            for name in ("standard", "endgame", "random"):
+            for name in ("standard", "endgame", "random", "curriculum"):
                 d = origin_stats.get(name)
                 if d and sum(d.values()) > 0:
                     nonempty_origins.append((name, d))

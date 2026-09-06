@@ -66,11 +66,16 @@ export function rankByDistribution(
   distribution: Float32Array,
   legalMoves: Move[],
   isWhite: boolean,
+  searchedMoves: { move: Move; visits: number }[] = [],
 ): RankedEntry[] {
   const byIndex = new Map<number, Move>();
   for (const move of legalMoves) {
     const index = moveToIndex(move, isWhite);
     if (!byIndex.has(index)) byIndex.set(index, move); // underpromotions collapse
+  }
+  // Keep the network shape while choosing each promotion by its search visits.
+  for (const { move } of [...searchedMoves].sort((a, b) => a.visits - b.visits)) {
+    byIndex.set(moveToIndex(move, isWhite), move);
   }
   const entries: RankedEntry[] = [];
   for (let index = 0; index < distribution.length; index++) {
@@ -266,19 +271,25 @@ export class AIPlayer {
     // reads from.
     let distribution = rootEval.policy;
     let rootValue = rootEval.value;
+    let searchedMoves: { move: Move; visits: number }[] = [];
     if (this.sims > 0) {
       const result = await runMCTSAsync(state, this.net, this.sims, {
-        invertForTurn: this.searchSeeksLoss ? state.currentTurn : undefined,
+        invertForTurn: this.searchSeeksLoss ? 'both' : undefined,
         onProgress: (done, total) => this.onProgress?.(done, total),
       });
       distribution = result.policy;
       rootValue = result.rootValue;
+      searchedMoves = result.rankedMoves;
     }
 
-    const entries = rankByDistribution(distribution, legal, isWhite);
+    const entries = rankByDistribution(distribution, legal, isWhite, searchedMoves);
     const candidates = candidateMoves(entries, this.goalInverted);
     const seenOwnSide = buildOwnSideKeys(state, color);
-    const move = markBlockedAndPick(state, entries, candidates, seenOwnSide, color);
+    // In competitive inverted chess a legal return move can be essential
+    // to a forced selfmate. MCTS handles actual repetition draws in-tree.
+    const move = this.searchSeeksLoss && !this.goalInverted
+      ? candidates[0].move
+      : markBlockedAndPick(state, entries, candidates, seenOwnSide, color);
 
     if (this.onThought) {
       this.onThought({

@@ -1,0 +1,298 @@
+[
+  {
+    "fen": "rk5K/8/8/5b1n/8/4Q3/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "e3b6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/8/4n1b1/8/8/4Q3/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "e3b6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r3k2K/6Q1/8/7n/8/3b4/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "g7e7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r3k2K/8/3Q4/7n/4b3/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "d6e7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/4n1b1/8/8/3Q4/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "d3d7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/3Q2b1/7n/8/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "d6c7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/8/7n/4bQ2/8/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "f4c7",
+      "f4d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/8/7n/8/3b3Q/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "h3d7"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "r1k4K/8/8/5b1n/Q7/8/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "a4c6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/6b1/7n/8/3Q4/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "d3d7"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "rk5K/8/Q5b1/5n2/8/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "a6b7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/4n3/8/8/3b4/8/1Q6 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "b1b7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/8/7n/8/3b4/7Q/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "h2c7",
+      "h2d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/8/4Q3/5b1n/8/8/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "e6b6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/4Q1b1/5n2/8/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "e6d7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/4n3/8/8/3b4/1Q6/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "b2b7"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "r3k2K/8/8/7n/8/3b1Q2/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "f3f7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/4n1b1/8/3Q4/8/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "d4d7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r3k2K/8/4n3/5b2/8/8/8/3Q4 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "d1d7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r3k2K/8/8/3Q3n/8/3b4/8/8 w - - 0 1",
+    "plies": 4,
+    "winning_moves": [
+      "d5f7",
+      "d5d7",
+      "d5e6"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "r2k3K/8/Q3n1b1/8/8/8/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "a6d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/8/Q7/7n/8/3b4/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "a6b7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r3k2K/8/4n3/2Q5/8/3b4/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c5e7"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "rk5K/8/8/7n/8/3b1Q2/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "f3b7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/5Q2/4n3/5b2/8/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "f7b7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/8/2Q5/7n/4b3/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c6c7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/5Q2/8/5b1n/8/8/8/8 w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "f7c7",
+      "f7b7"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "r2k3K/8/4n3/5b2/8/6Q1/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "g3d6"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "r2k3K/8/4n1b1/2Q5/8/8/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "c5e7",
+      "c5d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/4n1b1/8/8/6Q1/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "g3d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/8/3Q1b1n/8/8/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "d5b7",
+      "d5c6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/4n1b1/8/5Q2/8/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "f4d6"
+    ],
+    "split": "eval"
+  },
+  {
+    "fen": "r2k3K/8/4n3/8/8/Q2b4/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "a3e7",
+      "a3d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r1k4K/8/8/5b1n/8/8/8/1Q6 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "b1b7"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "r2k3K/8/4n3/4Qb2/8/8/8/8 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "e5d6"
+    ],
+    "split": "train"
+  },
+  {
+    "fen": "rk5K/8/4n3/5b2/8/8/8/6Q1 w - - 0 1",
+    "plies": 6,
+    "winning_moves": [
+      "g1b6"
+    ],
+    "split": "eval"
+  }
+]
