@@ -11,12 +11,12 @@ import torch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"), str(Path(__file__).resolve().parent)]
 from diagnose_checkpoint import _load_model
-from chess_ai.inverted import selfmate_positions
-from chess_ai.jester_eval import move_uci
+from chess_ai.inverted import augmented_selfmates, selfmate_positions
+from chess_ai.jester_eval import Match, move_uci, play_matches
 from chess_ai.mcts import run_batched_mcts, set_mcts_params
 from chess_ai.selfplay import make_pytorch_evaluator
 from chess_ai.engine import position_key
-from chess_ai.train import pick_device, Trainer, TrainConfig
+from chess_ai.train import pick_device
 
 
 def main():
@@ -24,6 +24,7 @@ def main():
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--sims", type=int, nargs="+", default=[96, 256, 400])
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--full-conversions", action="store_true", help="Play complete resistant tactics, including held-out geometry")
     parser.add_argument(
         "--fumbler-games",
         type=int,
@@ -71,35 +72,32 @@ def main():
             ),
             flush=True,
         )
+    if args.full_conversions:
+        geometry = augmented_selfmates("eval")
+        extra = [p for depth in (2, 4, 6) for p in random.Random(910 + depth).sample(
+            [p for p in geometry if p.plies == depth], 6)]
+        starts = list(positions) + extra
+        played = play_matches(
+            [Match(p.state, p.state.currentTurn, evaluator, f"conversion/{i}", p.difficulty)
+             for i, p in enumerate(starts)], evaluator, args.sims[-1], 12, 32)
+        print(json.dumps(dict(checkpoint=str(args.checkpoint), diagnostic="resistant-full-conversion",
+                              wins=sum(r == "win" for _, r in played), games=len(played),
+                              geometry_wins=sum(r == "win" for _, r in played[len(positions):]),
+                              geometry_games=len(extra))), flush=True)
     if args.fumbler_games:
-        # Isolated trainer used only as a host for the read-only diagnostic.
-        trainer = Trainer(
-            model,
-            device,
-            TrainConfig(
-                num_concurrent_games=1, replay_buffer_capacity=1, aux_material_weight=0, use_amp=False
-            ),
-        )
+        if args.fumbler_games < 2 or args.fumbler_games % 2:
+            parser.error("--fumbler-games must be an even number for paired colors")
         from chess_ai.eval_positions import build_rotating_opening_positions
 
-        openings = build_rotating_opening_positions(args.fumbler_games, random.Random(20260906))
-        lengths = [
-            trainer._play_fumbler_game(
-                evaluator, "white" if i % 2 == 0 else "black", args.sims[-1], 300, p.state, 20260906 + i
-            )
-            for i, p in enumerate(openings)
-        ]
-        print(
-            json.dumps(
-                dict(
-                    diagnostic="cooperative-fumbler-only",
-                    own_mates=sum(n is not None for n in lengths),
-                    games=len(lengths),
-                    plies=lengths,
-                )
-            ),
-            flush=True,
-        )
+        openings = build_rotating_opening_positions(args.fumbler_games // 2, random.Random(20260906))
+        played = play_matches(
+            [Match(p.state.copy(), color, evaluator, f"helper/{i}/{color}", "helper", helper=True)
+             for i, p in enumerate(openings) for color in ("white", "black")],
+            evaluator, args.sims[-1], 120, 32)
+        print(json.dumps(dict(checkpoint=str(args.checkpoint), diagnostic="cooperative-fumbler-only",
+                              games=len(played), **{outcome: sum(r == outcome for _, r in played)
+                                                   for outcome in ("win", "loss", "draw", "cap")})), flush=True)
+
 
 
 if __name__ == "__main__":

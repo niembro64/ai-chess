@@ -68,6 +68,11 @@ state/counters are not silently interpreted as this experiment. SIGINT saves
 a checkpoint. Startup readiness means fresh examples **and actual optimizer
 updates with finite losses**, not merely a busy GPU or increasing game count.
 
+For a read-only comparison, run `scripts/benchmark_jester.py CHECKPOINT --device
+cuda --sims 128 --full-conversions --fumbler-games 16` for each checkpoint.
+This reports first moves, complete resistant conversions, and paired-color
+helper games separately, using the same search semantics as the new run.
+
 The browser app owns inference and UI. This directory owns *training*:
 
 - a faithful Python port of the browser's `ChessEngine.ts` and encoder
