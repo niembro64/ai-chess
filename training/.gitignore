@@ -8,6 +8,7 @@ venv/
 .mypy_cache/
 checkpoints/
 runs/
+runs_jester/
 *.pt
 *.pth
 *.ckpt
