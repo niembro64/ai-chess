@@ -160,9 +160,46 @@ def selfmate_positions(split: str = "train") -> list[SelfmatePosition]:
 
 def curriculum_start(rng: random.Random) -> ChessGameState:
     # Balance difficulty instead of letting plentiful one-move proofs dominate.
-    positions = selfmate_positions("train")
+    positions = augmented_selfmates("train")
     depth = rng.choice(sorted({p.plies for p in positions}))
     return rng.choice([p for p in positions if p.plies == depth]).state
+
+
+@lru_cache(maxsize=2)
+def augmented_selfmates(split: str) -> tuple[SelfmatePosition, ...]:
+    """Board symmetries preserving each position's legal move geometry.
+
+    Split base positions before augmentation. Geometry expands coverage; it
+    does not create independent tactical families or prove opening strength.
+    """
+    out = {}
+    for position in selfmate_positions(split):
+        board = chess.Board(position.fen)
+        if board.castling_rights or board.ep_square is not None:
+            raise ValueError("Curriculum symmetry requires no castling or en passant")
+        for diagonal in (False, True):
+            for horizontal in (False, True):
+                for vertical in (False, True):
+                    # Pawn direction allows file reflection only. Color reversal
+                    # was already applied by selfmate_positions before this loop.
+                    if board.pawns and (diagonal or vertical):
+                        continue
+                    def transform(bits, diagonal=diagonal, horizontal=horizontal, vertical=vertical):
+                        if diagonal:
+                            bits = chess.flip_diagonal(bits)
+                        if horizontal:
+                            bits = chess.flip_horizontal(bits)
+                        return chess.flip_vertical(bits) if vertical else bits
+
+                    def square(sq):
+                        return transform(chess.BB_SQUARES[sq]).bit_length() - 1
+
+                    fen = board.transform(transform).fen()
+                    moves = tuple(chess.Move(square(m.from_square), square(m.to_square)).uci()
+                                  for m in map(chess.Move.from_uci, position.winning_moves))
+                    out[fen] = SelfmatePosition(position.name + f"/{int(diagonal)}{int(horizontal)}{int(vertical)}",
+                                               fen, position.plies, moves)
+    return tuple(out.values())
 
 
 def stable_position_id(state: ChessGameState) -> str:

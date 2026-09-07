@@ -218,6 +218,13 @@ class TrainConfig:
     jester_opponent_checkpoints: tuple[str, ...] = ()  # frozen inverted pool
     jester_curriculum_prob: float = 0.5
     jester_curriculum_floor: float = 0.1
+    jester_protocol: int = 2
+    jester_helper_prob: float = 0.0
+    jester_bridge_prob: float = 0.0
+    jester_max_examples_per_game: int = 32
+    jester_balanced_replay: bool = True
+    jester_eval_standard_positions: int = 4
+    jester_full_eval_every: int = 10_000
     jester_spar_temperature: float = 0.0
     jester_spar_random_prob: float = 0.0
     jester_spar_accept_mate_prob: float = 0.0
@@ -386,6 +393,10 @@ class TrainStats:
     jester_outcomes: dict[str, dict[str, int]] = field(default_factory=dict)
     curriculum_prob: float = 0.5
     tactical_accuracy: float = 0.0
+    tactical_conversion: float = 0.0
+    helper_prob: float = 0.0
+    replay_sample_counts: dict[str, int] = field(default_factory=dict)
+    replay_source_sizes: dict[str, int] = field(default_factory=dict)
 
     # --- Per-origin breakdown -------------------------------------------
     # Same 8 outcome buckets, split three ways by how the game was
@@ -514,7 +525,9 @@ class Trainer:
         # Tri-state so the first _update_value_warmup call always applies
         # the correct freeze state (True/False both differ from None).
         self._value_warmup_active: bool | None = None
-        self.buffer = ReplayBuffer(
+        from .replay import JesterReplayBuffer
+        buffer_class = JesterReplayBuffer if self.config.jester_mode and self.config.jester_balanced_replay else ReplayBuffer
+        self.buffer = buffer_class(
             capacity=self.config.replay_buffer_capacity,
             num_planes=getattr(self.model, "num_planes", NUM_PLANES),
         )
@@ -554,6 +567,9 @@ class Trainer:
                 opponent_checkpoints=self.config.jester_opponent_checkpoints,
                 curriculum_start_prob=self.config.jester_curriculum_prob if self.config.jester_mode else 0.0,
                 standard_move_cap=self.config.jester_move_cap,
+                helper_start_prob=self.config.jester_helper_prob,
+                bridge_start_prob=self.config.jester_bridge_prob,
+                max_examples_per_game=self.config.jester_max_examples_per_game if self.config.jester_mode else 0,
                 rewards=self.config.rewards,
                 value_ply_decay=self.config.value_ply_decay,
                 policy_softening_temperature=self.config.self_play_policy_softening_temperature,
@@ -591,6 +607,9 @@ class Trainer:
                     frozen_evaluators=tuple(self._make_model_evaluator(m) for m in self._jester_opponents),
                     curriculum_start_prob=self.config.jester_curriculum_prob if self.config.jester_mode else 0.0,
                     standard_move_cap=self.config.jester_move_cap,
+                    helper_start_prob=self.config.jester_helper_prob,
+                    bridge_start_prob=self.config.jester_bridge_prob,
+                    max_examples_per_game=self.config.jester_max_examples_per_game if self.config.jester_mode else 0,
                     agent_selfplay_prob=self.config.jester_selfplay_prob,
                     spar_temperature=self.config.jester_spar_temperature,
                     spar_random_prob=self.config.jester_spar_random_prob,
@@ -601,6 +620,7 @@ class Trainer:
 
         self.stats = TrainStats(target_gens=self.config.target_gens)
         self.stats.curriculum_prob = self.config.jester_curriculum_prob
+        self.stats.helper_prob = self.config.jester_helper_prob
         # Seed live LR before any schedule step, so the dashboard's
         # model panel shows the right value even at gen 0 (and during
         # warmup before _maybe_update_lr first runs). load_checkpoint
@@ -807,6 +827,8 @@ class Trainer:
         boards_np, policies_np, values_np, outcome_known_np, policy_weights_np = (
             self.buffer.sample(self.config.batch_size, self.rng)
         )
+        self.stats.replay_sample_counts = getattr(self.buffer, "last_sample_counts", {})
+        self.stats.replay_source_sizes = getattr(self.buffer, "source_sizes", {})
         if self.config.mirror_augment_prob > 0:
             # Seeded generator (derived from the trainer's rng) so runs
             # are reproducible; the old global np.random call was the
@@ -988,7 +1010,9 @@ class Trainer:
             outcome = "cap"
         # Per-origin bucket. Unknown origins get bundled into "standard" so
         # per-origin totals stay consistent with the global aggregate.
-        origin_bucket = self.stats.origin_outcomes.get(origin) or self.stats.origin_outcomes["standard"]
+        origin_bucket = self.stats.origin_outcomes.setdefault(
+            origin, dict.fromkeys(self.stats.origin_outcomes["standard"], 0)
+        )
         if outcome in origin_bucket:
             origin_bucket[outcome] += 1
         # Resign truth-check verdicts (held-out would-be resignations).
@@ -1044,6 +1068,7 @@ class Trainer:
             min_new = self.config.min_examples_between_grad_steps
             if (
                 len(self.buffer) >= self.config.min_buffer_for_training
+                and getattr(self.buffer, "ready", True)
                 and examples_since_grad >= min_new
             ):
                 last_losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
@@ -1126,6 +1151,7 @@ class Trainer:
                 min_new = self.config.min_examples_between_grad_steps
                 if (
                     len(self.buffer) >= self.config.min_buffer_for_training
+                    and getattr(self.buffer, "ready", True)
                     and examples_since_grad >= min_new
                 ):
                     last_losses = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}

@@ -15,7 +15,7 @@ import numpy as np
 
 from .engine import apply_move, get_legal_moves, position_key
 from .eval_positions import build_eval_positions, build_rotating_opening_positions
-from .inverted import selfmate_positions
+from .inverted import augmented_selfmates, selfmate_positions
 from .mcts import run_batched_mcts
 from .selfplay import _is_insufficient_material
 
@@ -29,6 +29,10 @@ class Match:
     difficulty: str
     plies: int = 0
     history: dict = field(default_factory=dict)
+    helper: bool = False
+    start: dict = field(default_factory=dict)
+    moves: list = field(default_factory=list)
+    rng: object = None
 
 
 def move_uci(move) -> str:
@@ -56,7 +60,8 @@ def play_matches(matches, evaluator, sims, cap, batch_size, on_progress=None):
     """Opponent trees also minimize their own ordinary-outcome values.
 
     Results preserve legal draws versus unresolved caps. Inference is batched
-    across active games and grouped by the net whose side is being evaluated.
+    across games, with the actual mover's network owning every leaf in its tree.
+    Explicit helper matches are diagnostics only and never enter promotion scores.
     """
     remaining = iter(matches)
     active = []
@@ -68,6 +73,8 @@ def play_matches(matches, evaluator, sims, cap, batch_size, on_progress=None):
             if game is None:
                 break
             game.history = {position_key(game.state): 1}
+            game.start = game.state.to_dict()
+            game.rng = random.Random(int.from_bytes(hashlib.sha256(game.pair.encode()).digest()[:8], "big"))
             active.append(game)
         if not active:
             break
@@ -80,20 +87,30 @@ def play_matches(matches, evaluator, sims, cap, batch_size, on_progress=None):
                 results.append((game, outcome))
         active = ongoing
         if active:
+            helper_moves = {}
+            for i, game in enumerate(active):
+                if game.helper and game.state.currentTurn != game.color:
+                    legal = get_legal_moves(game.state)
+                    mates = [m for m in legal if apply_move(game.state, m).status == "checkmate"]
+                    helper_moves[i] = game.rng.choice(mates or legal)
+            searching = [i for i in range(len(active)) if i not in helper_moves]
+            batch = [active[i] for i in searching]
             searches = run_batched_mcts(
-                [g.state for g in active],
+                [g.state for g in batch],
                 evaluator,
                 sims,
                 rng,
-                temperatures=[0.0] * len(active),
+                temperatures=[0.0] * len(batch),
                 dirichlet_epsilon=0.0,
-                invert_turns=["both"] * len(active),
-                position_counts=[g.history for g in active],
-                agent_colors=[g.color for g in active],
-                opponent_evaluators=[g.opponent for g in active],
+                invert_turns=["both"] * len(batch),
+                position_counts=[g.history for g in batch],
+                root_evaluators=[evaluator if g.state.currentTurn == g.color else g.opponent for g in batch],
             )
-            for game, result in zip(active, searches):
-                game.state = apply_move(game.state, result.move)
+            moves = dict(helper_moves)
+            moves.update((i, result.move) for i, result in zip(searching, searches, strict=True))
+            for i, game in enumerate(active):
+                game.moves.append(move_uci(moves[i]))
+                game.state = apply_move(game.state, moves[i])
                 game.plies += 1
                 key = position_key(game.state)
                 game.history[key] = game.history.get(key, 0) + 1
@@ -155,13 +172,19 @@ def evaluate_competitive(trainer, directory: Path):
     was_training = trainer.model.training
     trainer.model.eval()
     evaluator = trainer._make_model_evaluator(trainer.model)
-    positions = [p for p in build_eval_positions() if p.difficulty in ("opening", "middlegame")]
+    regular = [p for p in build_eval_positions() if p.difficulty in ("opening", "middlegame")]
+    full_eval = gen > 0 and cfg.jester_full_eval_every > 0 and gen % cfg.jester_full_eval_every == 0
+    positions = regular if full_eval else [regular[i] for i in np.linspace(
+        0, len(regular) - 1, min(len(regular), cfg.jester_eval_standard_positions), dtype=int)]
     # Fixed positions run once. Seeds provide genuinely different opening
     # positions, not duplicate deterministic games counted as new evidence.
     for seed in cfg.jester_eval_seeds:
         positions.extend(
-            build_rotating_opening_positions(cfg.eval_rotating_openings, random.Random(seed ^ gen))
+            build_rotating_opening_positions(10 if full_eval else cfg.eval_rotating_openings, random.Random(seed ^ gen))
         )
+    # Resistant near-goal games supply measurable competitive signal alongside
+    # ordinary starts. Fixed held-out bases are separate from training geometry.
+    positions.extend(selfmate_positions("eval"))
     matches = []
     for opponent_name, model in opponents:
         opp_eval = trainer._make_model_evaluator(model)
@@ -171,6 +194,8 @@ def evaluate_competitive(trainer, directory: Path):
                     Match(position.state.copy(), color, opp_eval, f"{opponent_name}/{i}", position.difficulty)
                 )
     total = len(matches)
+    phase = "competitive"
+    phase_started = started
 
     def progress(results):
         if trainer._mp_self_play is not None:
@@ -185,17 +210,20 @@ def evaluate_competitive(trainer, directory: Path):
                 len(results),
                 total,
                 counts["win"],
-                counts["draw"] + counts["cap"],
+                counts["draw"],
                 counts["loss"],
                 {},
+                caps=counts["cap"],
+                phase=phase,
                 current=None,
                 recent=[r[0].upper() for _, r in results[-14:]],
-                elapsed_s=time.monotonic() - started,
+                elapsed_s=time.monotonic() - phase_started,
             )
 
     try:
         results = play_matches(
-            matches, evaluator, cfg.eval_mcts_sims, cfg.eval_move_cap, cfg.jester_eval_batch_size, progress
+            matches, evaluator, max(256, cfg.eval_mcts_sims) if full_eval else cfg.eval_mcts_sims,
+            max(300, cfg.eval_move_cap) if full_eval else cfg.eval_move_cap, cfg.jester_eval_batch_size, progress
         )
         tactics = selfmate_positions("eval")
         tactical_results = []
@@ -211,7 +239,7 @@ def evaluate_competitive(trainer, directory: Path):
                 invert_turns=["both"] * len(batch),
                 position_counts=[{position_key(p.state): 1} for p in batch],
             )
-            tactical_results.extend((p, move_uci(r.move) in p.winning_moves) for p, r in zip(batch, searches))
+            tactical_results.extend((p, move_uci(r.move) in p.winning_moves) for p, r in zip(batch, searches, strict=True))
         accuracy = sum(ok for _, ok in tactical_results) / max(1, len(tactical_results))
         by_depth = {
             depth: (
@@ -221,13 +249,42 @@ def evaluate_competitive(trainer, directory: Path):
             )
             for depth in (2, 4, 6)
         }
+        geometric = augmented_selfmates("eval")
+        geometric = [random.Random(910 + depth).sample([p for p in geometric if p.plies == depth], 6)
+                     for depth in (2, 4, 6)]
+        conversion_positions = list(tactics) + [p for group in geometric for p in group]
+        total, phase = len(conversion_positions), "full tactical conversion"
+        phase_started = time.monotonic()
+        conversions = play_matches(
+            [Match(p.state, p.state.currentTurn, evaluator, f"conversion/{i}", p.difficulty)
+             for i, p in enumerate(conversion_positions)],
+            evaluator, cfg.eval_mcts_sims, min(12, cfg.eval_move_cap), cfg.jester_eval_batch_size, progress)
+        conversion = sum(outcome == "win" for _, outcome in conversions) / max(1, len(conversions))
+        geometry_conversion = sum(outcome == "win" for _, outcome in conversions[len(tactics):]) / 18
+        # Same fixed starts, colors and random streams for the candidate and
+        # champion. These cooperative results are diagnostic, not Elo or gate evidence.
+        helper_results = {}
+        helper_games = []
+        for name, model in (("candidate", trainer.model), ("champion", champion)):
+            helper_eval = trainer._make_model_evaluator(model)
+            total, phase = 8, f"helper diagnostic: {name}"
+            phase_started = time.monotonic()
+            played = play_matches(
+                [Match(regular[i].state.copy(), color, helper_eval, f"helper/{i}/{color}", "helper", helper=True)
+                 for i in (0, 9, 19, 29) if i < len(regular) for color in ("white", "black")],
+                helper_eval, min(96, cfg.eval_mcts_sims), min(120, cfg.eval_move_cap),
+                cfg.jester_eval_batch_size, progress)
+            helper_results[name] = {outcome: sum(r == outcome for _, r in played)
+                                    for outcome in ("win", "loss", "draw", "cap")}
+            helper_games.extend((name, game, outcome) for game, outcome in played)
     finally:
         trainer.model.train(was_training)
 
     score, lower, upper = score_interval(results)
     counts = {key: sum(r == key for _, r in results) for key in ("win", "loss", "draw", "cap")}
     promote = (
-        score >= cfg.eval_score_threshold and lower > 0.5 and accuracy >= cfg.jester_tactical_min_accuracy
+        score >= cfg.eval_score_threshold and lower > 0.5
+        and accuracy >= cfg.jester_tactical_min_accuracy and conversion >= cfg.jester_tactical_min_accuracy
     )
     if promote:
         trainer._save_champion(directory, gen)
@@ -236,13 +293,17 @@ def evaluate_competitive(trainer, directory: Path):
     else:
         trainer._plateau_counter += 1
     trainer.stats.tactical_accuracy = accuracy
-    # Advance curriculum only after all three held-out depths are mastered.
-    if all(value >= 0.8 for value in by_depth.values()):
-        trainer.stats.curriculum_prob = max(cfg.jester_curriculum_floor, trainer.stats.curriculum_prob - 0.1)
+    trainer.stats.tactical_conversion = conversion
+    # Never anneal from a narrow first-move quiz. Reduce helper availability only
+    # after a promotion, full conversions and actual decisive ordinary play.
+    ordinary_decisive = sum(outcome in ("win", "loss") for game, outcome in results
+                            if not game.difficulty.startswith("selfmate"))
+    if promote and conversion >= .8 and ordinary_decisive >= 20 and trainer.stats.helper_prob > .10:
+        trainer.stats.helper_prob = max(.10, trainer.stats.helper_prob - .05)
     if trainer._mp_self_play is not None:
-        trainer._mp_self_play.set_curriculum_prob(trainer.stats.curriculum_prob)
+        trainer._mp_self_play.set_helper_prob(trainer.stats.helper_prob)
     elif trainer.engine is not None:
-        trainer.engine.config.curriculum_start_prob = trainer.stats.curriculum_prob
+        trainer.engine.config.helper_start_prob = trainer.stats.helper_prob
     result = dict(
         gen=gen,
         champion_gen=trainer._champion_gen,
@@ -261,6 +322,12 @@ def evaluate_competitive(trainer, directory: Path):
         plateau_counter=trainer._plateau_counter,
         duration_s=round(time.monotonic() - started, 1),
         tactical_accuracy=round(accuracy, 4),
+        tactical_conversion=round(conversion, 4),
+        geometry_conversion=round(geometry_conversion, 4),
+        helper_results=json.dumps(helper_results, sort_keys=True),
+        helper_prob=trainer.stats.helper_prob,
+        full_eval=full_eval,
+        decisive_games=counts["win"] + counts["loss"],
         curriculum_prob=trainer.stats.curriculum_prob,
         opponents=len(opponents),
     )
@@ -299,8 +366,15 @@ def evaluate_competitive(trainer, directory: Path):
                         outcome=outcome,
                         plies=match.plies,
                         difficulty=match.difficulty,
+                        start=match.start,
+                        moves=match.moves,
+                        final_status=match.state.status,
                     )
                 )
                 + "\n"
             )
+    with (directory / "diagnostics.jsonl").open("a") as f:
+        for suite, game, outcome in [("conversion", g, r) for g, r in conversions] + helper_games:
+            f.write(json.dumps(dict(gen=gen, suite=suite, pair=game.pair, color=game.color,
+                                    start=game.start, moves=game.moves, outcome=outcome)) + "\n")
     return result

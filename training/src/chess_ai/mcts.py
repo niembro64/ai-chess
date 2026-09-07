@@ -576,6 +576,7 @@ def run_batched_mcts(
     opponent_evaluator: BatchedEvaluator | None = None,
     agent_colors: "list[str | None] | None" = None,
     opponent_evaluators: list[BatchedEvaluator | None] | None = None,
+    root_evaluators: list[BatchedEvaluator] | None = None,
 ) -> list[MCTSResult]:
     """Run MCTS for each input state, batching all NN evaluations across games.
 
@@ -584,6 +585,9 @@ def run_batched_mcts(
     values retain the ordinary-outcome sign convention in all cases.
     `opponent_evaluators[i]` optionally selects a different frozen opponent
     per game; `agent_colors[i]` controls which evaluator supplies a leaf.
+    Competitive play uses `root_evaluators[i]`: the actual mover's network
+    evaluates its ENTIRE tree, matching browser/mobile search. The older
+    leaf-color routing is retained only for explicit diagnostic callers.
 
     `temperatures[i]` controls the move-selection temperature for game `i`.
     Defaults to τ=1.0 for every game (AlphaZero-style exploration). Pass a
@@ -612,9 +616,12 @@ def run_batched_mcts(
     for name, lst in (("position_counts", position_counts),
                       ("invert_turns", invert_turns),
                       ("agent_colors", agent_colors),
-                      ("opponent_evaluators", opponent_evaluators)):
+                      ("opponent_evaluators", opponent_evaluators),
+                      ("root_evaluators", root_evaluators)):
         if lst is not None and len(lst) != len(states):
             raise ValueError(f"{name} length {len(lst)} != states length {len(states)}")
+    if root_evaluators is not None and (opponent_evaluator is not None or opponent_evaluators is not None):
+        raise ValueError("Choose root-owned or leaf-color evaluator routing, not both")
 
     # Never silently use an obsolete extension without variant semantics.
     use_rust = USE_RUST_MCTS and board_encoder is None
@@ -645,6 +652,8 @@ def run_batched_mcts(
             ac = agent_colors[gi] if agent_colors else None
             opponent = opponent_evaluators[gi] if opponent_evaluators else opponent_evaluator
             ev = opponent if opponent is not None and ac is not None and turn != ac else evaluator
+            if root_evaluators is not None:
+                ev = root_evaluators[gi]
             groups.setdefault(ev, []).append((k, board))
         for ev, batch in groups.items():
             policies, values = ev(np.stack([b for _, b in batch]))

@@ -8,6 +8,7 @@ tuples get pushed into a ring-buffer replay buffer ready for gradient updates.
 from __future__ import annotations
 
 import random
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -28,7 +29,7 @@ from .engine import (
     get_legal_moves,
     is_in_check,
 )
-from .mcts import BatchedEvaluator, run_batched_mcts
+from .mcts import BatchedEvaluator, MCTSResult, run_batched_mcts
 from .model import NUM_PLANES, ChessNet, encoded_to_nchw
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights
 
@@ -57,6 +58,7 @@ class TrainingExample:
     # "best guess while lost," not a found forcing line). Value loss
     # weighting is handled separately via outcome_known.
     policy_weight: float = 1.0
+    source: str = "competitive"
 
 
 @dataclass
@@ -103,6 +105,7 @@ class GameSlot:
     opponent_evaluator: object = None
     tracked_color: str = "white"
     matchup: str = "mirror"
+    trajectory: deque = field(default_factory=lambda: deque(maxlen=32))
     # First color that hit the resign threshold while sampled into the
     # truth-check holdout (resign_disabled_prob). The game plays on;
     # _finish_game compares the predicted loss against the actual
@@ -581,6 +584,9 @@ class SelfPlayConfig:
     frozen_evaluators: tuple[BatchedEvaluator, ...] = ()
     opponent_seeks_loss: bool = True
     curriculum_start_prob: float = 0.0
+    helper_start_prob: float = 0.0
+    bridge_start_prob: float = 0.0
+    max_examples_per_game: int = 0
     standard_move_cap: int = 300
     agent_selfplay_prob: float = 0.75
     # Explicit legacy/cooperative diagnostics; competitive config disables all.
@@ -628,6 +634,9 @@ class SelfPlayEngine:
         self.example_sink = example_sink
         self.config = config or SelfPlayConfig()
         self.rng = rng or random.Random()
+        # Actual pre-mate states from non-catalog games, never assumed wins.
+        # Restarting one creates a fresh, fully resistant episode with new labels.
+        self.bridge_pool: dict[bytes, ChessGameState] = {}
 
         self.games: list[GameSlot] = [
             self._new_slot() for _ in range(self.config.num_concurrent_games)
@@ -658,18 +667,29 @@ class SelfPlayEngine:
 
     def _new_slot(self) -> GameSlot:
         cfg = self.config
-        if cfg.invert_agent_selection and self.rng.random() < cfg.curriculum_start_prob:
+        roll = self.rng.random() if cfg.invert_agent_selection else 1.0
+        helper = False
+        if cfg.invert_agent_selection and roll < cfg.curriculum_start_prob:
             from .inverted import curriculum_start
             state = curriculum_start(self.rng)
             slot = GameSlot(state=state, move_cap=40, origin="curriculum")
+        elif cfg.invert_agent_selection and self.bridge_pool and roll < cfg.curriculum_start_prob + cfg.bridge_start_prob:
+            state = self.rng.choice(tuple(self.bridge_pool.values())).copy()
+            slot = GameSlot(state=state, move_cap=80, origin="bridge")
         else:
             slot = _make_game_slot(self.rng, cfg.random_start_prob, cfg.endgame_start_prob)
             if cfg.invert_agent_selection:
                 slot.move_cap = cfg.standard_move_cap
+                helper = roll >= 1.0 - cfg.helper_start_prob
         slot.position_history = {_position_key(slot.state): 1}
         slot.tracked_color = (slot.state.currentTurn if slot.origin == "curriculum"
                               else self.rng.choice(("white", "black")))
         if cfg.invert_agent_selection:
+            if helper:
+                slot.agent_color = slot.tracked_color
+                slot.spar_color = "black" if slot.agent_color == "white" else "white"
+                slot.matchup = "bootstrap"
+                return slot
             opponents = cfg.frozen_evaluators or ((cfg.frozen_evaluator,) if cfg.frozen_evaluator else ())
             mirror = not opponents or self.rng.random() < cfg.agent_selfplay_prob
             if mirror:
@@ -702,21 +722,36 @@ class SelfPlayEngine:
                 "both" if g.agent_color is None or self.config.opponent_seeks_loss else g.agent_color for g in self.games
             ]
             agent_colors = [g.agent_color for g in self.games]
-        mcts_results = run_batched_mcts(
-            states,
+        # The helper accepts an available mate, otherwise moves uniformly.
+        # Its moves are environment actions, never policy imitation targets.
+        helper_moves = {}
+        for i, slot in enumerate(self.games):
+            if slot.matchup == "bootstrap" and slot.state.currentTurn == slot.spar_color:
+                legal = get_legal_moves(slot.state)
+                mates = [m for m in legal if apply_move(slot.state, m).status == "checkmate"]
+                helper_moves[i] = self.rng.choice(mates or legal)
+        searching = [i for i in range(len(states)) if i not in helper_moves]
+        searched = run_batched_mcts(
+            [states[i] for i in searching],
             self.evaluator,
             self.config.mcts_simulations,
             self.rng,
-            temperatures,
+            [temperatures[i] for i in searching],
             policy_softening_temperature=self.config.policy_softening_temperature,
             board_encoder=self.config.board_encoder,
             # In-tree repetition awareness: each search sees its game's
             # position history, so shuffling reads as a draw in-tree.
-            position_counts=[g.position_history for g in self.games],
-            invert_turns=invert_turns,
-            opponent_evaluators=[g.opponent_evaluator for g in self.games] if jester else None,
-            agent_colors=agent_colors,
+            position_counts=[self.games[i].position_history for i in searching],
+            invert_turns=[invert_turns[i] for i in searching] if jester else None,
+            root_evaluators=[
+                self.games[i].opponent_evaluator
+                if self.games[i].opponent_evaluator is not None and states[i].currentTurn != agent_colors[i]
+                else self.evaluator for i in searching
+            ] if jester else None,
         )
+        mcts_results = dict(zip(searching, searched))
+        for i, move in helper_moves.items():
+            mcts_results[i] = MCTSResult(np.zeros(POLICY_SIZE, np.float32), move, 0.0, 0.0)
 
         finished: list[GameResult] = []
 
@@ -729,6 +764,7 @@ class SelfPlayEngine:
             if (
                 slot.spar_color is not None
                 and slot.state.currentTurn == slot.spar_color
+                and slot.matchup != "bootstrap"
             ):
                 options = get_legal_moves(slot.state)
                 mates = (
@@ -808,6 +844,8 @@ class SelfPlayEngine:
                     continue
 
             # Apply the move.
+            if jester and self.config.bridge_start_prob > 0 and slot.origin != "curriculum":
+                slot.trajectory.append(slot.state.copy())
             slot.state = apply_move(slot.state, move)
             slot.move_count += 1
 
@@ -978,7 +1016,11 @@ class SelfPlayEngine:
         # mild enough that |v| stays near 1 over real game lengths.
         decay = self.config.value_ply_decay
         n = len(slot.examples)
+        limit = self.config.max_examples_per_game
+        selected = set(self.rng.sample(range(n), limit)) if limit and n > limit else None
         for i, ex in enumerate(slot.examples):
+            if selected is not None and i not in selected:
+                continue
             plies_from_end = n - 1 - i
             ply_factor = decay ** plies_from_end if decay != 1.0 else 1.0
             outcome_from_persp = white_outcome if ex.turn_color == "white" else -white_outcome
@@ -988,7 +1030,19 @@ class SelfPlayEngine:
                 board=ex.board, policy=ex.policy, value=value,
                 outcome_known=outcome_known,
                 policy_weight=policy_weight,
+                source=("bootstrap" if slot.matchup == "bootstrap" else
+                        slot.origin if slot.origin in ("curriculum", "bridge") else "competitive"),
             ))
+
+        if self.config.invert_agent_selection and status == "checkmate" and slot.origin != "curriculum":
+            # Reset repetition history on restart, but preserve clocks/rights.
+            # Keep 2..32 plies of approach states; resist every reply on replay.
+            for state in list(slot.trajectory)[:-1]:
+                key = _position_key(state)
+                if key not in self.bridge_pool:
+                    self.bridge_pool[key] = state
+            while len(self.bridge_pool) > 2048:
+                del self.bridge_pool[next(iter(self.bridge_pool))]
 
         self.games_completed += 1
         self.recent_game_lengths.append(slot.move_count)

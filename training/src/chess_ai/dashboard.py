@@ -58,6 +58,7 @@ CSV_FIELDS = (
     "resign_truth_games", "resign_truth_fp",
     "gen_per_min", "games_per_min", "replay_size",
     "eta_seconds", "curriculum_prob", "tactical_accuracy", "jester_outcomes", "origin_outcomes",
+    "tactical_conversion", "helper_prob", "replay_sample_counts", "replay_source_sizes",
     "policy_loss", "value_loss", "total_loss",
     "t_drain_ms", "t_broadcast_ms", "t_sleep_ms", "t_iter_ms",
     "t_sample_ms", "t_h2d_ms", "t_forward_ms", "t_backward_ms", "t_optim_ms",
@@ -308,6 +309,8 @@ class DashboardLogger:
         current: dict | None = None,
         recent: list[str] | None = None,
         elapsed_s: float = 0.0,
+        caps: int = 0,
+        phase: str = "competitive",
     ) -> None:
         """Trainer callback: fires twice per game in a live eval match
         (once before, once after) so the panel updates without waiting
@@ -327,6 +330,7 @@ class DashboardLogger:
         self._eval_progress = {
             "done": games_done, "total": total,
             "wins": wins, "draws": draws, "losses": losses,
+            "caps": caps, "phase": phase,
             "per_diff": per_diff or {},
             "current": current,
             "recent": list(recent or []),
@@ -384,6 +388,7 @@ class DashboardLogger:
         self.log(
             f"eval gen {result['gen']:,}{dur}: "
             f"{result['wins']}-{result['draws']}-{result['losses']} "
+            f"caps={result.get('caps', 0)} "
             f"score={result['score']:.3f} Δelo={result['elo_diff']:+.0f}  {tag}"
         )
         # Per-difficulty summary (optional — only if trainer passed it).
@@ -429,6 +434,10 @@ class DashboardLogger:
                 "games": stats.games_completed,
                 "curriculum_prob": getattr(stats, "curriculum_prob", 0.0),
                 "tactical_accuracy": getattr(stats, "tactical_accuracy", 0.0),
+                "tactical_conversion": getattr(stats, "tactical_conversion", 0.0),
+                "helper_prob": getattr(stats, "helper_prob", 0.0),
+                "replay_sample_counts": json.dumps(getattr(stats, "replay_sample_counts", {}), sort_keys=True),
+                "replay_source_sizes": json.dumps(getattr(stats, "replay_source_sizes", {}), sort_keys=True),
                 "jester_outcomes": json.dumps(getattr(stats, "jester_outcomes", {}), sort_keys=True),
                 "origin_outcomes": json.dumps(getattr(stats, "origin_outcomes", {}), sort_keys=True),
                 # Aggregates (computed from granular buckets).
@@ -625,8 +634,10 @@ class DashboardLogger:
             for name, counts in sorted(inverted.items()):
                 table.add_row(name, *(str(counts.get(k, 0)) for k in ("own_mate", "delivered_mate", "draw", "cap")))
             note = Text(f"Own mate = learner wins · delivered mate = learner loses\n"
-                        f"Held-out tactics {getattr(stats, 'tactical_accuracy', 0):.0%} · "
-                        f"curriculum starts {getattr(stats, 'curriculum_prob', 0):.0%}", style="dim")
+                        f"First move {getattr(stats, 'tactical_accuracy', 0):.0%} · "
+                        f"full conversion {getattr(stats, 'tactical_conversion', 0):.0%} · "
+                        f"helper starts {getattr(stats, 'helper_prob', 0):.0%}\n"
+                        f"Batch samples: {getattr(stats, 'replay_sample_counts', {})}", style="dim")
             from rich.console import Group
             return Panel(Group(table, note), title="competitive inverted chess", border_style="blue")
         buckets: dict[str, int] = {
@@ -839,6 +850,8 @@ class DashboardLogger:
             ("W ", "dim"), (f"{w}", "bright_green"),
             ("  D ", "dim"), (f"{d}", "yellow"),
             ("  L ", "dim"), (f"{l}", "red"),
+            (f"  cap {progress.get('caps', 0)}", "yellow"),
+            (f"  {progress.get('phase', '')}", "dim"),
         )
 
     def _progress_score_row(self, progress: dict) -> Text:
@@ -848,7 +861,8 @@ class DashboardLogger:
         w = int(progress["wins"])
         d = int(progress["draws"])
         l = int(progress["losses"])
-        done = w + d + l
+        caps = int(progress.get("caps", 0))
+        done = w + d + l + caps
         if done == 0:
             # Still show elapsed even when no game has finished yet.
             elapsed = float(progress.get("elapsed_s", 0.0))
@@ -858,7 +872,7 @@ class DashboardLogger:
                     (_format_duration(elapsed), "bright_white"),
                 )
             return Text("")
-        score = (w + 0.5 * d) / done
+        score = (w + 0.5 * (d + caps)) / done
         s_clamp = max(0.01, min(0.99, score))
         elo = -400.0 * math.log10(1.0 / s_clamp - 1.0)
         score_color = (
@@ -880,7 +894,8 @@ class DashboardLogger:
             ("score ", "dim"),
             (f"{score:.3f}", score_color),
             ("   Δelo ", "dim"),
-            (f"{elo:+.0f}", "bright_green" if elo >= 0 else "red"),
+            ("—" if not w + l or progress.get("phase", "").startswith("helper") else f"{elo:+.0f}",
+             "bright_green" if elo >= 0 else "red"),
             (f"   (thresh {self._eval_threshold:.2f})", "dim"),
             (eta_str, "dim"),
         )
@@ -1104,6 +1119,7 @@ class DashboardLogger:
             ("gen      ", "dim bold"),
             ("vs       ", "dim bold"),
             ("W-D-L     ", "dim bold"),
+            ("cap   ", "dim bold"),
             ("score  ", "dim bold"),
             ("Δelo    ", "dim bold"),
             ("dur", "dim bold"),
@@ -1148,8 +1164,9 @@ class DashboardLogger:
                 (f"{gen_str}  ", "white"),
                 (f"{opp_str}  ", "dim"),
                 (f"{w:>2}-{d:>2}-{l:>2}    ", "dim"),
+                (f"{h.get('caps', 0):>3}   ", "yellow"),
                 (f"{score:>5.3f}  ", score_style),
-                (f"{elo:+5.1f}", elo_style),
+                ("    —" if not w + l else f"{elo:+5.1f}", elo_style),
                 (star, "bright_yellow bold"),
                 (f"  {dur_str}", "dim"),
             )

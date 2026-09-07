@@ -96,15 +96,17 @@ def launch(*, mode: str) -> None:
     if resume is not None:
         checkpoint = torch.load(resume, map_location="cpu", weights_only=False)
         old = checkpoint.get("config", {})
-        if old.get("jester_gate") != "head_to_head" or old.get("syzygy_path") is not None:
+        if old.get("jester_protocol") != 2 or old.get("jester_gate") != "head_to_head" or old.get("syzygy_path") is not None:
             raise ValueError(
-                "Legacy cooperative run: use --init-from with a new directory instead of --resume"
+                "Different JESTER protocol: use --init-from with a new directory instead of --resume"
             )
         trainer.load_checkpoint(resume)
         if trainer._mp_self_play:
             trainer._mp_self_play.set_curriculum_prob(trainer.stats.curriculum_prob)
+            trainer._mp_self_play.set_helper_prob(trainer.stats.helper_prob)
         else:
             trainer.engine.config.curriculum_start_prob = trainer.stats.curriculum_prob
+            trainer.engine.config.helper_start_prob = trainer.stats.helper_prob
     else:
         provenance = {"initialization": "random", "seed": cfg.SEED}
         if args.init_from:
@@ -122,7 +124,7 @@ def launch(*, mode: str) -> None:
         trainer._save_champion(directory, gen=0)
         trainer.save_checkpoint(directory)
     log.info(
-        "Competitive JESTER: %s, %d workers x %d games, %d sims; %d frozen opponents; no Syzygy or cooperative mates",
+        "JESTER protocol 2: %s, %d workers x %d games, %d sims; %d frozen opponents; balanced replay, separate helper curriculum, no Syzygy",
         device,
         config.num_workers,
         config.games_per_worker,
@@ -131,7 +133,7 @@ def launch(*, mode: str) -> None:
     )
     log.info("Checkpoints and evidence: %s", directory)
     summary = (
-        f"family=jester (competitive)\nblocks={cfg.NUM_RES_BLOCKS}\nfilters={cfg.NUM_FILTERS}\n"
+        f"family=jester (hybrid curriculum)\nblocks={cfg.NUM_RES_BLOCKS}\nfilters={cfg.NUM_FILTERS}\n"
         f"params={sum(p.numel() for p in model.parameters()) / 1e6:.2f}M\n"
         f"lr={config.learning_rate:.1e}\nworkers={config.num_workers}\nsims={config.mcts_simulations}\n"
         f"curriculum={trainer.stats.curriculum_prob:.0%}\nbatch={config.batch_size}"

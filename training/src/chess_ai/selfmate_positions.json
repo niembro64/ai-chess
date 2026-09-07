@@ -294,5 +294,155 @@
       "g1b6"
     ],
     "split": "eval"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/8/8/4n3/2Q2n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c1c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/8/8/2Q1n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c2c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/8/8/4n2Q/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "h2b8",
+      "h2c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/8/2Q5/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c3c7"
+    ],
+    "split": "eval",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/8/6Q1/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "g3b8",
+      "g3c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/2Q5/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c4c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P6/5Q2/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "f4b8",
+      "f4c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/QP6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "a5c7"
+    ],
+    "split": "eval",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1PQ5/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "c5c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/8/1P2Q3/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "e5b8",
+      "e5c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b7/1k6/3Q4/1P6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "d6b8",
+      "d6c7"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b2Q4/1k6/8/1P6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "d8b8",
+      "d8c7"
+    ],
+    "split": "eval",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b3Q3/1k6/8/1P6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "e8b8"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b4Q2/1k6/8/1P6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "f8b8"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b5Q1/1k6/8/1P6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "g8b8"
+    ],
+    "split": "train",
+    "family": "bishop-discovery"
+  },
+  {
+    "fen": "b6Q/1k6/8/1P6/8/8/4n3/5n1K w - - 0 1",
+    "plies": 2,
+    "winning_moves": [
+      "h8b8"
+    ],
+    "split": "eval",
+    "family": "bishop-discovery"
   }
 ]

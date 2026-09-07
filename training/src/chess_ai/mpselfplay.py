@@ -65,6 +65,9 @@ class MultiprocessingConfig:
     jester_selfplay_prob: float = 0.75
     opponent_checkpoints: tuple[str, ...] = ()
     curriculum_start_prob: float = 0.0
+    helper_start_prob: float = 0.0
+    bridge_start_prob: float = 0.0
+    max_examples_per_game: int = 0
     standard_move_cap: int = 300
     games_per_worker: int = 16
     mcts_simulations: int = 25
@@ -271,6 +274,7 @@ def _worker_main(
     stop_event: Any,
     seed: int,
     curriculum_prob: Any,
+    helper_prob: Any,
 ) -> None:
     """Run a self-play loop; NN evals go through the shared inference server."""
     torch.set_num_threads(1)
@@ -320,6 +324,9 @@ def _worker_main(
             opponent_seeks_loss=True,
             agent_selfplay_prob=config.jester_selfplay_prob,
             curriculum_start_prob=config.curriculum_start_prob,
+            helper_start_prob=config.helper_start_prob,
+            bridge_start_prob=config.bridge_start_prob,
+            max_examples_per_game=config.max_examples_per_game,
             standard_move_cap=config.standard_move_cap,
             spar_temperature=0.0,
             spar_random_prob=0.0,
@@ -340,6 +347,7 @@ def _worker_main(
 
     while not stop_event.is_set():
         engine.config.curriculum_start_prob = curriculum_prob.value
+        engine.config.helper_start_prob = helper_prob.value
         finished = engine.step()
         # Surface per-game outcomes back to the trainer so the dashboard's
         # outcomes panel shows real W/B/D/cap counts instead of zeros.
@@ -387,6 +395,7 @@ class MultiprocessingSelfPlay:
         self._ctx = mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
         self._curriculum_prob = self._ctx.Value("d", config.curriculum_start_prob)
+        self._helper_prob = self._ctx.Value("d", config.helper_start_prob)
 
         self._request_q: mp.Queue = self._ctx.Queue(maxsize=config.request_q_maxsize)
         self._response_qs: list[mp.Queue] = [
@@ -445,6 +454,7 @@ class MultiprocessingSelfPlay:
                     self._stop_event,
                     self.seed + wid + 1,
                     self._curriculum_prob,
+                    self._helper_prob,
                 ),
                 daemon=True,
             )
@@ -458,6 +468,9 @@ class MultiprocessingSelfPlay:
 
     def set_curriculum_prob(self, probability: float) -> None:
         self._curriculum_prob.value = probability
+
+    def set_helper_prob(self, probability: float) -> None:
+        self._helper_prob.value = probability
 
     def drain_examples(self, buffer: ReplayBuffer, max_drain: int = 4096) -> int:
         """Pull completed TrainingExamples off the queue into the buffer.

@@ -371,7 +371,7 @@ def build_config() -> TrainConfig:
 # same architecture Sage used pre-Rust. Fine at Toy's size.
 
 CHECKPOINT_DIR_TOY = ROOT / "runs_toy" / "latest"
-CHECKPOINT_DIR_JESTER = ROOT / "runs_jester" / "competitive"
+CHECKPOINT_DIR_JESTER = ROOT / "runs_jester" / "hybrid"
 
 
 def build_toy_config() -> TrainConfig:
@@ -420,9 +420,9 @@ def build_jester_config() -> TrainConfig:
     cfg.num_concurrent_games = 64
     cfg.mcts_simulations = 256
     cfg.batch_size = 256
-    cfg.min_examples_between_grad_steps = 128
+    cfg.min_examples_between_grad_steps = 64
     cfg.replay_buffer_capacity = 120_000
-    cfg.min_buffer_for_training = 4_000
+    cfg.min_buffer_for_training = 1_024
     # A fresh experiment can initialize from a trained champion. Start
     # gently while the old cooperative value predictions are corrected.
     cfg.learning_rate = 3e-4
@@ -437,18 +437,25 @@ def build_jester_config() -> TrainConfig:
     cfg.jester_mode = True
     cfg.jester_selfplay_prob = 0.75
     cfg.jester_opponent_checkpoint = ""
-    cfg.jester_curriculum_prob = 0.5
+    cfg.jester_curriculum_prob = 0.25
+    cfg.jester_curriculum_floor = 0.25
+    cfg.jester_helper_prob = 0.30
+    cfg.jester_bridge_prob = 0.25
+    cfg.jester_max_examples_per_game = 32
+    cfg.jester_eval_batch_size = 32
+    cfg.jester_move_cap = 200
+    cfg.tb_policy_weight = 0.25
     cfg.jester_spar_temperature = 0.0
     cfg.jester_spar_random_prob = 0.0
     cfg.jester_spar_accept_mate_prob = 0.0
     cfg.jester_gate = "head_to_head"
     cfg.eval_every_gens = 2_000
-    cfg.eval_mcts_sims = 256
-    cfg.eval_move_cap = 300
+    cfg.eval_mcts_sims = 128
+    cfg.eval_move_cap = 100
     cfg.eval_temperature = 0.0
     cfg.eval_blunder_prob = 0.0
     cfg.eval_score_threshold = 0.55
-    cfg.eval_rotating_openings = 10
+    cfg.eval_rotating_openings = 2
     cfg.archive_every_gens = 1_000
     # All-draw evaluations are inconclusive; don't automatically end a
     # still-learning curriculum run after an arbitrary number of them.
