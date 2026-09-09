@@ -340,6 +340,10 @@ Procedure used / required for reproducible future imports:
     search, draw shortcut, repetition path, and worker adapter for Uncheck.
     Check Uncheck victory before material, repetition, or cap shortcuts.
     Disable ordinary insufficient-material checks in Uncheck searches.
+    Count actual occurrences across game history plus the simulated path;
+    a second occurrence alone is not an Uncheck draw. Existing path-set cycle
+    shortcuts must not masquerade as the new game's threefold rule. Preserve
+    NORMAL's existing search behavior in its own branch.
     Preserve all promotion branches even though their 4096-policy slot is
     shared. Aggregate visits only at the neural target boundary, not in
     child-state identity. Keep the current architecture and action size.
