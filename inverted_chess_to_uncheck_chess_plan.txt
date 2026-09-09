@@ -1,0 +1,822 @@
+INVERTED CHESS TO UNCHECK CHESS: RULES AND IMPLEMENTATION PLAN
+Prepared: 2026-09-09
+
+PURPOSE AND CURRENT SCOPE
+
+Replace the old inverted objective (get your own king checkmated) with
+UNCHECK CHESS in the Python/Rust trainer, Vue browser game, and Expo mobile
+game. Keep NORMAL CHESS available and preserve its existing behavior.
+
+This document is a plan, not an implementation of the new game. The only
+implementation work authorized for this planning round is importing a current
+JESTER checkpoint into the two frontend source trees and verifying that import.
+Do not change gameplay, start Uncheck training, or publish an app in this round.
+
+The model-selection behavior below is an explicit user requirement. It
+supersedes the earlier suggestion to redesign opposite-goal selection, reset
+JESTER's value head, or try SAGE as a replacement training initialization.
+
+Repository locations:
+  Web and training: /Users/ericniemeyer/code/ai-chess
+  Expo mobile:     /Users/ericniemeyer/code/worst-chess-move
+  Training host:   gpus, reachable using the configured Tailscale SSH route
+  Remote checkout: /home/gpus/ai-chess
+  Current run:     /home/gpus/ai-chess/training/runs_jester/hybrid
+  Current tmux:    jester
+
+
+1. NON-NEGOTIABLE MODEL AND SELECTION CONTRACT
+
+1.1 SAGE
+    Preserve SAGE's weight files, architecture, encoders, normal-chess
+    training pipeline, model identity, and current move-ranking behavior.
+    SAGE remains the model trained to win ordinary chess.
+    When asked to WIN, choose its highest-ranked eligible move.
+    When asked to LOSE, choose its lowest-ranked eligible move.
+
+1.2 JESTER
+    First import the current GPU JESTER into both frontends. Freeze that
+    imported checkpoint as the frontend baseline for the rules migration.
+    JESTER remains the model trained to lose in the existing product language.
+    When asked to LOSE, choose its highest-ranked eligible move.
+    When asked to WIN, choose its lowest-ranked eligible move.
+    Do not reset or alter any layer of these shipped weights during migration.
+
+1.3 Exact setup matrix
+
+    Selected game     Model    Existing goal state       Selection
+    NORMAL CHESS      SAGE     asked WIN / as trained    highest eligible
+    UNCHECK CHESS     SAGE     asked LOSE / opposite      lowest eligible
+    UNCHECK CHESS     JESTER   asked LOSE / as trained    highest eligible
+    NORMAL CHESS      JESTER   asked WIN / opposite       lowest eligible
+
+    The rules belong to the selected GAME, and apply equally to both colors.
+    Choosing a model does not give the human different legal moves.
+    Existing trainedGoal and goalInverted fields may remain for compatibility:
+      SAGE + goalInverted=false  -> normal
+      SAGE + goalInverted=true   -> uncheck-v1
+      JESTER + goalInverted=false -> uncheck-v1
+      JESTER + goalInverted=true  -> normal
+
+1.4 Define "likely" exactly as the apps currently do
+    LOW: rank by the raw policy head after determining eligible moves.
+    MEDIUM/HIGH: rank by the current MCTS visit distribution, using the
+    existing simulation counts, tie-breaking, and promotion handling.
+    Opposite-goal selection reverses the final ranking. Do not replace it
+    with an objective-aware best-move picker, a random move, or value argmin.
+    Preserve current model-based search direction: SAGE non-inverted,
+    JESTER inverted for both turns. Do not also reverse search because the
+    user selected the opposite goal; that would change existing behavior.
+    Preserve current repetition-based candidate exclusions and their
+    existing exceptions. They are bot preferences, not additional game rules.
+    "Eligible" means legal under the selected game and selectable under
+    those existing filters. No filter may permit a non-capture when a legal
+    capture exists, nor leave a moving player without a choice.
+
+1.5 Weight equality means matching source models, not identical file bytes
+    SAGE and JESTER remain DIFFERENT networks. Each model's web and mobile
+    assets must represent the same respective exported model parameters.
+    Web uses fp16-serialized JSON; mobile uses ONNX built from that JSON.
+    Different file formats have different hashes. Record the shared source
+    checkpoint hash and verify numerical inference agreement.
+    Continuing GPU training later must not automatically replace these
+    frontend assets. Publishing newly trained Uncheck weights is a later step.
+
+
+2. EXACT UNCHECK CHESS V1 RULES
+
+These are the proposed complete rules for implementation. The previously
+unspecified corner cases are resolved here: kings cannot be captured;
+castling ignores attacked-square restrictions; no-move positions are draws;
+ordinary insufficient-material rules are disabled. These choices should be
+used consistently across all four engines.
+
+2.1 Board, pieces, and turns
+    Use the ordinary 8x8 board, initial position, and 16 pieces per player.
+    White moves first. Turns alternate. Each turn consists of one move.
+    No passing, capturing friendly pieces, or multiple captures in one move.
+    Piece movement, pawn double steps, sliding-piece obstruction, en passant,
+    and promotion are standard except for the explicit changes below.
+
+2.2 Win condition: resolve at the BEGINNING of the turn
+    Before offering moves, inspect the king of the player whose turn begins.
+    If at least one opposing piece attacks that king's square, that player
+    immediately wins. No checkmate test and no escape-move test is needed.
+    This victory takes precedence over draw rules and move availability.
+
+    Consequences:
+    - You may end your own turn with your own king attacked. The opponent
+      gets one move to remove every attack by their pieces on your king.
+    - If your king is still attacked when your turn returns, you win.
+    - If you end your move attacking the opponent's king, the opponent wins
+      immediately as their turn begins. They do NOT get a rescue turn.
+    - If both kings are attacked after a move, the next player wins first.
+    - The attacker need not be the same piece on the two successive turns.
+      The only test is whether any attack exists at the turn boundary.
+    - An imported position with the side-to-move king attacked is already
+      terminal. Do not generate a move or evaluate the network for that side.
+
+    This corrects the earlier wording about giving an opponent check. The
+    one-turn rescue applies to a king exposed during ITS OWNER'S move.
+
+2.3 What "attacked" means
+    Use ordinary attack geometry, independently of legal move generation:
+    pawn diagonals, knight jumps, adjacent king squares, and unobstructed
+    bishop/rook/queen rays. A pawn's forward push is not an attack.
+    Include attacks by pieces that would be pinned under ordinary chess.
+    A compulsory capture elsewhere does not switch off an existing attack.
+    The prohibition on capturing kings does not switch off attacks on kings.
+    Do not compute attacks by asking which legal king captures are available.
+    A piece only attacks through a blocker if that blocker actually moves.
+
+2.4 King movement and capture
+    Kings may move into attacked squares or expose themselves by moving
+    another piece. Ordinary self-check restrictions do not apply.
+    Kings are never captured and never removed from the board.
+    Kings may capture opposing non-king pieces using normal king movement.
+    Such king captures count for the compulsory-capture rule.
+    A move onto the enemy king's occupied square is always forbidden.
+    Moving adjacent to the enemy king is allowed geometrically, but attacks
+    both kings and gives the next player the immediate victory.
+
+2.5 Compulsory captures
+    Generate every movement-valid move, including moves exposing your king,
+    while excluding king captures. Then identify all capturing moves.
+    If any capture exists anywhere on the board, ALL non-capturing moves
+    are unavailable. The player may choose any available capture.
+    There is no requirement to maximize captured value or prefer king moves.
+    En passant and capturing promotions are captures.
+    Quiet promotions and castling are non-captures.
+    Capture detection must inspect the actual captured pawn for en passant,
+    because its destination square is empty.
+    Capture priority applies even when a quiet move could rescue the enemy
+    king. A legal capture that fails to rescue that king remains legal and
+    results in the opponent winning at the next turn boundary.
+
+2.6 Unchecking the opponent
+    To prevent their victory, finish your move with NONE of your pieces
+    attacking their king. You can withdraw an attacker or interpose a piece.
+    A capturing move can also move an attacker away or block a different ray.
+    You cannot move the opponent's king or capture your own attacking piece.
+    Removing one attack while uncovering another does not rescue the king.
+    There is no separate obligation that forbids losing moves. Always apply
+    the normal Uncheck move list and compulsory-capture filter, then the win
+    test after changing the side to move.
+
+2.7 Castling
+    Keep the normal castling starting/destination squares, unmoved king and
+    rook requirements, rook presence, and empty intervening squares.
+    Ignore attack restrictions on the origin, transit, and destination.
+    In practice, a player whose king is attacked at turn start already won,
+    so castling out of check is never played in a nonterminal game.
+    Castling is unavailable whenever that player has a permitted capture.
+    Apply both piece movements before checking the next player's king.
+
+2.8 Promotions and en passant
+    Promotion must choose queen, rook, bishop, or knight; never king or pawn.
+    All four options remain distinct legal moves and search branches.
+    Resolve the promotion before evaluating attacks and the result.
+    En passant lasts for the immediately following turn as in normal chess.
+    Remove the captured pawn before evaluating discovered attacks.
+
+2.9 Draws and termination order
+    After a move: update board, rights, en passant, clocks, and history;
+    change side to move; then apply this exact priority:
+      1. Side-to-move king attacked -> that player wins.
+      2. Third occurrence of the same position -> draw.
+      3. 100 half-moves without a pawn move or capture -> draw.
+      4. No permitted move -> draw.
+      5. Otherwise continue.
+    Seed the initial position's occurrence count at one.
+    Repetition identity includes pieces, side to move, castling rights,
+    effective en-passant availability, and ruleset. An en-passant square
+    matters only when it supplies a permitted capture. Exclude move clocks.
+    Do not introduce this repetition-key change into NORMAL CHESS silently;
+    preserve its current behavior in its own branch.
+    No automatic draw for bare kings, king+bishop, king+knight, or any other
+    ordinary insufficient-mating-material classification in Uncheck v1.
+    These positions can still terminate under the Uncheck attack rule.
+    Existing agreed draws and resignations may remain available: agreement
+    draws, and a resignation awards the other player the actual victory.
+    A training-only move cap is a truncation, not a proved draw or a new
+    gameplay rule. Timed chess is outside the scope of this migration.
+
+2.10 Canonical tactical example
+    FEN: r6k/8/5n2/8/8/3K4/P7/8 w - - 0 1
+    White: king d3, pawn a2. Black: king h8, knight f6, rook a8.
+    White plays d3e4, entering the knight's attack.
+    Black's only permitted capture is a8a2. Capturing White's king is banned.
+    Black must capture a2 and cannot instead move the knight away.
+    White's turn begins with its king still attacked: White wins.
+
+
+3. PHASE ZERO: CURRENT JESTER IMPORT
+
+Import receipt and validation results are appended at the end of this file.
+The source is the running hybrid trainer's latest saved checkpoint, not its
+older champion and not the old runs_jester/latest directory.
+
+Procedure used / required for reproducible future imports:
+  1. Record both repositories' dirty state and hashes of all SAGE assets.
+  2. Back up the existing JESTER JSON, ONNX, and metadata before replacement.
+  3. Work in isolated Git worktrees. Preserve unrelated local changes.
+  4. Connect with ssh gpus. If MagicDNS fails, try ssh gpus-ts. These aliases
+     use Tailscale through the configured local SOCKS proxy. Do not replace
+     ~/.ssh/config or assume a direct LAN connection is required.
+  5. Snapshot runs_jester/hybrid/latest.pt into a unique exports directory.
+     The current trainer writes .pt.tmp and atomically replaces latest.pt.
+     A hard link to the completed latest.pt therefore pins one stable inode
+     without pausing training. Recheck this write behavior before reusing
+     this technique after future trainer changes; do not overwrite the link.
+  6. Hash the remote snapshot, copy it with scp, and verify the local hash.
+     Load on CPU, verify finite tensors, and read architecture, generation,
+     step, and protocol from the checkpoint itself.
+  7. Run training/scripts/export_pt_to_json.py on that snapshot with --out
+     pointing to public/models/jester.json in the web worktree.
+     Do not use deploy_to_browser.py: it still targets the old preset slot.
+  8. Run the mobile scripts/export_sage_onnx.py despite its historical name,
+     using that exact jester.json and an explicit JESTER output path:
+
+       scripts/.venv/bin/python scripts/export_sage_onnx.py \
+         /absolute/path/to/web/public/models/jester.json \
+         --output assets/models/jester.onnx \
+         --training-generation CHECKPOINT_GENERATION \
+         --checkpoint-sha256 CHECKPOINT_SHA256
+
+     The local exporter already supports the last two provenance arguments.
+     Preserve its existing local changes when assembling a future release.
+     Never rely on the exporter's default output: that default is sage.onnx.
+  9. Update JESTER metadata and its pinned model-provenance test values.
+     Preserve SAGE's metadata, tensors, hash pins, and test assertions.
+ 10. Check actual frontend inference, JSON/ONNX numerical parity, architecture
+     compatibility, provenance hashes, build, and targeted existing tests.
+     Merge the verified scoped work into local main while retaining backups
+     and unrelated changes. A local source update is not a website deploy,
+     an Expo update, a TestFlight upload, or an App Store release.
+
+
+4. PHASE ONE: RULESET AND RESULT CONTRACTS
+
+4.1 Add a ruleset identifier (normal, uncheck-v1) to game state and all state
+    constructors, copies, serialized snapshots, history, and search requests.
+    Keep legacy inverted metadata distinguishable; do not silently reinterpret
+    saved inverted games as Uncheck games.
+    Keep bot model, model-trained goal, user-asked goal, and ruleset separate.
+    Preserve the setup mapping in section 1.
+
+4.2 Add an explicit terminal reason such as uncheck-win and an actual winner
+    color. Keep "king is attacked" separate from "game is over": an attacked
+    nonmoving king can represent a live rescue challenge.
+    Do not use checkmate as a disguised Uncheck result or invert the winner
+    only in a result-message component. Engine, server, and UI must agree.
+
+4.3 Introduce one shared semantic interface in each implementation:
+    attack detection; permitted move generation; capture classification;
+    applying a move; start-of-turn result; game-over status; repetition key.
+    Define shared language-neutral fixtures containing ruleset, position,
+    side to move, legal moves including promotion suffixes, and exact result.
+
+4.4 Handle history and networking deliberately.
+    Old ordinary saves may default to normal only when their saved setup
+    establishes that variant. Legacy inverted saves should offer a new
+    Uncheck game or remain explicitly legacy/read-only. Do not resume them
+    under changed rules. Version storage and network schemas and reject
+    incompatible peers rather than allowing divergent rule enforcement.
+    Include ruleset in caches and transposition/repetition identities.
+
+
+5. PHASE TWO: PYTHON RULES, RUST RULES, AND SEARCH
+
+5.1 training/src/chess_ai/engine.py
+    Add ruleset/result fields to ChessGameState and every serialization path.
+    Branch movement legality by ruleset. Keep the normal self-check filter.
+    For Uncheck: remove that filter, exclude captures of either king, apply
+    compulsory captures globally, and implement section 2 castling semantics.
+    The existing pseudo-legal generator still contains normal castling attack
+    restrictions; merely bypassing the final self-check filter is insufficient.
+    Evaluate the next side's attacked king before standard status/draw logic.
+    Handle terminal imported states before expansion or move selection.
+
+5.2 training/rust_engine/src/lib.rs
+    Port the same behavior into pseudo_legal_moves, legal_moves_impl,
+    apply_move_full_core, and expand_children. Update all Python/Rust state
+    adapters and batch interfaces to carry the ruleset and actual result.
+    The optimized expansion path must agree with get_moves + apply_move.
+    Expose a ruleset/engine-protocol capability marker; refuse an old binary
+    when Uncheck is requested. Rebuild the extension before GPU training.
+
+5.3 Search-value convention: preserve existing model-based direction
+    Keep the public game result and internal reference value separate.
+    Let z_actual(s, player) be +1 when that player wins the selected game,
+    -1 when they lose, and 0 for a rule-defined draw.
+
+      normal reference target:       z_ref =  z_actual
+      uncheck-v1 reference target:   z_ref = -z_actual
+
+    This preserves the existing inverted-selection architecture for JESTER.
+    For Uncheck, the internal WDL channels mean reference-win/reference-draw/
+    reference-loss; reference-loss corresponds to ACTUAL Uncheck victory.
+    Do not call these ordinary-chess winning probabilities in Uncheck mode.
+
+    Concrete invariant: at an Uncheck terminal node, the player to move is
+    the actual winner, so their reference terminal value is -1. A JESTER
+    inverted search favors that outcome for itself, just as the current
+    search favors self-mate under the legacy reference convention.
+
+    A White Uncheck win labels White positions -1 and Black positions +1
+    in reference-value training; the dashboard must still report White WIN.
+    A Black Uncheck win reverses these labels. Rule-defined draws use 0.
+    Keep sign alternation during backup and the current model-based PUCT
+    selection directions. Do not also negate the evaluator, swap WDL outputs,
+    or turn off JESTER inversion: each would introduce a double inversion.
+
+    Frozen SAGE and old JESTER nonterminal estimates will be imperfect under
+    the new game. That limitation is accepted for this weights-preserving
+    migration. Only terminal/search rule handling and future training targets
+    adopt the new reference semantics. Do not edit the saved neural tensors.
+
+5.4 training/src/chess_ai/mcts.py and training/rust_engine/src/mcts.rs
+    Update every terminal check, root fast path, leaf expansion, batched
+    search, draw shortcut, repetition path, and worker adapter for Uncheck.
+    Check Uncheck victory before material, repetition, or cap shortcuts.
+    Disable ordinary insufficient-material checks in Uncheck searches.
+    Preserve all promotion branches even though their 4096-policy slot is
+    shared. Aggregate visits only at the neural target boundary, not in
+    child-state identity. Keep the current architecture and action size.
+    Retain current search-only terminal-distance preferences consistently;
+    do not decay training outcome labels or turn distant wins into draws.
+
+5.5 training/src/chess_ai/encoding.py and weight_io.py
+    Keep the existing 20 input planes, board orientation, 4096 outputs, tensor
+    order, float format, and conversion behavior for both networks.
+    Uncheck's turn-boundary win is derivable from board plus side to move;
+    no extra countdown input plane is required for this rules definition.
+    Keep repetition history in the engine/search as already needed.
+    Record ruleset/value convention in metadata rather than changing shapes.
+
+
+6. PHASE THREE: SELF-PLAY, CURRICULUM, AND EVALUATION
+
+6.1 training/src/chess_ai/selfplay.py and mpselfplay.py
+    Propagate ruleset into every game, worker, reset, evaluator, and snapshot.
+    Check start-of-turn victory before requesting inference or choosing a move.
+    Label actual winners separately from the section 5 reference targets.
+    Replace own_mate/delivered_mate assumptions with explicit Uncheck outcomes.
+    Route both colors through the same Uncheck engine, including frozen bots.
+    Generate random openings by Uncheck-permitted moves and stop on victory.
+    An ordinary-chess validity check may reject legitimate Uncheck states;
+    use a variant-specific validator for curriculum and arbitrary positions.
+
+6.2 training/src/chess_ai/inverted.py, selfmate_positions.json,
+    scripts/build_selfmate_curriculum.py, and eval_positions.py
+    Introduce an Uncheck curriculum/proof generator instead of reusing old
+    self-mate answers. Existing python-chess Board.legal_moves and normal
+    board validity are not an oracle for the new variant.
+    Preserve the old fixtures for regression testing and archived experiments.
+    Build proofs for withdrawing attackers, blocking rays, double attacks,
+    compulsory captures elsewhere, king captures, discovered attacks,
+    en passant, castling, promotion choice, and immediate-opponent-win errors.
+    Keep held-out positions and color/geometry relatives out of training.
+    Derive bridge positions from genuine Uncheck games or verified Uncheck
+    proofs, and record provenance so training/evaluation cannot leak.
+
+6.3 training/src/chess_ai/replay.py and train.py
+    Start fresh Uncheck replay buckets, optimizer, counters, curriculum state,
+    evaluation caches, and learning-rate schedule. Copy ALL model state tensors
+    from the selected JESTER checkpoint, including BatchNorm statistics.
+    Do not reset the trunk, policy head, value head, or normalization layers.
+    Old trajectories cannot be relabeled into valid Uncheck games: their
+    actions, terminal timing, and MCTS targets came from different rules.
+    Enforce ruleset/protocol metadata when adding, saving, or loading replay.
+    Keep move-cap outcomes unknown and masked for value training. Do not let
+    capped trajectories dominate policy samples. Report caps separately.
+    Do not initially add rewards for exposure, captures, material loss, or
+    attack counts. Use actual final outcomes converted once into z_ref.
+
+6.4 training/config.py and scripts/_jester_launcher.py
+    Leave build_config() and normal SAGE training behavior unchanged.
+    Add a separate Uncheck config with ruleset=uncheck-v1, a new JESTER
+    protocol number (3), and value convention uncheck-reference-v1.
+    Add --ruleset to both JESTER launchers; the commands in section 10 depend
+    on this FUTURE interface. The current launcher does not support it yet.
+    Make --init-from accept protocol-2 weights while resetting training state.
+    Make --resume reject checkpoints with different ruleset, protocol, or
+    value convention. Resume may restore optimizer/counters only within v1.
+    Keep normal Syzygy adjudication disabled for Uncheck, including globals.
+    Disable ordinary material auxiliaries and automated resignation initially.
+
+    Initial operational settings, to be validated in a short GPU run:
+      same 12-block, 160-filter architecture and current batch size 256;
+      up to 3 CPU workers x 32 games on the current 4-core GPU host;
+      256 self-play simulations, 128 evaluation simulations;
+      fresh learning rate 3e-4 with the existing gentle JESTER schedule;
+      25% verified Uncheck curriculum, 75% competitive starts;
+      competitive starts include standard start and valid Uncheck openings;
+      75% current-network opponents, 25% frozen JESTER history;
+      helper-opponent starts 0 initially, old bridge pool disabled;
+      no old self-mate curriculum floor or cached tactical scores;
+      initial 200-ply training cap, explicitly logged as truncation.
+    These are starting settings, not claims of optimal training or balance.
+    Introduce bridges from new successful games only after their validation.
+    Keep frozen initial JESTER as a reference opponent using new rules.
+
+6.5 training/src/chess_ai/jester_eval.py and dashboard.py
+    Evaluate current-vs-frozen JESTER under the same Uncheck rules, compute
+    score from ACTUAL winners, alternate colors, and use fixed comparable
+    search budgets. Keep helper results and tactics separate from the gate.
+    Include a substantial standard-start/held-out-opening match group.
+    Report actual wins/draws/losses, caps, average length, color advantage,
+    immediate-check blunders, rescue success, forced-check conversion, and
+    results split by starting-position type. Avoid counting one mirrored
+    puzzle family as many independent proofs of strength.
+    A cap-heavy 0.5 score is inconclusive. Do not promote solely because easy
+    puzzles improve. Preserve confidence-aware competitive promotion.
+    Rewrite dashboard instructions: own king attacked at turn start = win;
+    attacking opponent at their turn start = loss. No old mate-rate labels.
+
+
+7. PHASE FOUR: VUE WEB FRONTEND
+
+7.1 src/types/chess.ts, src/types/network.ts
+    Add ruleset, explicit actual winner, and Uncheck terminal reason; version
+    network state. Ensure copies, undo, replay, and snapshots preserve them.
+
+7.2 src/game/chess/ChessEngine.ts
+    Implement section 2 with the same fixture expectations as Python/Rust.
+    Preserve the normal branch, including legal moves, castling, and draws.
+    Legal-square highlights must use the globally capture-filtered move list.
+
+7.3 src/game/server/ChessServer.ts and game connections/networking
+    Construct the authoritative server with the selected ruleset. Validate
+    received moves with that ruleset, including compulsory capture.
+    Apply Uncheck results before server-level material/repetition shortcuts.
+    Emit the ACTUAL winner to every listener. Handle terminal states before
+    accepting commands and stop queued AI turns after the game ends.
+    Include ruleset in invites/snapshots so remote peers cannot assume normal.
+
+7.4 src/game/ai/MCTS.ts and AIPlayer.ts
+    Apply section 5 terminal/reference semantics in each search state.
+    Preserve SAGE/JESTER model direction, LOW/MEDIUM/HIGH effort, raw policy
+    output, visit ranking, opposite-goal reversal, and deterministic ties.
+    Preserve existing bot repeat-filter behavior; separate it from legality.
+    Select only among Uncheck-permitted moves when that game is selected.
+    Never rewrite SAGE or JESTER weights to make a ranking appear sensible.
+
+7.5 src/game/ai/models.ts; components/LobbyModal.vue, GameView.vue,
+    ChessBoard.vue; applicable rules/help/mind/result text
+    Rename the INVERTED option to UNCHECK CHESS and preserve the setup matrix.
+    Replace checkmate-based rule copy, goals, and winner inversion in the UI.
+    Display actual game winners supplied by the engine/server.
+    Explain: begin your turn in check to win; captures are compulsory.
+    During a rescue turn show which enemy king must be un-checked, its current
+    attackers, and capture-required status. Do not label exposure as illegal.
+    Keep the diagnostics list consistent with the move actually selected.
+    Describe frozen JESTER as legacy inverted-trained until Uncheck-trained
+    weights are explicitly adopted later. Do not claim it already learned v1.
+    Retain SAGE's trained-to-win and JESTER's trained-to-lose model identities.
+
+
+8. PHASE FIVE: EXPO MOBILE FRONTEND
+
+8.1 src/core/chess/types.ts and ChessEngine.ts
+    Port the same ruleset/result contract and rules. Update apply-and-adjudicate
+    wrappers as well as raw applyMove; mobile has additional draw handling.
+    Keep normal chess unchanged and run the same cross-language fixtures.
+
+8.2 src/core/config.ts and storage/AppStorage.ts
+    Persist ruleset/version with game state and setup. Migrate ordinary saves
+    carefully; do not resume legacy inverted games with new move legality.
+    Restore should adjudicate a terminal Uncheck state before scheduling AI.
+
+8.3 src/core/bot/MCTS.ts, SageBot.ts, MoveRanker.ts, BotModel.ts,
+    SageSelection.ts, and applicable diagnostics
+    Preserve the entire section 1 selection matrix. The historical SageBot
+    filename serves both networks; do not assume it only affects SAGE.
+    Keep model weight loading, ONNX tensor format, and encoding unchanged.
+    Update rule-aware search/terminal handling and legal candidates only.
+    Keep promotion candidates distinct during search and selection.
+    Keep the displayed effective ranking and played move consistent.
+
+8.4 src/screens/SetupScreen.tsx and GameScreen.tsx;
+    components/InfoOverlay.tsx, ChessBoard.tsx, GameResult.tsx,
+    SageMindPanel.tsx; core/chess/resultCopy.ts
+    Replace old inverted rule text, setup labels, check-state assumptions,
+    terminal predicates, and UI-only winner swapping with Uncheck behavior.
+    Show compulsory captures and the rescue-turn explanation clearly.
+    Verify touch highlights, promotions, history, resume, thinking cancellation,
+    and terminal presentation on a physical iPhone.
+
+8.5 Store/website copy and delivery
+    Update website rules and store descriptions/review notes/screenshots when
+    preparing the actual rules release. Preserve separate unrelated edits.
+    Bundle the phase-zero SAGE/JESTER assets unchanged for this rules release.
+    Use a new native build/version and the established TestFlight/App Store
+    workflow when publishing is authorized. A Git merge, file copy, Expo dev
+    server, or GPU restart does not update an installed App Store binary.
+
+
+9. PHASE SIX: REQUIRED VERIFICATION BEFORE RESTART OR RELEASE
+
+9.1 Rule fixtures across Python fallback, Rust engine, Rust MCTS, web, mobile:
+    initial legal moves; own-king exposure; newly exposed own king not an
+    immediate win; opponent checked -> opponent immediately wins; both kings
+    attacked -> next player wins; one/two/discovered attacks; complete rescue;
+    forced capture defeating a quiet rescue; multiple capture choices;
+    king captures of non-kings; forbidden king captures; king adjacency;
+    pinned-piece attacks; en passant forced captures and discovered rays;
+    all promotion choices; castling through attacks and capture priority;
+    no-move draw; repetition including effective en passant; 100-halfmove
+    draw; victory precedence; no ordinary material draw; terminal roots.
+    Include the exact section 2.10 example and its color-swapped counterpart.
+
+9.2 Preserve existing product behavior with all four setup combinations:
+    compare fixed positions' effective rankings and selected eligible moves;
+    test highest-first versus lowest-first at every effort level; test ties,
+    promotions, and current repeat-filter exceptions. For NORMAL positions,
+    require the same behavior as before the migration with the SAME weights.
+    For Uncheck positions, require the new legal list and the SAME selection
+    procedure. New rules naturally change inputs, search trees, and rankings.
+
+9.3 Training sign/target tests:
+    actual White/Black winners; corresponding opposite reference labels;
+    terminal +/-1 propagation at successive depths; resistant-opponent forced
+    wins; frozen-player evaluation; no double inversion; cap masks; disabled
+    tablebase/material shortcuts; ruleset-safe resume; fresh optimizer/replay
+    on cross-rules initialization; exact copied weights before the first step.
+
+9.4 Existing checks to retain and extend:
+    Web: npm run build; npm run test-inverted; npm run test-mcts-sign;
+         npm run test-repetition; update legacy names without dropping coverage.
+    Mobile: npm run typecheck; npm test; physical-device gameplay.
+    Training: existing engine/parity, JESTER search/selfplay/eval/hybrid,
+              MCTS signs, repetition, draw, worker, and outcome tests.
+    Add an Uncheck suite in training/tests/test_uncheck*.py and equivalent
+    frontend fixtures. Rebuild Rust and explicitly run both implementations.
+    Use meaningful behavioral expectations; never regenerate expected winners
+    from the same engine being tested and call that an independent oracle.
+
+9.5 Verify frontend asset invariants:
+    SAGE hashes exactly match the phase-zero baseline.
+    JESTER hashes exactly match the phase-zero import receipt.
+    No network-layer architecture/head replacement or retraining during the
+    frontend rule migration. JSON/ONNX effective-parameter parity still passes.
+    Test offline model load and a playable move, not only build success.
+
+
+10. PHASE SEVEN: FUTURE GPU CUTOVER AND CONTINUATION RUNBOOK
+
+DO NOT EXECUTE THIS SECTION DURING DOCUMENT PREPARATION.
+The --ruleset interface and Uncheck tests below are planned implementation
+requirements, not capabilities of the currently running code.
+
+10.1 Finish and validate the implementation first
+    Implement in isolated worktrees; merge scoped tested changes into main.
+    Preserve dirty user work. Push the reviewed web/training commit and mobile
+    commit when the implementation/release task authorizes that action.
+    Record the exact training commit. Do not update source beneath live
+    workers before stopping the old run or arranging a separate checkout.
+
+10.2 Connect and inspect (these access commands exist today)
+    From the Mac:
+
+      ssh -o BatchMode=yes -o ConnectTimeout=8 gpus
+
+    Fallback: ssh gpus-ts. Use gpus-lan only when local-network access works.
+    The gpus shell function is interactive route fallback; scripts should
+    invoke the SSH host alias explicitly.
+
+    On gpus:
+
+      cd /home/gpus/ai-chess/training
+      tmux list-sessions
+      tmux list-panes -t jester -F '#{pane_id} #{pane_current_command} #{pane_current_path}'
+      tail -n 2 runs_jester/hybrid/stats.csv
+      ls -lh runs_jester/hybrid/latest.pt
+
+10.3 Stop gracefully and preserve the FINAL legacy checkpoint
+    Record the training process/worker IDs and tmux pane from inspection.
+    Send a single Ctrl-C to that training pane (currently jester:0.0):
+
+      tmux send-keys -t jester:0.0 C-c
+
+    Wait for the launcher's final-save path and workers to finish; inspect
+    process IDs and the checkpoint modification time. Do not kill the tmux
+    server or use kill -9 merely to make the restart quick. If the pane closes,
+    inspect the files/processes instead of assuming the save failed.
+    Load final latest.pt on CPU and verify finite model tensors and counters.
+
+    Then, in a shell on gpus:
+
+      cutover_tag=$(date -u +%Y%m%dT%H%M%SZ)
+      legacy_dir=/home/gpus/ai-chess/training/runs_jester/hybrid
+      archive_dir="$legacy_dir/exports/uncheck-cutover-$cutover_tag"
+      mkdir -p "$archive_dir"
+      cp -p "$legacy_dir/latest.pt" "$archive_dir/jester-source.pt"
+      cp -p "$legacy_dir/stats.csv" "$archive_dir/stats.csv"
+      cp -p "$legacy_dir/eval.csv" "$archive_dir/eval.csv"
+      sha256sum "$archive_dir/jester-source.pt"
+
+    Preserve hybrid's complete directory, champion, opponent pool, and
+    initialization evidence in place. Do not overwrite or rename it to Uncheck.
+    This final training seed may be newer than the phase-zero frontend weights.
+    That is intentional: frontend weights remain frozen for the rules release.
+
+10.4 Obtain the tested source without discarding remote local files
+    Fetch the reviewed commit into the original repository, then create an
+    isolated remote checkout at that exact commit. Replace the placeholder
+    below with the recorded, verified SHA before running:
+
+      git -C /home/gpus/ai-chess status --short
+      git -C /home/gpus/ai-chess fetch origin
+      verified_commit=REPLACE_WITH_TESTED_TRAINING_COMMIT_SHA
+      train_checkout="/home/gpus/ai-chess-uncheck-$cutover_tag"
+      git -C /home/gpus/ai-chess worktree add --detach "$train_checkout" "$verified_commit"
+
+    Keep remote untracked files such as training/delta.py. Do not use a hard
+    reset or broad clean to obtain a clean launch environment.
+
+10.5 Use an isolated environment and rebuild Rust
+    Preserve the old environment for rollback. Use the current known-working
+    CUDA PyTorch wheel source/version for the replacement environment. Do not
+    accidentally install a CPU-only PyTorch build or change the CUDA stack.
+    Verified on this host during planning: PyTorch 2.11.0+cu130, CUDA runtime
+    13.0, and torch.cuda.is_available() == True. Capture the old dependency
+    inventory, create a separate environment, and install the matching CUDA
+    build before installing the local project:
+
+      /home/gpus/ai-chess/training/.venv/bin/python -m pip freeze > "$archive_dir/legacy-requirements.txt"
+      cd "$train_checkout/training"
+      python3 -m venv .venv
+      . .venv/bin/activate
+      python -m pip install --upgrade pip
+      python -m pip install 'torch==2.11.0+cu130' --index-url https://download.pytorch.org/whl/cu130
+      python -m pip install -e '.[dev]'
+      python -m pip install 'maturin>=1.4,<2'
+
+    Confirm that this pinned wheel is obtainable for the host Python version
+    at cutover. If not, obtain the same trusted CUDA wheel through the host's
+    original installation source; do not silently substitute CPU PyTorch or
+    change the live environment. Use the captured inventory to resolve other
+    dependency drift. Do not copy a venv directory or inherit an old editable
+    chess engine through system-site-packages. Build the new Rust extension:
+
+      cd rust_engine
+      maturin develop --release
+      cd ..
+      python -c 'import torch, chess_ai_rust; print(torch.__version__, torch.cuda.is_available(), chess_ai_rust.__file__)'
+
+    Confirm CUDA is available, the extension is from this checkout/environment,
+    and its new capability marker explicitly supports uncheck-v1. An import
+    alone is insufficient; the old engine imports successfully too.
+
+10.6 Run a short isolated proof of training
+    Run the Uncheck and existing SAGE/normal regression suites, Python and Rust.
+    Keep BLAS/PyTorch CPU thread counts at one per worker to avoid oversubscription.
+    From the new training directory, with the new environment active:
+
+      python -m pytest tests -q
+      smoke_dir="/home/gpus/ai-chess/training/runs_jester/uncheck-smoke-$cutover_tag"
+      python scripts/train_jester_new.py \
+        --ruleset uncheck-v1 \
+        --init-from "$archive_dir/jester-source.pt" \
+        --checkpoint-dir "$smoke_dir" \
+        --workers 3 --sims 128 --steps 20000 --no-dashboard
+
+    --steps counts main-loop iterations, not optimizer updates. Inspect the
+    result; if no useful updates occurred, continue this same-protocol smoke
+    run until at least several optimizer steps complete. Do not declare
+    success from a loop count, tmux liveness, or GPU utilization.
+    Record source hash, exact initial-weight equality, new ruleset/protocol,
+    legal moves, actual game results, finite losses, optimizer step growth,
+    finite changed parameters after training, and fresh replay provenance.
+    Verify no old curriculum, ordinary tablebase labels, or helper gate leaked.
+
+10.7 Launch the production Uncheck run from the FINAL legacy weights
+    Use a new output directory. Start from the untouched final legacy snapshot,
+    not the smoke-run's modified weights, so the provenance is clear.
+    The operator should record these resolved absolute paths in a run receipt.
+
+      run_dir="/home/gpus/ai-chess/training/runs_jester/uncheck-v1-$cutover_tag"
+
+    Start a new tmux session named uncheck in the new training directory.
+    Use the new environment's absolute Python path in the tmux command:
+
+      tmux new-session -d -s uncheck -c "$train_checkout/training" \
+        "$train_checkout/training/.venv/bin/python scripts/train_jester_new.py --ruleset uncheck-v1 --init-from $archive_dir/jester-source.pt --checkpoint-dir $run_dir --workers 3 --sims 256"
+
+    This command assumes the isolated environment was created at
+    $train_checkout/training/.venv; substitute its verified path if different.
+    It also assumes no existing uncheck session. Inspect and choose a unique
+    session name if one exists; do not terminate a session by name blindly.
+    Attach with tmux attach -t uncheck. Check startup protocol, directories,
+    loss/counter updates, successful saves, and real Uncheck game outcomes.
+
+10.8 Later resumes of THIS Uncheck run
+    After a graceful stop, resume using the same rules, protocol, and run dir:
+
+      python scripts/train_jester_continue.py \
+        --ruleset uncheck-v1 \
+        --resume "$run_dir/latest.pt" \
+        --checkpoint-dir "$run_dir" \
+        --workers 3 --sims 256
+
+    Use --resume only after a valid Uncheck checkpoint exists. The initial
+    migration must use --init-from to carry weights while resetting learning
+    state. Do not use the launcher's old default directory implicitly.
+    Re-record ruleset/value convention and checkpoint identity after every
+    deployment. Never auto-export a new training checkpoint into the apps.
+
+10.9 Rollback
+    Stop the Uncheck run gracefully. Preserve its evidence separately.
+    Resume the untouched hybrid directory using its matching old checkout and
+    old environment. Do not attempt to resume it with the new protocol.
+    Restore frontend assets from phase-zero backups only if explicitly rolling
+    back the weight import; restoring gameplay uses the appropriate code/build.
+    Installed App Store releases require their own release rollback/update path.
+
+
+11. COMPLETION CHECKLIST FOR THE FUTURE MIGRATION
+
+  [ ] Exact rules implemented identically in all four engine/search paths.
+  [ ] Normal chess and the four model/asked-goal selections preserved.
+  [ ] SAGE bytes unchanged; phase-zero JESTER bytes unchanged during migration.
+  [ ] Capture-required moves, king exposure, and true winners work in both UIs.
+  [ ] Legacy saves, network peers, and model metadata cannot mix rulesets.
+  [ ] Cross-language fixtures, sign tests, frontend checks, and device play pass.
+  [ ] Old GPU run and final checkpoint preserved; new run uses all current
+        JESTER weights with fresh training state and the new rule protocol.
+  [ ] New optimizer steps and changed finite weights verified, with correct
+        Uncheck game results and no ordinary-chess adjudication leakage.
+  [ ] Future website/mobile publication independently verified when performed.
+
+
+12. PHASE-ZERO IMPORT RECEIPT
+
+Completed in this planning round: refreshed JESTER assets in the local web
+and mobile source trees; wrote this plan. No gameplay rules or training code
+were changed. The old GPU training continues; no app/site was published.
+
+Snapshot retrieved on 2026-09-09:
+  Host: gpus (configured Tailscale SSH alias)
+  Active legacy run: runs_jester/hybrid (protocol 2)
+  Saved generation: 6543
+  Saved main-loop step: 2894900
+  Source checkpoint SHA-256:
+    63084d4487028cdac2cf99116e6bf8b7f38333bdaedcc9c8145f727c36c4d6ed
+  Immutable remote snapshot:
+    /home/gpus/ai-chess/training/runs_jester/hybrid/exports/20260909T210353Z/jester-source.pt
+  Local source checkpoint:
+    /Users/ericniemeyer/code/ai-chess/tmp/uncheck-plan-20260909T210353Z/jester-source.pt
+  Web JSON SHA-256:
+    3b25e2969212cf7919f05dc148bb03712bdd9a2fdf0f3af89b60115a57dad462
+  Mobile ONNX SHA-256:
+    bee718ad7e9f1b68e831d26193e0d102a9beeae0fe6c7f306baacaac760df0f1
+
+The old app JESTER reported generation 7416 from a different run. Generation
+counters restart between experiments; 6543 from the current hybrid run is a
+newer snapshot, not a rollback to an earlier point within that old run.
+
+Updated source assets:
+  /Users/ericniemeyer/code/ai-chess/public/models/jester.json
+  /Users/ericniemeyer/code/ai-chess/public/models/jester.metadata.json
+  /Users/ericniemeyer/code/worst-chess-move/assets/models/jester.onnx
+  /Users/ericniemeyer/code/worst-chess-move/assets/models/jester.metadata.json
+  /Users/ericniemeyer/code/worst-chess-move/tests/model-provenance.test.ts
+
+Preserved SAGE hashes:
+  Web sage.json:
+    197341b98dad4653dc704e04d893a517346b13cf9172a20d6a383410fccce138
+  Mobile sage.onnx:
+    f7aaae74d8dd8f30fdc1a643e2030ca74f174c5301d18dffc831c6f40a964116
+  Mobile sage.metadata.json:
+    c35d2c7c1e322f07fcac4791ffc7d116eda9ee6d006aed08fe1ca783d86f6787
+
+Validation completed using Node 22.22.0 where applicable:
+  - Source checkpoint hash matched across SSH/scp; all model tensors finite.
+  - Model architecture unchanged: 12 residual blocks, 160 filters, 20 inputs,
+    4096 policy outputs, and 3 WDL outputs.
+  - ONNX structural checker, self-contained tensors, and dynamic batch passed.
+  - Four real positions: quantized PyTorch vs browser TensorFlow.js passed.
+      Maximum policy absolute difference: 4.172325134e-07
+      Maximum WDL absolute difference:    2.086162567e-07
+  - The same positions: quantized PyTorch vs mobile ONNX Runtime passed.
+      Maximum policy absolute difference: 2.980232239e-07
+      Maximum WDL absolute difference:    5.960464478e-08
+    Comparison tolerance for these checks: 5e-5.
+    The reference uses the exported fp16 weights; export quantization from the
+    original fp32 checkpoint is intentional and is not claimed to be lossless.
+  - Web production build passed; its bundled JESTER hash matched the source.
+  - Mobile TypeScript check passed.
+  - Mobile provenance, bot-model, and decision-list suites: 12 tests passed.
+  - SAGE asset hashes and SAGE provenance assertions remained unchanged.
+
+This validates source assets and numerical desktop inference. A new physical-
+iPhone installation, website deployment, TestFlight upload, and App Store
+release were not performed or verified during this planning round.
+
+Backups, original dirty-state records, and verification receipts:
+  /Users/ericniemeyer/code/ai-chess/tmp/uncheck-plan-20260909T210353Z
+These local backups are intentionally outside the tracked release assets.
+The model import and document were prepared in separate Git worktrees and
+merged into local main. Other existing local edits are retained. No remote
+Git push was requested or performed in this round.

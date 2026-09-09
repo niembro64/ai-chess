@@ -1,0 +1,13 @@
+{
+  "sourceHost": "gpus",
+  "sourceCheckpoint": "training/runs_jester/hybrid/latest.pt",
+  "sourceSnapshot": "/home/gpus/ai-chess/training/runs_jester/hybrid/exports/20260909T210353Z/jester-source.pt",
+  "checkpointKind": "latest",
+  "trainingGeneration": 6543,
+  "trainingStep": 2894900,
+  "retrievedOn": "2026-09-09",
+  "checkpointSha256": "63084d4487028cdac2cf99116e6bf8b7f38333bdaedcc9c8145f727c36c4d6ed",
+  "browserWeightsSha256": "3b25e2969212cf7919f05dc148bb03712bdd9a2fdf0f3af89b60115a57dad462",
+  "trainingRuleset": "inverted-selfmate",
+  "jesterProtocol": 2
+}
