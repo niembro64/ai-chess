@@ -1,5 +1,11 @@
 """Rules-contract tests for Uncheck Chess v1."""
 
+import random
+
+import numpy as np
+import torch
+
+from chess_ai.encoding import POLICY_SIZE
 from chess_ai.engine import (
     CastlingRights,
     ChessGameState,
@@ -8,12 +14,13 @@ from chess_ai.engine import (
     Position,
     apply_move,
     get_legal_moves,
+    position_key,
 )
+from chess_ai.jester_eval import Match, build_uncheck_eval_positions, terminal_result
+from chess_ai.model import ChessNet
 from chess_ai.selfplay import GameSlot, GameSlotExample, SelfPlayConfig, SelfPlayEngine
-from chess_ai.encoding import POLICY_SIZE
-from chess_ai.uncheck import validate_curriculum
-import numpy as np
-import random
+from chess_ai.train import TrainConfig, Trainer
+from chess_ai.uncheck import curriculum_positions, validate_curriculum
 
 
 def _move(fr: str, to: str) -> Move:
@@ -66,6 +73,19 @@ def test_normal_chess_contract_remains_default():
 
 def test_verified_curriculum_is_separate_and_sound():
     validate_curriculum()
+    train = curriculum_positions("train")
+    heldout = curriculum_positions("eval")
+    assert len(train) >= 5 and len(heldout) >= 4
+    assert {position.fen for position in train}.isdisjoint(position.fen for position in heldout)
+
+
+def test_heldout_openings_are_reachable_active_uncheck_positions():
+    positions = build_uncheck_eval_positions()
+    assert positions[0].difficulty == "standard"
+    assert len(positions) >= 9
+    assert len({position_key(position.state) for position in positions}) == len(positions)
+    assert all(position.state.ruleset == "uncheck-v1" and position.state.status == "active"
+               for position in positions)
 
 
 def test_uncheck_actual_winner_uses_opposite_reference_labels():
@@ -89,8 +109,43 @@ def test_uncheck_actual_winner_uses_opposite_reference_labels():
     assert [example.value for example in captured] == [-1.0, 1.0]
 
 
+def test_competitive_terminal_result_uses_actual_uncheck_winner():
+    state = apply_move(_canonical(), _move("d3", "e4"))
+    state = apply_move(state, _move("a8", "a2"))
+    assert terminal_result(Match(state, "white", None, "pair", "standard"), 200) == "win"
+    assert terminal_result(Match(state, "black", None, "pair", "standard"), 200) == "loss"
+
+
+def test_uncheck_gate_keeps_caps_separate_and_inconclusive(tmp_path):
+    model = ChessNet(num_res_blocks=1, num_filters=16, value_head_size=8, se_reduction=4)
+    config = TrainConfig(
+        jester_mode=True,
+        ruleset="uncheck-v1",
+        value_convention="uncheck-reference-v1",
+        jester_protocol=3,
+        jester_gate="head_to_head",
+        num_workers=0,
+        use_amp=False,
+        eval_mcts_sims=2,
+        eval_move_cap=0,
+        jester_eval_standard_positions=0,
+        jester_eval_batch_size=8,
+    )
+    trainer = Trainer(model, torch.device("cpu"), config, random.Random(9))
+    trainer._save_champion(tmp_path, 0)
+    result = trainer._run_eval_match(tmp_path)
+    assert result["gate"] == "competitive-uncheck-v1"
+    assert result["caps"] == result["games"]
+    assert result["draws"] == 0
+    assert result["score_lower_bound"] < 0.5
+    assert not result["new_champion"]
+    assert (tmp_path / "eval.csv").exists()
+    assert (tmp_path / "eval_games.jsonl").exists()
+
+
 def test_python_and_protocol3_rust_agree_on_uncheck_fixture():
     import pytest
+
     import chess_ai.engine as engine
     if not engine._HAVE_RUST or getattr(engine._rust, "ENGINE_PROTOCOL", 0) < 3:
         pytest.skip("protocol-3 Rust extension unavailable")

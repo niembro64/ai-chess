@@ -1,41 +1,46 @@
-JESTER plays competitive inverted chess: the player whose own king is checkmated wins. Legal chess moves, stalemate, repetition, and insufficient-material rules still apply. Both sides try to force their own mate; neither is assumed to cooperate.
+# JESTER Uncheck Chess training
 
-The policy/value architecture and exported weight formats stay compatible with SAGE and existing JESTER checkpoints. Values retain the ordinary-outcome sign convention (the mated side gets -1); search selection is inverted at both colors. Do not also reverse value targets. They describe outcomes under inverted play, not optimal ordinary chess.
+JESTER protocol 3 trains `uncheck-v1`. A player wins when their turn begins with their own king attacked. Kings may enter attack and are never captured. If any capture exists, the player must capture. Castling ignores attacked-square restrictions but is suppressed whenever a capture exists. Third repetition, 100 halfmoves, and no permitted moves draw; ordinary insufficient material does not.
 
-`build_jester_config()` now uses 256 simulations, Rust trees, multiple workers, and a central GPU inference server. Half of new games initially start from independently verified short selfmates; the remainder use standard or legal random-walk starts. The curriculum contains 36 base positions with one-, two-, and three-move proofs, split before color augmentation into training and held-out sets. Its first motif family uses discovered rook mates; it is a bootstrap curriculum, not a comprehensive measure of inverted-chess strength. The solver checks all legal opponent replies and never labels budget exhaustion as a proof.
+The network architecture, 20 input planes, 4096 policy actions, WDL head, and serialized tensor order remain unchanged. A protocol-2 JESTER checkpoint may initialize protocol 3 with `--init-from`. This copies all parameters and BatchNorm buffers exactly while resetting the optimizer, replay, generation, curriculum, evaluation, and learning-rate state. `initialization.json` records both tensor digests and requires exact equality. Never use `--resume` across the protocol boundary.
 
-Current-network self-play receives 75% of games; 25% play frozen historical JESTERs when a pool is available. Both participants seek their own mate. Only learner plies from historical-opponent games enter replay. Cooperative mate acceptance, random-move overrides and SAGE opponents are disabled. Ordinary Syzygy is disabled in the launcher and explicitly bypassed in JESTER adjudication. Real draws receive full value weight; move-cap outcomes remain masked for value loss. Resignation and value-label distance decay stay disabled.
+Values use the explicit reference convention `uncheck-reference-v1`:
 
-Promotion uses batched matches against the champion and distinct frozen opponents, paired colors, curated positions, and fresh openings from explicit seeds. No root noise or artificial mate acceptance is used. Caps are recorded separately from legal draws. The reported score gives caps half a point, but the approximate 95% promotion interval treats them pessimistically. Promotion requires score >= 0.55, lower bound > 0.5, and at least 50% held-out tactical accuracy. The curriculum share decreases only when all three held-out depths reach 80%, down to a 10% floor. Draw-heavy evaluations do not automatically stop training.
+```text
+z_actual(player) = +1 actual Uncheck win, -1 actual loss, 0 rule-defined draw
+z_ref(player)    = -z_actual(player)
+```
 
-The dashboard and stats.csv report own-mate wins, delivered-mate losses, draws, and caps by opponent/start distribution. eval.csv includes uncertainty, caps, and tactical scores; eval_games.jsonl keeps individual match outcomes. The optional fumbler diagnostic is separate from competitive promotion. Its cache uses full position identity, seat, stable seed and search settings instead of reusable display names and Python hash().
+JESTER's existing both-color search inversion remains enabled. The target is negated exactly once; the evaluator, WDL channels, and search must not receive another sign swap. Dashboards and evaluations always report actual winners, even though replay stores reference values.
 
-To start a separate experiment from old weights on the training host:
+The initial production profile uses the existing 12-block, 160-filter model, three workers with 32 concurrent games each, 256 self-play simulations, batch size 256, learning rate `3e-4`, and a 200-ply truncation cap. Twenty-five percent of starts come from verified Uncheck proofs. Seventy-five percent are competitive standard or Uncheck-reachable openings. Competitive games use the current network 75% of the time and frozen JESTER history 25% of the time. Caps remain unknown and are masked for value training.
+
+The curriculum uses variant-native move generation and bounded adversarial proofs. Training and held-out sets have distinct material signatures, so no board reflection or color reversal can cross the split. The catalog covers knight, rook, bishop, pawn and double attacks, discovered exposure, en passant, castling, compulsory remote captures, and all four capture promotions. The older selfmate catalog stays available only for protocol-2 regression tests.
+
+Protocol 3 disables helper opponents, the old bridge pool, SAGE opponents, random mate acceptance, material auxiliary loss, automated resignation, and Syzygy labels. New bridge positions may be added only from validated Uncheck games.
+
+Competitive evaluation batches current JESTER against the current champion and distinct frozen historical JESTERs under `uncheck-v1`. Every fixed standard or held-out opening is played with the candidate as each color. Held-out tactical recognition and full conversion remain diagnostics and do not add easy games to the promotion score. `eval.csv` and `eval_games.jsonl` retain actual W/D/L, unresolved caps, average plies, color split, start type, rescue attempts and successes, exposure conversions, and immediate opponent-win errors. Promotion requires score at least 55% and a paired conservative 95% lower bound above 50%; caps receive zero in that lower bound.
+
+Start from preserved protocol-2 weights in a new directory:
 
 ```sh
-cd /home/gpus/ai-chess/training
-.venv/bin/pip install -e '.[dev]'
-VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --release --manifest-path rust_engine/Cargo.toml
+cd /home/gpus/ai-chess-uncheck-<commit>/training
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CHESS_AI_NO_COMPILE=1 \
 .venv/bin/python scripts/train_jester_new.py \
-  --init-from runs_jester/latest/champion.pt \
-  --opponent runs_jester/latest/champion.pt \
-  --opponent runs_jester/latest/archive/gen-5480.pt \
-  --checkpoint-dir runs_jester/competitive
+  --ruleset uncheck-v1 \
+  --init-from /absolute/path/to/jester-source.pt \
+  --checkpoint-dir /absolute/path/to/runs_jester/uncheck-v1-<timestamp> \
+  --workers 3 --sims 256
 ```
 
-`--init-from` copies only model weights. Replay, optimizer, generation count and evaluation history start fresh; initialization.json records the source and hash. Opponents are copied into the new run's opponents/ directory, so the experiment does not depend on mutable external files. The old runs_jester/latest directory remains intact. Starting fresh into an occupied output directory is rejected.
-
-For later resumes use `scripts/train_jester_continue.py --checkpoint-dir runs_jester/competitive`. An old cooperative checkpoint must use `--init-from` in a new directory, not `--resume`. Workers start with the loaded weights, resume the curriculum setting, and are checked for crashes instead of leaving a silently starved trainer. Checkpoint replacement is atomic. `--workers`, `--sims`, `--steps`, and `--no-dashboard` support controlled smoke runs.
-
-Read-only diagnostics:
+Resume that same run only after it has a protocol-3 checkpoint:
 
 ```sh
-.venv/bin/python scripts/benchmark_jester.py runs_jester/competitive/champion.pt --device cuda
-.venv/bin/python scripts/benchmark_jester.py runs_jester/competitive/champion.pt --sims 256 --fumbler-games 10
-.venv/bin/python scripts/build_selfmate_curriculum.py
-.venv/bin/python -m pytest tests -q
+.venv/bin/python scripts/train_jester_continue.py \
+  --ruleset uncheck-v1 \
+  --resume /absolute/path/to/uncheck-run/latest.pt \
+  --checkpoint-dir /absolute/path/to/uncheck-run \
+  --workers 3 --sims 256
 ```
 
-On September 6, generation-7,416 exported weights solved 0/18 held-out starts at 96 simulations and 2/18 at both 256 and 400. Local MPS times were about 5, 7 and 10 seconds respectively. The generation-7,480 source champion solved 0/18 at 256 simulations on the RTX 3090 in 1.75 seconds. These small baselines motivate the curriculum and 256-simulation initial budget; they are not competitive strength ratings. Initial host telemetry also showed the inherited 12 ms inference batching wait leaving the GPU idle, so this profile uses 2 ms and 32 games per worker.
-
-Rust and Python searches now share dual-net routing, inversion, terminal-distance preferences, root FPU and repetition semantics. Both deployed search callers use both-color inversion for JESTER. All four promotion choices remain searchable without expanding the existing 4096-output policy head: they share prior mass and aggregate training visits. Search chooses among promotions; raw-policy-only inference still cannot learn separate promotion logits. Natural JESTER follows actual game repetition rules, allowing legal return moves that the teaching-mode own-army veto would otherwise forbid. The alternate-goal ranking UI and existing weight assets remain unchanged.
+A valid cutover preserves the complete protocol-2 run, archives its final checkpoint and checksums, uses a detached checkout of a tested commit and a separate CUDA environment, rebuilds the Rust extension with engine protocol 3, and runs the complete regression suite. A short training proof must show exact source tensor import, fresh replay and optimizer state, finite losses, changed finite parameters, and actual `uncheck_w` or `uncheck_b` outcomes before the persistent `uncheck` tmux session starts.

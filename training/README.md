@@ -2,76 +2,63 @@
 
 Python/PyTorch training pipeline for the `ai-chess` browser app.
 
-## JESTER inverted chess: protocol 2
+## JESTER Uncheck Chess: protocol 3
 
-The player whose **own king is checkmated wins**. Training labels retain
-ordinary-chess signs (the mated side receives -1); MCTS inverts selection for
-both colors. Each real mover uses its own network for its entire search tree,
-as in the apps. Syzygy labels and resignation remain disabled for JESTER.
+In `uncheck-v1`, a player wins when their turn begins with their own king
+attacked. Kings may enter attack and are never captured. Captures are globally
+compulsory; castling ignores attacked-square restrictions but remains a quiet
+move. Repetition, the 100-halfmove limit, and no permitted moves are draws.
+Ordinary insufficient-material adjudication is disabled.
 
-The September 7 repair addresses a run with no decisive results in 600
-ordinary-start validation games, a nearly always-draw critic, and replay
-dominated by long capped trajectories. It retains learned weights but starts
-a fresh optimizer, replay buffer and generation counter in `runs_jester/hybrid`.
-The older `latest` and `competitive` experiments are preserved separately.
+JESTER retains its two-head architecture and protocol-2 learned tensors. The
+new run copies every model tensor exactly, then starts a fresh optimizer,
+replay buffer, generation counter, curriculum state, and evaluation history.
+Uncheck targets use `z_ref = -z_actual` once; the existing both-color JESTER
+search inversion remains enabled. Do not negate the evaluator or targets a
+second time.
 
-- New games: 25% exact selfmate starts, up to 25% bridge starts from actual
-  pre-mate trajectories, 30% helper opponents, and the remainder ordinary
-  resistant play. Until bridge positions exist, that allocation also uses
-  ordinary starts. Ordinary episodes have a 200-ply cap; bridge episodes 80.
-- Helpers accept an available mate and otherwise choose a random legal move.
-  Only learner moves supply training examples. Learner searches still assume
-  resistance. Helper outcomes are reported separately from resistant outcomes.
-- Workers retain up to 2,048 distinct positions from the last 2–32 plies before
-  actual non-catalog mates. Restarted bridge episodes face resistant opponents;
-  they receive labels only from their new outcomes. These worker-local pools
-  rebuild after restart and are not a solved-position database.
-- Replay reserves independent rings and batch quotas: 30% exact curriculum,
-  30% bridge, 25% ordinary competitive, 10% helper and at most 5% unresolved
-  caps. Missing known sources redistribute their quota proportionally. Each
-  game contributes at most 32 uniformly sampled positions. Caps carry no
-  value loss and discounted policy loss. The dashboard/CSV record actual
-  sampled counts and stored counts. Values describe this deliberately sampled
-  training mixture, not a calibrated probability over opening positions.
-- The exact catalog includes rook and bishop discovery motifs, with base
-  positions split before augmentation. Pawn-free positions use all board
-  symmetries; pawn positions use only direction-preserving symmetries plus
-  color reversal. Exact tests verify legal positions and forcing moves.
-- Routine validation every 2,000 optimizer updates uses 128 simulations and
-  100-ply caps, with ordinary starts and held-out resistant selfmate games.
-  Full ordinary-position sweeps use at least 256 simulations/300 plies every
-  10,000 updates. Full tactical conversions and candidate/champion helper
-  diagnostics are logged separately. Game logs include starting states and
-  every move. A combined near-goal score is not proof of opening strength.
-- Champion promotion still requires resistant results: score at least 55%,
-  conservative paired lower bound above 50%, and both first-move accuracy and
-  full conversion at least 50%. Caps are pessimistic in the lower bound.
-  Helper diagnostics never contribute to promotion. Helper frequency falls
-  by five percentage points, to a 10% floor, only after promotion, 80% full
-  conversion and at least 20 decisive ordinary-position validation games.
-  The narrow tactical quiz no longer automatically removes curriculum.
+The initial protocol-3 profile uses three workers with 32 games each, 256
+self-play simulations, batch size 256, a 200-ply truncation cap, and learning
+rate `3e-4`. Twenty-five percent of starts use verified Uncheck proofs and the
+rest use standard or Uncheck-reachable competitive openings. Competitive play
+uses the current network 75% of the time and a frozen historical JESTER 25% of
+the time. Legacy selfmate positions, helper opponents, bridge pools, material
+auxiliaries, resignation, and Syzygy labels are disabled.
 
-Start from a preserved checkpoint (weights only):
+Validation runs at a fixed 128-simulation budget against the champion and
+frozen JESTER history from paired colors. Standard starts and deterministic
+Uncheck-reachable held-out openings form the promotion gate. Independent
+held-out proofs report first-move accuracy and full conversion separately.
+Actual W/D/L, caps, length, color split, rescue success, exposure conversion,
+and immediate opponent-win errors are retained in `eval.csv` and
+`eval_games.jsonl`. Caps receive half a point in the display score and zero in
+the conservative lower bound, so a cap-heavy result cannot promote a model.
+
+Start a new run from legacy weights:
 
 ```bash
 cd training
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CHESS_AI_NO_COMPILE=1 .venv/bin/python -u scripts/train_jester_new.py \
-  --checkpoint-dir runs_jester/hybrid \
-  --init-from runs_jester/competitive/latest.pt \
-  --opponent runs_jester/latest/champion.pt \
-  --opponent runs_jester/competitive/latest.pt
+  --ruleset uncheck-v1 \
+  --init-from /absolute/path/to/protocol-2-jester-source.pt \
+  --checkpoint-dir runs_jester/uncheck-v1-YYYYMMDDTHHMMSSZ \
+  --workers 3 --sims 256
 ```
 
-Resume with `scripts/train_jester_continue.py --checkpoint-dir runs_jester/hybrid`.
-Older protocols must use `--init-from` and a new directory; their optimizer
-state/counters are not silently interpreted as this experiment. SIGINT saves
-a checkpoint. Startup readiness means fresh examples **and actual optimizer
-updates with finite losses**, not merely a busy GPU or increasing game count.
+Resume only a protocol-3 Uncheck checkpoint from the same run:
 
-For a read-only comparison, run `scripts/benchmark_jester.py CHECKPOINT --device
-cuda --sims 128 --full-conversions --fumbler-games 16` for each checkpoint.
-This reports first moves, complete resistant conversions, and paired-color
-helper games separately, using the same search semantics as the new run.
+```bash
+.venv/bin/python scripts/train_jester_continue.py \
+  --ruleset uncheck-v1 \
+  --resume runs_jester/uncheck-v1-YYYYMMDDTHHMMSSZ/latest.pt \
+  --checkpoint-dir runs_jester/uncheck-v1-YYYYMMDDTHHMMSSZ \
+  --workers 3 --sims 256
+```
+
+Protocol-2 checkpoints must use `--init-from` and a new directory. SIGINT
+saves a final checkpoint. Verify exact initialization in `initialization.json`,
+then require actual optimizer growth, finite losses, changed finite tensors,
+and real `uncheck_w`/`uncheck_b` outcomes before accepting a new run.
 
 The browser app owns inference and UI. This directory owns *training*:
 

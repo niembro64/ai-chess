@@ -100,7 +100,7 @@ class GameSlot:
     # None = both sides are the agent (normal self-play always; in
     # jester mode a None slot is a mirror jester-vs-jester game).
     agent_color: str | None = None
-    # Optional noisy sparring seat; unset in competitive inverted training.
+    # Optional noisy sparring seat; unset in protocol-3 Uncheck training.
     spar_color: str | None = None
     opponent_evaluator: object = None
     tracked_color: str = "white"

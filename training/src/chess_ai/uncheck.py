@@ -94,7 +94,10 @@ def forced_uncheck_moves(state: ChessGameState, max_plies: int = 5) -> tuple[str
     winning = []
     for move in get_legal_moves(state):
         child = apply_move(state, move)
-        if prove(child, max_plies - 1, counts):
+        child_counts = dict(counts)
+        child_key = position_key(child)
+        child_counts[child_key] = child_counts.get(child_key, 0) + 1
+        if child_counts[child_key] < 3 and prove(child, max_plies - 1, child_counts):
             winning.append(move_uci(move))
     return tuple(winning)
 
@@ -105,6 +108,7 @@ class UncheckPosition:
     fen: str
     max_plies: int
     winning_moves: tuple[str, ...]
+    motif: str
 
     @property
     def state(self) -> ChessGameState:
@@ -116,12 +120,72 @@ class UncheckPosition:
 
 
 _TRAIN = (
-    UncheckPosition("forced-knight-exposure", "r6k/8/5n2/8/8/3K4/P7/8 w - - 0 1", 3, ("d3e4", "d3c2", "d3d2", "d3e2", "a2a3")),
-    UncheckPosition("forced-knight-exposure-black", "8/p7/3k4/8/8/5N2/8/R6K b - - 0 1", 3, ("a7a6", "d6c7", "d6d7", "d6e7", "d6e5")),
+    UncheckPosition(
+        "forced-knight-exposure",
+        "r6k/8/5n2/8/8/3K4/P7/8 w - - 0 1",
+        3,
+        ("d3e4", "d3c2", "d3d2", "d3e2", "a2a3"),
+        "knight attack plus compulsory remote capture",
+    ),
+    UncheckPosition(
+        "forced-rook-exposure",
+        "r3r2k/8/8/8/8/3K4/P7/8 w - - 0 1",
+        3,
+        ("d3e4", "d3e3", "d3c2", "d3d2", "d3e2", "a2a3"),
+        "rook ray plus compulsory remote capture",
+    ),
+    UncheckPosition(
+        "discovered-self-exposure",
+        "r3r2k/8/8/8/8/8/P3N3/4K3 w - - 0 1",
+        3,
+        ("e2d4", "e2f4", "e2c3", "e2g3", "e2c1", "e2g1", "e1d2"),
+        "moving a blocker exposes the moving side's king",
+    ),
+    UncheckPosition(
+        "en-passant-self-exposure",
+        "r6k/8/8/4KPpr/8/8/P7/8 w - g6 0 2",
+        3,
+        ("f5g6",),
+        "compulsory en passant opens an attack ray",
+    ),
+    UncheckPosition(
+        "promotion-self-exposure",
+        "3nK3/P3P3/8/8/8/8/8/r3r2k w - - 0 1",
+        3,
+        ("e7d8q", "e7d8r", "e7d8b", "e7d8n"),
+        "all four capture promotions remain distinct forcing moves",
+    ),
 )
 
 _EVAL = (
-    UncheckPosition("heldout-mirrored-knight", "k6r/8/2n5/8/8/4K3/7P/8 w - - 0 1", 3, ("e3d4", "e3d2", "e3e2", "e3f2", "h2h3")),
+    UncheckPosition(
+        "heldout-bishop-exposure",
+        "r6b/7k/8/8/8/1K6/P7/8 w - - 0 1",
+        3,
+        ("b3c3", "b3b2", "b3c2", "a2a3"),
+        "bishop attack geometry",
+    ),
+    UncheckPosition(
+        "heldout-pawn-exposure",
+        "r6k/8/8/3p4/8/4K3/P7/8 w - - 0 1",
+        3,
+        ("e3e4", "e3d2", "e3e2", "e3f2", "a2a3"),
+        "pawn attack geometry",
+    ),
+    UncheckPosition(
+        "heldout-castling-exposure",
+        "r6k/8/1b6/8/8/8/P7/4K2R w K - 0 1",
+        3,
+        ("e1g1",),
+        "castling through attack under capture priority",
+    ),
+    UncheckPosition(
+        "heldout-double-attack",
+        "r3r2k/8/7b/8/8/3K4/P7/8 w - - 0 1",
+        3,
+        ("d3e4", "d3e3", "d3c2", "d3d2", "d3e2", "a2a3"),
+        "overlapping rook and bishop attacks",
+    ),
 )
 
 
@@ -134,6 +198,34 @@ def curriculum_start(rng: random.Random) -> ChessGameState:
 
 
 def validate_curriculum() -> None:
+    train_fens = {position.fen for position in _TRAIN}
+    eval_fens = {position.fen for position in _EVAL}
+    if train_fens & eval_fens:
+        raise ValueError("Uncheck train and held-out FENs overlap")
+
+    def material_signature(position: UncheckPosition) -> tuple:
+        state = position.state
+        counts = {
+            (color, piece_type): sum(
+                piece is not None and piece.color == color and piece.type == piece_type
+                for row in state.board for piece in row
+            )
+            for color in ("white", "black")
+            for piece_type in ("king", "queen", "rook", "bishop", "knight", "pawn")
+        }
+        direct = tuple(counts[(color, piece_type)] for color in ("white", "black")
+                       for piece_type in ("king", "queen", "rook", "bishop", "knight", "pawn"))
+        swapped = tuple(counts[(color, piece_type)] for color in ("black", "white")
+                        for piece_type in ("king", "queen", "rook", "bishop", "knight", "pawn"))
+        return min(direct, swapped)
+
+    # Board reflections and color reversal preserve material. Distinct material
+    # signatures therefore prove the held-out set is not a transformed copy of
+    # any training position.
+    train_signatures = {material_signature(position) for position in _TRAIN}
+    eval_signatures = {material_signature(position) for position in _EVAL}
+    if train_signatures & eval_signatures:
+        raise ValueError("Uncheck held-out proof is a possible train color/geometry relative")
     for position in _TRAIN + _EVAL:
         actual = forced_uncheck_moves(position.state, position.max_plies)
         if actual != position.winning_moves:

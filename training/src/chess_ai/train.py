@@ -213,12 +213,12 @@ class TrainConfig:
     # Periodically copy `latest.pt` off to `archive/gen-<N>.pt` so we have a
     # trail of snapshots for compare_checkpoints + plateau detection. 0
     # disables archival entirely.
-    # Inverted chess: both players try to force their OWN king's mate.
-    # Values retain ordinary-outcome signs; selection inverts both colors.
+    # JESTER variants retain reference-value heads and invert both colors.
+    # Protocol/ruleset metadata determines the actual terminal objective.
     jester_mode: bool = False
     jester_selfplay_prob: float = 0.75
     jester_opponent_checkpoint: str = ""  # optional legacy diagnostic opponent
-    jester_opponent_checkpoints: tuple[str, ...] = ()  # frozen inverted pool
+    jester_opponent_checkpoints: tuple[str, ...] = ()  # frozen JESTER pool
     jester_curriculum_prob: float = 0.5
     jester_curriculum_floor: float = 0.1
     jester_protocol: int = 2
@@ -1563,7 +1563,10 @@ class Trainer:
         clears `eval_score_threshold`. Returns a summary dict and appends it
         to self._eval_history + eval.csv.
         """
-        if self.config.jester_mode and self.config.ruleset == "normal" and self.config.jester_gate == "head_to_head":
+        if self.config.jester_mode and self.config.jester_gate == "head_to_head":
+            if self.config.ruleset == "uncheck-v1":
+                from .jester_eval import evaluate_uncheck
+                return evaluate_uncheck(self, ckpt_dir)
             from .jester_eval import evaluate_competitive
             return evaluate_competitive(self, ckpt_dir)
 

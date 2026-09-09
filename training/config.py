@@ -406,9 +406,9 @@ def build_toy_config() -> TrainConfig:
 
 
 # ---------------------------------------------------------------------------
-# Jester — competitive inverted chess, with exact short-selfmate starts.
-# Values keep the ordinary-outcome sign convention; BOTH players' search
-# selection is inverted. SAGE checkpoints/tablebases never supply labels.
+# JESTER protocol 3 — competitive Uncheck Chess with variant-native proofs.
+# Values use uncheck-reference-v1 and both players retain JESTER's established
+# inverted search direction. SAGE checkpoints and tablebases never label it.
 
 def build_jester_config() -> TrainConfig:
     cfg = build_config()
