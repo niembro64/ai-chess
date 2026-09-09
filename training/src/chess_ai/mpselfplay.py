@@ -60,6 +60,7 @@ from .selfplay import (
 
 @dataclass
 class MultiprocessingConfig:
+    ruleset: str = "normal"
     num_workers: int = 4
     jester_mode: bool = False
     jester_selfplay_prob: float = 0.75
@@ -317,6 +318,7 @@ def _worker_main(
         evaluator=remote_evaluator,
         example_sink=push_example,
         config=SelfPlayConfig(
+            ruleset=config.ruleset,
             num_concurrent_games=config.games_per_worker,
             mcts_simulations=config.mcts_simulations,
             invert_agent_selection=config.jester_mode,

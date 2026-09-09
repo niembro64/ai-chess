@@ -1,4 +1,5 @@
 export type PieceColor = 'white' | 'black';
+export type Ruleset = 'normal' | 'uncheck-v1';
 export type PieceType = 'king' | 'queen' | 'rook' | 'bishop' | 'knight' | 'pawn';
 
 export type Piece = {
@@ -28,7 +29,7 @@ export type CastlingRights = {
   blackQueenside: boolean;
 };
 
-export type GameStatus = 'waiting' | 'active' | 'check' | 'checkmate' | 'stalemate' | 'draw';
+export type GameStatus = 'waiting' | 'active' | 'check' | 'checkmate' | 'uncheck' | 'stalemate' | 'draw';
 
 // Why a given status === 'draw' happened. Kept separate from GameStatus so
 // the status union (which the Python engine mirrors and the parity fixtures
@@ -43,6 +44,7 @@ export type ChessGameState = {
   halfMoveClock: number; // For 50-move rule
   fullMoveNumber: number;
   status: GameStatus;
+  ruleset?: Ruleset;
   drawReason?: DrawReason;
   winner: PieceColor | null;
   moveHistory: Move[];

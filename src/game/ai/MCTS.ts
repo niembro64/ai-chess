@@ -186,15 +186,15 @@ export class MCTSSearch {
   }
 
   private checkTerminal(node: MCTSNode): void {
-    if (isInsufficientMaterial(node.state.board)) {
+    if ((node.state.ruleset ?? 'normal') === 'normal' && isInsufficientMaterial(node.state.board)) {
       node.isTerminal = true; node.isExpanded = true; node.terminalValue = 0;
       return;
     }
     const s = node.state.status;
-    if (s === 'checkmate' || s === 'stalemate' || s === 'draw') {
+    if (s === 'checkmate' || s === 'uncheck' || s === 'stalemate' || s === 'draw') {
       node.isTerminal = true;
       node.isExpanded = true;
-      node.terminalValue = s === 'checkmate' ? -mateValue(node.depth) : 0;
+      node.terminalValue = (s === 'checkmate' || s === 'uncheck') ? -mateValue(node.depth) : 0;
     } else {
       const moves = getLegalMoves(node.state);
       if (moves.length === 0) {

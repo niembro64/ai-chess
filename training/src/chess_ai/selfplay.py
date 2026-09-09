@@ -540,6 +540,7 @@ def make_local_selfplay_engine(
 
 @dataclass
 class SelfPlayConfig:
+    ruleset: str = "normal"
     num_concurrent_games: int = 32
     mcts_simulations: int = 25
     # Probability that a fresh game slot is seeded from a simple theoretical
@@ -681,6 +682,7 @@ class SelfPlayEngine:
             if cfg.invert_agent_selection:
                 slot.move_cap = cfg.standard_move_cap
                 helper = roll >= 1.0 - cfg.helper_start_prob
+        slot.state.ruleset = cfg.ruleset
         slot.position_history = {_position_key(slot.state): 1}
         slot.tracked_color = (slot.state.currentTurn if slot.origin == "curriculum"
                               else self.rng.choice(("white", "black")))
@@ -856,16 +858,16 @@ class SelfPlayEngine:
             # status (checkmate / stalemate / 50-move draw) — those are
             # already game-ending and dispatching on early_termination
             # would just shadow them.
-            if slot.state.status not in ("checkmate", "stalemate", "draw"):
+            if slot.state.status not in ("checkmate", "uncheck", "stalemate", "draw"):
                 key = _position_key(slot.state)
                 slot.position_history[key] = slot.position_history.get(key, 0) + 1
                 if slot.position_history[key] >= 3:
                     slot.early_termination = "repetition"
-                elif _is_insufficient_material(slot.state.board):
+                elif slot.state.ruleset == "normal" and _is_insufficient_material(slot.state.board):
                     slot.early_termination = "insufficient_material"
 
             is_over = (
-                slot.state.status in ("checkmate", "stalemate", "draw")
+                slot.state.status in ("checkmate", "uncheck", "stalemate", "draw")
                 or slot.early_termination is not None
                 or slot.move_count >= slot.move_cap
             )
@@ -882,6 +884,7 @@ class SelfPlayEngine:
         # engine's 50-move-rule signal.
         hit_cap = slot.move_count >= slot.move_cap and status not in (
             "checkmate",
+            "uncheck",
             "stalemate",
             "draw",
         )
@@ -914,6 +917,21 @@ class SelfPlayEngine:
             else:
                 outcome = "mate_b"
                 label = "black mates"
+                self.black_wins += 1
+        elif status == "uncheck":
+            # Actual Uncheck winner is the attacked side to move. JESTER's
+            # reference target is deliberately the opposite sign so its
+            # existing loss-seeking search remains semantically compatible.
+            winner = slot.state.currentTurn
+            actual_white_outcome = 1.0 if winner == "white" else -1.0
+            white_outcome = -actual_white_outcome
+            if winner == "white":
+                outcome = "uncheck_w"
+                label = "white begins attacked and wins"
+                self.white_wins += 1
+            else:
+                outcome = "uncheck_b"
+                label = "black begins attacked and wins"
                 self.black_wins += 1
         elif slot.early_termination == "repetition":
             # FIDE threefold repetition — same position seen 3+ times.
@@ -1034,7 +1052,7 @@ class SelfPlayEngine:
                         slot.origin if slot.origin in ("curriculum", "bridge") else "competitive"),
             ))
 
-        if self.config.invert_agent_selection and status == "checkmate" and slot.origin != "curriculum":
+        if self.config.invert_agent_selection and status in ("checkmate", "uncheck") and slot.origin != "curriculum":
             # Reset repetition history on restart, but preserve clocks/rights.
             # Keep 2..32 plies of approach states; resist every reply on replay.
             for state in list(slot.trajectory)[:-1]:
@@ -1072,7 +1090,7 @@ class SelfPlayEngine:
             matchup=slot.matchup,
             variant_outcome=(
                 ("own_mate" if slot.state.currentTurn == slot.tracked_color else "delivered_mate")
-                if self.config.invert_agent_selection and status == "checkmate"
+                if self.config.invert_agent_selection and status in ("checkmate", "uncheck")
                 else ("cap" if outcome == "cap" else "draw") if self.config.invert_agent_selection else None
             ),
             outcome_label=label,

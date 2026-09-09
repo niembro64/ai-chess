@@ -8,6 +8,7 @@ import type {
   Move,
   CastlingRights,
   ChessGameState,
+  Ruleset,
 } from '@/types/chess';
 
 function createInitialBoard(): Board {
@@ -30,7 +31,7 @@ function createInitialBoard(): Board {
   return board;
 }
 
-export function createInitialGameState(): ChessGameState {
+export function createInitialGameState(ruleset: Ruleset = 'normal'): ChessGameState {
   return {
     board: createInitialBoard(),
     currentTurn: 'white',
@@ -44,6 +45,7 @@ export function createInitialGameState(): ChessGameState {
     halfMoveClock: 0,
     fullMoveNumber: 1,
     status: 'waiting',
+    ruleset,
     winner: null,
     moveHistory: [],
     lastMove: null,
@@ -63,6 +65,7 @@ export function cloneGameState(state: ChessGameState): ChessGameState {
     halfMoveClock: state.halfMoveClock,
     fullMoveNumber: state.fullMoveNumber,
     status: state.status,
+    ruleset: state.ruleset ?? 'normal',
     drawReason: state.drawReason,
     winner: state.winner,
     moveHistory: [...state.moveHistory],
@@ -102,12 +105,25 @@ export function positionKey(state: ChessGameState): string {
   parts.push(cr.whiteQueenside ? '1' : '0');
   parts.push(cr.blackKingside ? '1' : '0');
   parts.push(cr.blackQueenside ? '1' : '0');
-  if (state.enPassantTarget) {
-    parts.push(String.fromCharCode(97 + state.enPassantTarget.file));
-    parts.push(String(state.enPassantTarget.rank));
+  const ep = state.enPassantTarget;
+  const epEffective = ep !== null && generatePseudoLegalMoves(
+    state.board,
+    state.currentTurn,
+    state.castlingRights,
+    ep,
+    state.ruleset ?? 'normal',
+  ).some(move =>
+    move.to.rank === ep.rank &&
+    move.to.file === ep.file &&
+    isCaptureMove(state, move),
+  );
+  if (epEffective) {
+    parts.push(String.fromCharCode(97 + ep!.file));
+    parts.push(String(ep!.rank));
   } else {
     parts.push('--');
   }
+  parts.push((state.ruleset ?? 'normal') === 'uncheck-v1' ? 'u' : 'n');
   return parts.join('');
 }
 
@@ -145,7 +161,7 @@ export function buildOwnSideKeys(
   color: PieceColor,
 ): Set<string> {
   const seen = new Set<string>();
-  let s = createInitialGameState();
+  let s = createInitialGameState(state.ruleset ?? 'normal');
   seen.add(ownSideKey(s, color));
   for (const move of state.moveHistory) {
     s = applyMove(s, move);
@@ -156,7 +172,7 @@ export function buildOwnSideKeys(
 
 export function buildPositionCounts(state: ChessGameState): Map<string, number> {
   const counts = new Map<string, number>();
-  let s = createInitialGameState();
+  let s = createInitialGameState(state.ruleset ?? 'normal');
   counts.set(positionKey(s), 1);
   for (const move of state.moveHistory) {
     s = applyMove(s, move);
@@ -366,7 +382,13 @@ function applyMoveToBoard(board: Board, move: Move, castlingRights: CastlingRigh
 }
 
 // Generate pseudo-legal moves (doesn't filter for leaving king in check)
-function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRights: CastlingRights, enPassantTarget: Position | null): Move[] {
+function generatePseudoLegalMoves(
+  board: Board,
+  color: PieceColor,
+  castlingRights: CastlingRights,
+  enPassantTarget: Position | null,
+  ruleset: Ruleset = 'normal',
+): Move[] {
   const moves: Move[] = [];
 
   for (let rank = 0; rank < 8; rank++) {
@@ -406,7 +428,7 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
             const cap = { rank: rank + dir, file: file + df };
             if (!isInBounds(cap)) continue;
             const target = getPieceAt(board, cap);
-            if (target && target.color !== color) {
+            if (target && target.color !== color && !(ruleset === 'uncheck-v1' && target.type === 'king')) {
               if (cap.rank === promoRank) {
                 for (const promo of ['queen', 'rook', 'bishop', 'knight'] as PieceType[]) {
                   moves.push({ from, to: cap, promotion: promo });
@@ -429,7 +451,7 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
             const to = { rank: rank + dr, file: file + df };
             if (!isInBounds(to)) continue;
             const target = getPieceAt(board, to);
-            if (!target || target.color !== color) {
+            if (!target || (target.color !== color && !(ruleset === 'uncheck-v1' && target.type === 'king'))) {
               moves.push({ from, to });
             }
           }
@@ -446,7 +468,7 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
               if (!target) {
                 moves.push({ from, to });
               } else {
-                if (target.color !== color) moves.push({ from, to });
+                if (target.color !== color && !(ruleset === 'uncheck-v1' && target.type === 'king')) moves.push({ from, to });
                 break;
               }
             }
@@ -464,7 +486,7 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
               if (!target) {
                 moves.push({ from, to });
               } else {
-                if (target.color !== color) moves.push({ from, to });
+                if (target.color !== color && !(ruleset === 'uncheck-v1' && target.type === 'king')) moves.push({ from, to });
                 break;
               }
             }
@@ -482,7 +504,7 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
               if (!target) {
                 moves.push({ from, to });
               } else {
-                if (target.color !== color) moves.push({ from, to });
+                if (target.color !== color && !(ruleset === 'uncheck-v1' && target.type === 'king')) moves.push({ from, to });
                 break;
               }
             }
@@ -498,7 +520,7 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
               const to = { rank: rank + dr, file: file + df };
               if (!isInBounds(to)) continue;
               const target = getPieceAt(board, to);
-              if (!target || target.color !== color) {
+              if (!target || (target.color !== color && !(ruleset === 'uncheck-v1' && target.type === 'king'))) {
                 moves.push({ from, to });
               }
             }
@@ -509,17 +531,21 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
             if (castlingRights.whiteKingside &&
                 !board[7][5] && !board[7][6] &&
                 board[7][7]?.type === 'rook' && board[7][7]?.color === 'white' &&
-                !isSquareAttackedBy(board, { rank: 7, file: 4 }, 'black') &&
-                !isSquareAttackedBy(board, { rank: 7, file: 5 }, 'black') &&
-                !isSquareAttackedBy(board, { rank: 7, file: 6 }, 'black')) {
+                (ruleset === 'uncheck-v1' || (
+                  !isSquareAttackedBy(board, { rank: 7, file: 4 }, 'black') &&
+                  !isSquareAttackedBy(board, { rank: 7, file: 5 }, 'black') &&
+                  !isSquareAttackedBy(board, { rank: 7, file: 6 }, 'black')
+                ))) {
               moves.push({ from, to: { rank: 7, file: 6 } });
             }
             if (castlingRights.whiteQueenside &&
                 !board[7][3] && !board[7][2] && !board[7][1] &&
                 board[7][0]?.type === 'rook' && board[7][0]?.color === 'white' &&
-                !isSquareAttackedBy(board, { rank: 7, file: 4 }, 'black') &&
-                !isSquareAttackedBy(board, { rank: 7, file: 3 }, 'black') &&
-                !isSquareAttackedBy(board, { rank: 7, file: 2 }, 'black')) {
+                (ruleset === 'uncheck-v1' || (
+                  !isSquareAttackedBy(board, { rank: 7, file: 4 }, 'black') &&
+                  !isSquareAttackedBy(board, { rank: 7, file: 3 }, 'black') &&
+                  !isSquareAttackedBy(board, { rank: 7, file: 2 }, 'black')
+                ))) {
               moves.push({ from, to: { rank: 7, file: 2 } });
             }
           }
@@ -527,17 +553,21 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
             if (castlingRights.blackKingside &&
                 !board[0][5] && !board[0][6] &&
                 board[0][7]?.type === 'rook' && board[0][7]?.color === 'black' &&
-                !isSquareAttackedBy(board, { rank: 0, file: 4 }, 'white') &&
-                !isSquareAttackedBy(board, { rank: 0, file: 5 }, 'white') &&
-                !isSquareAttackedBy(board, { rank: 0, file: 6 }, 'white')) {
+                (ruleset === 'uncheck-v1' || (
+                  !isSquareAttackedBy(board, { rank: 0, file: 4 }, 'white') &&
+                  !isSquareAttackedBy(board, { rank: 0, file: 5 }, 'white') &&
+                  !isSquareAttackedBy(board, { rank: 0, file: 6 }, 'white')
+                ))) {
               moves.push({ from, to: { rank: 0, file: 6 } });
             }
             if (castlingRights.blackQueenside &&
                 !board[0][3] && !board[0][2] && !board[0][1] &&
                 board[0][0]?.type === 'rook' && board[0][0]?.color === 'black' &&
-                !isSquareAttackedBy(board, { rank: 0, file: 4 }, 'white') &&
-                !isSquareAttackedBy(board, { rank: 0, file: 3 }, 'white') &&
-                !isSquareAttackedBy(board, { rank: 0, file: 2 }, 'white')) {
+                (ruleset === 'uncheck-v1' || (
+                  !isSquareAttackedBy(board, { rank: 0, file: 4 }, 'white') &&
+                  !isSquareAttackedBy(board, { rank: 0, file: 3 }, 'white') &&
+                  !isSquareAttackedBy(board, { rank: 0, file: 2 }, 'white')
+                ))) {
               moves.push({ from, to: { rank: 0, file: 2 } });
             }
           }
@@ -550,14 +580,37 @@ function generatePseudoLegalMoves(board: Board, color: PieceColor, castlingRight
   return moves;
 }
 
+// Capture classification is board-state dependent because en passant lands
+// on an empty square.  Uncheck Chess uses this to enforce compulsory capture.
+export function isCaptureMove(state: ChessGameState, move: Move): boolean {
+  if (getPieceAt(state.board, move.to)) return true;
+  const piece = getPieceAt(state.board, move.from);
+  return piece?.type === 'pawn' &&
+    move.from.file !== move.to.file &&
+    state.enPassantTarget?.rank === move.to.rank &&
+    state.enPassantTarget?.file === move.to.file;
+}
+
 // Generate all legal moves for the current player
 export function getLegalMoves(state: ChessGameState): Move[] {
+  const ruleset = state.ruleset ?? 'normal';
+  // This normally arrives as a status transition in applyMove, but keeping
+  // move generation terminal makes imported positions safe as well.
+  if (ruleset === 'uncheck-v1' && isInCheck(state.board, state.currentTurn)) {
+    return [];
+  }
   const pseudoMoves = generatePseudoLegalMoves(
     state.board,
     state.currentTurn,
     state.castlingRights,
     state.enPassantTarget,
+    ruleset,
   );
+
+  if (ruleset === 'uncheck-v1') {
+    const captures = pseudoMoves.filter(move => isCaptureMove(state, move));
+    return captures.length > 0 ? captures : pseudoMoves;
+  }
 
   // Filter: only moves that don't leave own king in check
   return pseudoMoves.filter(move => {
@@ -609,10 +662,30 @@ export function applyMove(state: ChessGameState, move: Move): ChessGameState {
   newState.currentTurn = oppositeColor(state.currentTurn);
   newState.moveHistory = [...state.moveHistory, move];
   newState.lastMove = move;
+  newState.winner = null;
+  newState.drawReason = undefined;
 
   // Update game status
-  const nextLegalMoves = getLegalMoves(newState);
   const inCheck = isInCheck(newState.board, newState.currentTurn);
+
+  if ((newState.ruleset ?? 'normal') === 'uncheck-v1') {
+    // The player whose turn begins in attack wins immediately. This test has
+    // priority over repetition, the move clock, and move availability.
+    if (inCheck) {
+      newState.status = 'uncheck';
+      newState.winner = newState.currentTurn;
+    } else if (newState.halfMoveClock >= 100) {
+      newState.status = 'draw';
+      newState.drawReason = 'fifty-move';
+    } else if (getLegalMoves(newState).length === 0) {
+      newState.status = 'stalemate';
+    } else {
+      newState.status = 'active';
+    }
+    return newState;
+  }
+
+  const nextLegalMoves = getLegalMoves(newState);
 
   if (nextLegalMoves.length === 0) {
     if (inCheck) {

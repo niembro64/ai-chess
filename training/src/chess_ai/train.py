@@ -46,6 +46,8 @@ from .weight_io import export_weights
 
 @dataclass
 class TrainConfig:
+    # Rules contract shared by self-play, evaluation, checkpoints and engines.
+    ruleset: str = "normal"
     # Self-play
     num_concurrent_games: int = 32
     mcts_simulations: int = 25
@@ -563,6 +565,7 @@ class Trainer:
                 syzygy_path=None if self.config.jester_mode else self.config.syzygy_path,
                 syzygy_max_pieces=self.config.syzygy_max_pieces,
                 jester_mode=self.config.jester_mode,
+                ruleset=self.config.ruleset,
                 jester_selfplay_prob=self.config.jester_selfplay_prob,
                 opponent_checkpoints=self.config.jester_opponent_checkpoints,
                 curriculum_start_prob=self.config.jester_curriculum_prob if self.config.jester_mode else 0.0,
@@ -604,6 +607,7 @@ class Trainer:
                     resign_min_plies=self.config.resign_min_plies,
                     board_encoder=self._board_encoder,
                     invert_agent_selection=self.config.jester_mode,
+                    ruleset=self.config.ruleset,
                     frozen_evaluators=tuple(self._make_model_evaluator(m) for m in self._jester_opponents),
                     curriculum_start_prob=self.config.jester_curriculum_prob if self.config.jester_mode else 0.0,
                     standard_move_cap=self.config.jester_move_cap,

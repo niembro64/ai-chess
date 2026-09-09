@@ -102,14 +102,14 @@ export function pieceTint(model: ModelId | null, color: 'white' | 'black'): Piec
   return STANDARD_TINTS[color];
 }
 
-// --- The two variants, and the setup grid ------------------------------
+// --- The two rulesets, and the setup grid ------------------------------
 //
 // The app plays chess two ways, and the grid's ROW picks which one the
 // game runs under — for BOTH players, not just the bot:
 //
 //   'win'   NORMAL chess.   You win by checkmating your opponent.
-//   'lose'  INVERTED chess. You win by getting your OWN king
-//           checkmated. The checkmated king is the winner.
+//   'lose'  UNCHECK chess. You win when your turn begins with your king
+//           attacked; captures are compulsory and kings may enter attack.
 //
 // The names are traditional-sense: in the inverted variant "losing" the
 // chess game is how you win the match. Every other rule is standard.
@@ -126,14 +126,14 @@ export const GRID_ASKED: readonly Goal[] = ['win', 'lose'];
 
 /** Display name of a variant. 'win' is ordinary chess. */
 export function goalLabel(goal: Goal): string {
-  return goal === 'win' ? 'NORMAL' : 'INVERTED';
+  return goal === 'win' ? 'NORMAL' : 'UNCHECK';
 }
 
 /** One-line statement of a variant's win condition. */
 export function variantRule(goal: Goal): string {
   return goal === 'win'
     ? 'Checkmate your opponent to win.'
-    : 'Get your own king checkmated to win.';
+    : 'Begin your turn with your king attacked to win; captures are compulsory.';
 }
 
 export function isInverted(model: ModelId, asked: Goal): boolean {
@@ -146,9 +146,12 @@ export function isInverted(model: ModelId, asked: Goal): boolean {
  * why one flag drives both — exactly when the bot's search inverts,
  * since the bot pursues the variant's goal like everyone else.
  */
-export function isInvertedVariant(model: ModelId, goalInverted: boolean): boolean {
+export function isUncheckVariant(model: ModelId, goalInverted: boolean): boolean {
   return (MODELS[model].trainedGoal === 'lose') !== goalInverted;
 }
+
+/** @deprecated Use isUncheckVariant. */
+export const isInvertedVariant = isUncheckVariant;
 
 // Face mood: each bot is content doing what it was trained for and
 // strained when asked for the opposite.

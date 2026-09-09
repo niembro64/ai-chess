@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import type { PlayerId, Move, ChessGameState, PieceColor } from '@/types/chess';
+import type { PlayerId, Move, ChessGameState, PieceColor, Ruleset } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
 import type { NetworkGameSnapshot, LobbyPlayer, NetworkRole } from '@/types/network';
 import type { GameConnection } from '@/types/game';
@@ -15,7 +15,7 @@ import {
   MODELS,
   effortSims,
   fetchModelJson,
-  isInvertedVariant,
+  isUncheckVariant,
   type Effort,
   type ModelId,
 } from '@/game/ai/models';
@@ -62,7 +62,7 @@ const displayState = computed<ChessGameState>(() => {
   if (viewPly.value === null || viewPly.value >= totalPlies.value) {
     return gameState.value;
   }
-  let s = createInitialGameState();
+  let s = createInitialGameState(gameState.value.ruleset ?? 'normal');
   for (let i = 0; i < viewPly.value; i++) {
     s = applyMove(s, gameState.value.moveHistory[i]);
   }
@@ -219,6 +219,7 @@ const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.valu
 const isMyTurn = computed(() => gameState.value.currentTurn === localColor.value);
 const isGameOver = computed(() =>
   gameState.value.status === 'checkmate' ||
+  gameState.value.status === 'uncheck' ||
   gameState.value.status === 'stalemate' ||
   gameState.value.status === 'draw'
 );
@@ -236,17 +237,15 @@ const statusText = computed(() => {
     case 'check':
       return isMyTurn.value ? 'You are in check!' : 'Opponent is in check';
     case 'checkmate': {
-      // `gs.winner` always names the side that DELIVERED mate. In the
-      // inverted variant the checkmated king wins, so it names the
-      // loser and the result reads backwards.
-      const mated = gs.winner !== localColor.value;
-      const iWon = invertedVariant.value ? mated : !mated;
+      const iWon = gs.winner === localColor.value;
       if (iWon) return 'Checkmate - You win!';
       if (!playingVsBot.value) return 'Checkmate - You lose';
-      return invertedVariant.value
-        ? `Checkmate - ${opponentName.value} got there first`
-        : `Checkmate - ${opponentName.value} wins`;
+      return `Checkmate - ${opponentName.value} wins`;
     }
+    case 'uncheck':
+      return gs.winner === localColor.value
+        ? 'Uncheck - Your king is attacked. You win!'
+        : `Uncheck - ${opponentName.value}'s king is attacked. ${opponentName.value} wins`;
     case 'stalemate':
       return 'Stalemate - Draw';
     case 'draw':
@@ -284,11 +283,12 @@ const localName = computed(() => 'You');
 // Which VARIANT this game is being played under. Inverted means the
 // checkmated king wins, so both sides steer toward their own mate; the
 // lobby row picks it, and it binds the human as much as the bot.
-const invertedVariant = computed(() =>
+const uncheckVariant = computed(() =>
   playingVsBot.value && botModelId.value !== null
-    ? isInvertedVariant(botModelId.value, botPicksLowest.value)
+    ? isUncheckVariant(botModelId.value, botPicksLowest.value)
     : false,
 );
+const activeRuleset = computed<Ruleset>(() => uncheckVariant.value ? 'uncheck-v1' : 'normal');
 const isOpponentTurn = computed(() => gameState.value.currentTurn === opponentColor.value);
 const isLocalTurn = computed(() => gameState.value.currentTurn === localColor.value);
 
@@ -513,7 +513,7 @@ function startGameWithPlayers(playerIds: PlayerId[]): void {
   requestWakeLock();
 
   if (networkRole.value !== 'client') {
-    currentServer = new ChessServer();
+    currentServer = new ChessServer(activeRuleset.value);
     const localConnection = new LocalGameConnection(currentServer, localPlayerId.value);
     activeConnection = localConnection;
 

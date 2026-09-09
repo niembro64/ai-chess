@@ -274,18 +274,18 @@ class MCTSSearch:
 
     def _check_terminal(self, node: MCTSNode) -> None:
         from .selfplay import _is_insufficient_material
-        if _is_insufficient_material(node.state.board):
+        if node.state.ruleset == "normal" and _is_insufficient_material(node.state.board):
             node.is_terminal = node.is_expanded = True
             node.terminal_value = 0.0
             return
         s = node.state.status
-        if s in ("checkmate", "stalemate", "draw"):
+        if s in ("checkmate", "uncheck", "stalemate", "draw"):
             node.is_terminal = True
             node.is_expanded = True
             # Terminal value is from the perspective of the player-to-move at the
             # terminal node. Checkmate = they have no moves and are in check, so
             # they've LOST: value = -1. Stalemate/draw: 0.
-            node.terminal_value = -mate_value(node.depth) if s == "checkmate" else 0.0
+            node.terminal_value = -mate_value(node.depth) if s in ("checkmate", "uncheck") else 0.0
         elif s in ("active", "check"):
             # Fresh post-apply_move state: apply_move already computed status via
             # get_legal_moves, so "active"/"check" guarantees >=1 legal move.

@@ -29,7 +29,8 @@ except ImportError:
 
 PieceColor = Literal["white", "black"]
 PieceType = Literal["king", "queen", "rook", "bishop", "knight", "pawn"]
-GameStatus = Literal["waiting", "active", "check", "checkmate", "stalemate", "draw"]
+Ruleset = Literal["normal", "uncheck-v1"]
+GameStatus = Literal["waiting", "active", "check", "checkmate", "uncheck", "stalemate", "draw"]
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,8 @@ class ChessGameState:
     halfMoveClock: int
     fullMoveNumber: int
     status: GameStatus
+    ruleset: Ruleset = "normal"
+    winner: PieceColor | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -134,6 +137,8 @@ class ChessGameState:
             "halfMoveClock": self.halfMoveClock,
             "fullMoveNumber": self.fullMoveNumber,
             "status": self.status,
+            "ruleset": self.ruleset,
+            "winner": self.winner,
         }
 
     @classmethod
@@ -146,6 +151,8 @@ class ChessGameState:
             halfMoveClock=d["halfMoveClock"],
             fullMoveNumber=d["fullMoveNumber"],
             status=d["status"],
+            ruleset=d.get("ruleset", "normal"),
+            winner=d.get("winner"),
         )
 
     def copy(self) -> "ChessGameState":
@@ -157,6 +164,8 @@ class ChessGameState:
             halfMoveClock=self.halfMoveClock,
             fullMoveNumber=self.fullMoveNumber,
             status=self.status,
+            ruleset=self.ruleset,
+            winner=self.winner,
         )
 
 
@@ -174,7 +183,7 @@ def _initial_board() -> Board:
     return board
 
 
-def create_initial_game_state() -> ChessGameState:
+def create_initial_game_state(ruleset: Ruleset = "normal") -> ChessGameState:
     return ChessGameState(
         board=_initial_board(),
         currentTurn="white",
@@ -183,6 +192,7 @@ def create_initial_game_state() -> ChessGameState:
         halfMoveClock=0,
         fullMoveNumber=1,
         status="waiting",
+        ruleset=ruleset,
     )
 
 
@@ -423,6 +433,7 @@ def _pseudo_legal_moves(
     color: PieceColor,
     castling: CastlingRights,
     en_passant: Position | None,
+    ruleset: Ruleset = "normal",
 ) -> list[Move]:
     moves: list[Move] = []
 
@@ -459,7 +470,9 @@ def _pseudo_legal_moves(
                     if not _in_bounds(cr, cf):
                         continue
                     target = board[cr][cf]
-                    if target and target.color != color:
+                    if target and target.color != color and not (
+                        ruleset == "uncheck-v1" and target.type == "king"
+                    ):
                         if cr == promo_rank:
                             for promo in ("queen", "rook", "bishop", "knight"):
                                 moves.append(Move(from_pos, Position(cr, cf), promo))  # type: ignore[arg-type]
@@ -474,7 +487,10 @@ def _pseudo_legal_moves(
                     if not _in_bounds(tr, tf):
                         continue
                     target = board[tr][tf]
-                    if not target or target.color != color:
+                    if not target or (
+                        target.color != color
+                        and not (ruleset == "uncheck-v1" and target.type == "king")
+                    ):
                         moves.append(Move(from_pos, Position(tr, tf)))
 
             elif piece.type in ("bishop", "rook", "queen"):
@@ -492,7 +508,9 @@ def _pseudo_legal_moves(
                         if not target:
                             moves.append(Move(from_pos, Position(tr, tf)))
                         else:
-                            if target.color != color:
+                            if target.color != color and not (
+                                ruleset == "uncheck-v1" and target.type == "king"
+                            ):
                                 moves.append(Move(from_pos, Position(tr, tf)))
                             break
 
@@ -505,7 +523,10 @@ def _pseudo_legal_moves(
                         if not _in_bounds(tr, tf):
                             continue
                         target = board[tr][tf]
-                        if not target or target.color != color:
+                        if not target or (
+                            target.color != color
+                            and not (ruleset == "uncheck-v1" and target.type == "king")
+                        ):
                             moves.append(Move(from_pos, Position(tr, tf)))
 
                 # Castling
@@ -517,9 +538,11 @@ def _pseudo_legal_moves(
                         and board[7][7] is not None
                         and board[7][7].type == "rook"
                         and board[7][7].color == "white"
-                        and not is_square_attacked_by(board, Position(7, 4), "black")
-                        and not is_square_attacked_by(board, Position(7, 5), "black")
-                        and not is_square_attacked_by(board, Position(7, 6), "black")
+                        and (ruleset == "uncheck-v1" or (
+                            not is_square_attacked_by(board, Position(7, 4), "black")
+                            and not is_square_attacked_by(board, Position(7, 5), "black")
+                            and not is_square_attacked_by(board, Position(7, 6), "black")
+                        ))
                     ):
                         moves.append(Move(from_pos, Position(7, 6)))
                     if (
@@ -530,9 +553,11 @@ def _pseudo_legal_moves(
                         and board[7][0] is not None
                         and board[7][0].type == "rook"
                         and board[7][0].color == "white"
-                        and not is_square_attacked_by(board, Position(7, 4), "black")
-                        and not is_square_attacked_by(board, Position(7, 3), "black")
-                        and not is_square_attacked_by(board, Position(7, 2), "black")
+                        and (ruleset == "uncheck-v1" or (
+                            not is_square_attacked_by(board, Position(7, 4), "black")
+                            and not is_square_attacked_by(board, Position(7, 3), "black")
+                            and not is_square_attacked_by(board, Position(7, 2), "black")
+                        ))
                     ):
                         moves.append(Move(from_pos, Position(7, 2)))
 
@@ -544,9 +569,11 @@ def _pseudo_legal_moves(
                         and board[0][7] is not None
                         and board[0][7].type == "rook"
                         and board[0][7].color == "black"
-                        and not is_square_attacked_by(board, Position(0, 4), "white")
-                        and not is_square_attacked_by(board, Position(0, 5), "white")
-                        and not is_square_attacked_by(board, Position(0, 6), "white")
+                        and (ruleset == "uncheck-v1" or (
+                            not is_square_attacked_by(board, Position(0, 4), "white")
+                            and not is_square_attacked_by(board, Position(0, 5), "white")
+                            and not is_square_attacked_by(board, Position(0, 6), "white")
+                        ))
                     ):
                         moves.append(Move(from_pos, Position(0, 6)))
                     if (
@@ -557,9 +584,11 @@ def _pseudo_legal_moves(
                         and board[0][0] is not None
                         and board[0][0].type == "rook"
                         and board[0][0].color == "black"
-                        and not is_square_attacked_by(board, Position(0, 4), "white")
-                        and not is_square_attacked_by(board, Position(0, 3), "white")
-                        and not is_square_attacked_by(board, Position(0, 2), "white")
+                        and (ruleset == "uncheck-v1" or (
+                            not is_square_attacked_by(board, Position(0, 4), "white")
+                            and not is_square_attacked_by(board, Position(0, 3), "white")
+                            and not is_square_attacked_by(board, Position(0, 2), "white")
+                        ))
                     ):
                         moves.append(Move(from_pos, Position(0, 2)))
 
@@ -576,6 +605,21 @@ def _serialize_board_for_rust(board: Board) -> list[list[dict | None]]:
         [({"color": p.color, "type": p.type} if p else None) for p in row]
         for row in board
     ]
+
+
+def is_capture_move(state: ChessGameState, move: Move) -> bool:
+    """Return whether *move* captures a non-king piece, including en passant."""
+    target = state.board[move.to_pos.rank][move.to_pos.file]
+    if target is not None:
+        return target.color != state.currentTurn and target.type != "king"
+    piece = state.board[move.from_pos.rank][move.from_pos.file]
+    if piece is None or piece.type != "pawn" or move.from_pos.file == move.to_pos.file:
+        return False
+    ep = state.enPassantTarget
+    if ep is None or ep != move.to_pos:
+        return False
+    captured = state.board[move.from_pos.rank][move.to_pos.file]
+    return captured is not None and captured.type == "pawn" and captured.color != piece.color
 
 
 def _rust_get_legal_moves(state: ChessGameState) -> list[Move]:
@@ -597,12 +641,15 @@ def _rust_get_legal_moves(state: ChessGameState) -> list[Move]:
         "rank": state.enPassantTarget.rank,
         "file": state.enPassantTarget.file,
     }
-    tuples = _rust.get_legal_moves(
+    args = [
         _serialize_board_for_rust(state.board),
         state.currentTurn,
         castling,
         ep,
-    )
+    ]
+    if getattr(_rust, "ENGINE_PROTOCOL", 0) >= 3:
+        args.append(state.ruleset)
+    tuples = _rust.get_legal_moves(*args)
     return [
         Move(
             from_pos=Position(t[0], t[1]),
@@ -619,7 +666,11 @@ def get_legal_moves(state: ChessGameState) -> list[Move]:
     Uses the Rust extension when it's built; otherwise falls back to the
     pure-Python implementation below.
     """
-    if _HAVE_RUST:
+    if state.ruleset == "uncheck-v1" and is_in_check(state.board, state.currentTurn):
+        return []
+    if _HAVE_RUST and (
+        state.ruleset == "normal" or getattr(_rust, "ENGINE_PROTOCOL", 0) >= 3
+    ):
         return _rust_get_legal_moves(state)
     return _get_legal_moves_python(state)
 
@@ -644,14 +695,17 @@ def _rust_expand_children(state: ChessGameState) -> list[tuple["Move", ChessGame
         "rank": state.enPassantTarget.rank,
         "file": state.enPassantTarget.file,
     }
-    raw_children = _rust.generate_children(
+    args = [
         _serialize_board_for_rust(state.board),
         state.currentTurn,
         castling,
         ep,
         state.halfMoveClock,
         state.fullMoveNumber,
-    )
+    ]
+    if getattr(_rust, "ENGINE_PROTOCOL", 0) >= 3:
+        args.append(state.ruleset)
+    raw_children = _rust.generate_children(*args)
 
     result: list[tuple[Move, ChessGameState]] = []
     for d in raw_children:
@@ -682,6 +736,8 @@ def _rust_expand_children(state: ChessGameState) -> list[tuple["Move", ChessGame
             halfMoveClock=d["halfMoveClock"],
             fullMoveNumber=d["fullMoveNumber"],
             status=d["status"],
+            ruleset=state.ruleset,
+            winner=d.get("winner"),
         )
         result.append((move, child_state))
     return result
@@ -694,7 +750,9 @@ def expand_children(state: ChessGameState) -> list[tuple["Move", ChessGameState]
     — just much cheaper at runtime because the Rust path crosses the FFI
     boundary once instead of once per child.
     """
-    if _HAVE_RUST:
+    if _HAVE_RUST and (
+        state.ruleset == "normal" or getattr(_rust, "ENGINE_PROTOCOL", 0) >= 3
+    ):
         return _rust_expand_children(state)
     moves = _get_legal_moves_python(state)
     return [(m, _apply_move_python(state, m)) for m in moves]
@@ -709,9 +767,14 @@ def _get_legal_moves_python(state: ChessGameState) -> list[Move]:
     explicitly so we skip 29 redundant 64-square `_find_king` scans per call.
     ~3–5× faster on typical positions.
     """
+    if state.ruleset == "uncheck-v1" and is_in_check(state.board, state.currentTurn):
+        return []
     pseudo = _pseudo_legal_moves(
-        state.board, state.currentTurn, state.castlingRights, state.enPassantTarget
+        state.board, state.currentTurn, state.castlingRights, state.enPassantTarget, state.ruleset
     )
+    if state.ruleset == "uncheck-v1":
+        captures = [move for move in pseudo if is_capture_move(state, move)]
+        return captures or pseudo
     board = state.board
     castling = state.castlingRights
     current_turn = state.currentTurn
@@ -821,7 +884,7 @@ def _rust_apply_move(state: ChessGameState, move: Move) -> ChessGameState:
         "rank": state.enPassantTarget.rank,
         "file": state.enPassantTarget.file,
     }
-    result = _rust.apply_move_full(
+    args = [
         _serialize_board_for_rust(state.board),
         state.currentTurn,
         castling,
@@ -833,7 +896,10 @@ def _rust_apply_move(state: ChessGameState, move: Move) -> ChessGameState:
         move.to_pos.rank,
         move.to_pos.file,
         move.promotion,
-    )
+    ]
+    if getattr(_rust, "ENGINE_PROTOCOL", 0) >= 3:
+        args.append(state.ruleset)
+    result = _rust.apply_move_full(*args)
 
     board_flat: list[int] = result["board"]
     new_board: Board = [
@@ -858,6 +924,8 @@ def _rust_apply_move(state: ChessGameState, move: Move) -> ChessGameState:
         halfMoveClock=result["halfMoveClock"],
         fullMoveNumber=result["fullMoveNumber"],
         status=result["status"],
+        ruleset=state.ruleset,
+        winner=result.get("winner"),
     )
 
 
@@ -867,7 +935,9 @@ def apply_move(state: ChessGameState, move: Move) -> ChessGameState:
     Uses the Rust extension when it's built; falls back to pure Python
     otherwise. The hot path for MCTS tree expansion.
     """
-    if _HAVE_RUST:
+    if _HAVE_RUST and (
+        state.ruleset == "normal" or getattr(_rust, "ENGINE_PROTOCOL", 0) >= 3
+    ):
         return _rust_apply_move(state, move)
     return _apply_move_python(state, move)
 
@@ -902,20 +972,40 @@ def _apply_move_python(state: ChessGameState, move: Move) -> ChessGameState:
 
     new_state.currentTurn = _opposite(state.currentTurn)
 
-    # Update status
-    next_legal = get_legal_moves(new_state)
+    # Update status. In Uncheck Chess, an attacked side-to-move has already
+    # won, before draws or move availability are considered.
     in_check = is_in_check(new_state.board, new_state.currentTurn)
-    if len(next_legal) == 0:
+    if new_state.ruleset == "uncheck-v1":
         if in_check:
-            new_state.status = "checkmate"
-        else:
+            new_state.status = "uncheck"
+            new_state.winner = new_state.currentTurn
+        elif new_state.halfMoveClock >= 100:
+            new_state.status = "draw"
+            new_state.winner = None
+        elif not get_legal_moves(new_state):
             new_state.status = "stalemate"
-    elif in_check:
-        new_state.status = "check"
-    elif new_state.halfMoveClock >= 100:
-        new_state.status = "draw"
+            new_state.winner = None
+        else:
+            new_state.status = "active"
+            new_state.winner = None
     else:
-        new_state.status = "active"
+        next_legal = get_legal_moves(new_state)
+        if len(next_legal) == 0:
+            if in_check:
+                new_state.status = "checkmate"
+                new_state.winner = _opposite(new_state.currentTurn)
+            else:
+                new_state.status = "stalemate"
+                new_state.winner = None
+        elif in_check:
+            new_state.status = "check"
+            new_state.winner = None
+        elif new_state.halfMoveClock >= 100:
+            new_state.status = "draw"
+            new_state.winner = None
+        else:
+            new_state.status = "active"
+            new_state.winner = None
 
     return new_state
 
@@ -929,7 +1019,7 @@ def position_key(state: ChessGameState) -> bytes:
     Lives in engine (not selfplay) so the MCTS — which selfplay imports —
     can use it for in-tree repetition awareness without an import cycle.
     """
-    parts = bytearray(64 + 1 + 4 + 2)
+    parts = bytearray(64 + 1 + 4 + 2 + 1)
     i = 0
     for r in range(8):
         for f in range(8):
@@ -951,10 +1041,23 @@ def position_key(state: ChessGameState) -> bytes:
                  cr.blackKingside, cr.blackQueenside):
         parts[i] = ord('1' if flag else '0')
         i += 1
-    if state.enPassantTarget is not None:
+    ep_is_effective = state.enPassantTarget is not None and any(
+        is_capture_move(state, move)
+        for move in _pseudo_legal_moves(
+            state.board,
+            state.currentTurn,
+            state.castlingRights,
+            state.enPassantTarget,
+            state.ruleset,
+        )
+        if move.to_pos == state.enPassantTarget
+    )
+    if ep_is_effective:
         parts[i] = ord('a') + state.enPassantTarget.file
         parts[i + 1] = ord('1') + state.enPassantTarget.rank
     else:
         parts[i] = ord('-')
         parts[i + 1] = ord('-')
+    i += 2
+    parts[i] = ord('u' if state.ruleset == "uncheck-v1" else 'n')
     return bytes(parts)

@@ -96,7 +96,7 @@ def launch(*, mode: str) -> None:
     if resume is not None:
         checkpoint = torch.load(resume, map_location="cpu", weights_only=False)
         old = checkpoint.get("config", {})
-        if old.get("jester_protocol") != 2 or old.get("jester_gate") != "head_to_head" or old.get("syzygy_path") is not None:
+        if old.get("jester_protocol") != config.jester_protocol or old.get("ruleset", "normal") != config.ruleset or old.get("jester_gate") != "head_to_head" or old.get("syzygy_path") is not None:
             raise ValueError(
                 "Different JESTER protocol: use --init-from with a new directory instead of --resume"
             )
@@ -124,7 +124,9 @@ def launch(*, mode: str) -> None:
         trainer._save_champion(directory, gen=0)
         trainer.save_checkpoint(directory)
     log.info(
-        "JESTER protocol 2: %s, %d workers x %d games, %d sims; %d frozen opponents; balanced replay, separate helper curriculum, no Syzygy",
+        "JESTER protocol %d (%s): %s, %d workers x %d games, %d sims; %d frozen opponents; no legacy selfmate curriculum, no Syzygy",
+        config.jester_protocol,
+        config.ruleset,
         device,
         config.num_workers,
         config.games_per_worker,

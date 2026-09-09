@@ -435,12 +435,16 @@ def build_jester_config() -> TrainConfig:
     cfg.random_start_prob = 0.1
     cfg.syzygy_path = None
     cfg.jester_mode = True
+    cfg.ruleset = "uncheck-v1"
+    cfg.jester_protocol = 3
     cfg.jester_selfplay_prob = 0.75
     cfg.jester_opponent_checkpoint = ""
-    cfg.jester_curriculum_prob = 0.25
-    cfg.jester_curriculum_floor = 0.25
-    cfg.jester_helper_prob = 0.30
-    cfg.jester_bridge_prob = 0.25
+    # Protocol 3 starts with standard/random Uncheck positions. The legacy
+    # selfmate curriculum and cooperative helper encode the removed rules.
+    cfg.jester_curriculum_prob = 0.0
+    cfg.jester_curriculum_floor = 0.0
+    cfg.jester_helper_prob = 0.0
+    cfg.jester_bridge_prob = 0.0
     cfg.jester_max_examples_per_game = 32
     cfg.jester_eval_batch_size = 32
     cfg.jester_move_cap = 200

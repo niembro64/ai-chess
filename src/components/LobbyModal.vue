@@ -45,9 +45,9 @@ const emit = defineEmits<{
 //
 // The model grid crosses MODEL × VARIANT. Columns are the networks by
 // the variant their weights were trained on (Sage normal, Jester
-// inverted); rows are the variant this game will be played under, by
+// Uncheck); rows are the ruleset this game will be played under, by
 // BOTH sides — normal chess (checkmate your opponent) or inverted
-// chess (get your own king checkmated; the checkmated king wins).
+// Uncheck Chess (begin your turn with your king attacked; captures required).
 // Off its diagonal a model plays a variant it was never trained for,
 // which it handles by inverting its search, not by picking bad moves.
 // Toy sits below as its own option.
@@ -138,8 +138,8 @@ const canJoin = computed(() => {
     <div class="lobby-modal">
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
-        <h1 class="title">AI CHESS</h1>
-        <p class="subtitle">Inverted chess: the checkmated king wins.</p>
+        <h1 class="title">UNCHECK CHESS</h1>
+        <p class="subtitle">Get your king attacked. If it is still attacked when your turn begins, you win.</p>
 
         <div class="main-actions">
           <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>

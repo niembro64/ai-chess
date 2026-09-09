@@ -7,7 +7,7 @@ import {
   isInsufficientMaterial,
   positionKey,
 } from '../chess/ChessEngine';
-import type { ChessGameState, PlayerId } from '@/types/chess';
+import type { ChessGameState, PlayerId, Ruleset } from '@/types/chess';
 import { playerIdToColor, colorToPlayerId } from '@/types/chess';
 import type { ChessCommand, NetworkGameSnapshot } from '@/types/network';
 import type { SnapshotCallback, GameOverCallback } from './GameConnection';
@@ -24,8 +24,8 @@ export class ChessServer {
   private snapshotListeners: SnapshotCallback[] = [];
   private gameOverListeners: GameOverCallback[] = [];
 
-  constructor() {
-    this.gameState = createInitialGameState();
+  constructor(ruleset: Ruleset = 'normal') {
+    this.gameState = createInitialGameState(ruleset);
   }
 
   // Start the game
@@ -72,7 +72,7 @@ export class ChessServer {
           if (count >= 3) {
             this.gameState.status = 'draw';
             this.gameState.drawReason = 'repetition';
-          } else if (isInsufficientMaterial(this.gameState.board)) {
+          } else if ((this.gameState.ruleset ?? 'normal') === 'normal' && isInsufficientMaterial(this.gameState.board)) {
             this.gameState.status = 'draw';
             this.gameState.drawReason = 'insufficient-material';
           }
@@ -80,7 +80,7 @@ export class ChessServer {
         this.emitSnapshot();
 
         // Check for game over
-        if (this.gameState.status === 'checkmate' && this.gameState.winner) {
+        if ((this.gameState.status === 'checkmate' || this.gameState.status === 'uncheck') && this.gameState.winner) {
           const winnerId = colorToPlayerId(this.gameState.winner);
           for (const listener of this.gameOverListeners) {
             listener(winnerId);

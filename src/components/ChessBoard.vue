@@ -41,6 +41,7 @@ const isFlipped = computed(() => localColor.value === 'black');
 const isMyTurn = computed(() => props.gameState.currentTurn === localColor.value);
 const isGameOver = computed(() =>
   props.gameState.status === 'checkmate' ||
+  props.gameState.status === 'uncheck' ||
   props.gameState.status === 'stalemate' ||
   props.gameState.status === 'draw'
 );
@@ -76,7 +77,7 @@ function isLastMoveSquare(rank: number, file: number): boolean {
 }
 
 function isKingInCheck(rank: number, file: number): boolean {
-  if (props.gameState.status !== 'check' && props.gameState.status !== 'checkmate') return false;
+  if (props.gameState.status !== 'check' && props.gameState.status !== 'checkmate' && props.gameState.status !== 'uncheck') return false;
   const piece = props.gameState.board[rank][file];
   return piece?.type === 'king' && piece.color === props.gameState.currentTurn;
 }
