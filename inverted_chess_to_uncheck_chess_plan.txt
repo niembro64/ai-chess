@@ -840,7 +840,7 @@ Pushed source:
   Tested training implementation used by the GPU run:
     895da50603290505110bdcf9aa07a72642604162
   Mobile repository main:
-    d25c7eeb003d7d344376287dfddba11a3c2a0055
+    970b7ab7470a80bd1e0d1bcc19a806c0846b698f
   The mobile iOS and Android identifiers remain
     com.ericniemeyer.worstchessmove
   so version 1.1 updates the existing store product. Product name, slug,
