@@ -106,7 +106,7 @@ export function positionKey(state: ChessGameState): string {
   parts.push(cr.blackKingside ? '1' : '0');
   parts.push(cr.blackQueenside ? '1' : '0');
   const ep = state.enPassantTarget;
-  const epEffective = ep !== null && generatePseudoLegalMoves(
+  const epEffective = ep !== null && ((state.ruleset ?? 'normal') === 'normal' || generatePseudoLegalMoves(
     state.board,
     state.currentTurn,
     state.castlingRights,
@@ -116,7 +116,7 @@ export function positionKey(state: ChessGameState): string {
     move.to.rank === ep.rank &&
     move.to.file === ep.file &&
     isCaptureMove(state, move),
-  );
+  ));
   if (epEffective) {
     parts.push(String.fromCharCode(97 + ep!.file));
     parts.push(String(ep!.rank));
@@ -439,7 +439,10 @@ function generatePseudoLegalMoves(
             }
             // En passant
             if (enPassantTarget && cap.rank === enPassantTarget.rank && cap.file === enPassantTarget.file) {
-              moves.push({ from, to: cap });
+              const captured = getPieceAt(board, { rank, file: cap.file });
+              if (captured?.type === 'pawn' && captured.color !== color) {
+                moves.push({ from, to: cap });
+              }
             }
           }
           break;
@@ -583,12 +586,15 @@ function generatePseudoLegalMoves(
 // Capture classification is board-state dependent because en passant lands
 // on an empty square.  Uncheck Chess uses this to enforce compulsory capture.
 export function isCaptureMove(state: ChessGameState, move: Move): boolean {
-  if (getPieceAt(state.board, move.to)) return true;
+  const target = getPieceAt(state.board, move.to);
   const piece = getPieceAt(state.board, move.from);
+  if (target) return target.color !== piece?.color && target.type !== 'king';
+  const captured = getPieceAt(state.board, { rank: move.from.rank, file: move.to.file });
   return piece?.type === 'pawn' &&
     move.from.file !== move.to.file &&
     state.enPassantTarget?.rank === move.to.rank &&
-    state.enPassantTarget?.file === move.to.file;
+    state.enPassantTarget?.file === move.to.file &&
+    captured?.type === 'pawn' && captured.color !== piece.color;
 }
 
 // Generate all legal moves for the current player

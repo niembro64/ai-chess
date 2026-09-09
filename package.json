@@ -12,6 +12,7 @@
     "verify-weights": "tsx scripts/verify_weights.ts",
     "test-mcts-sign": "tsx scripts/test_mcts_sign.ts",
     "test-repetition": "tsx scripts/test_repetition.ts",
+    "test-uncheck": "tsx scripts/test_uncheck.ts",
     "verify-toy": "tsx scripts/verify_toy_weights.ts",
     "test-inverted": "tsx scripts/test_inverted.ts"
   },

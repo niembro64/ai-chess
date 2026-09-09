@@ -1,0 +1,143 @@
+{
+  "ruleset": "uncheck-v1",
+  "legalCases": [
+    {
+      "id": "initial-position",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "exact": ["a2a3", "a2a4", "b1a3", "b1c3", "b2b3", "b2b4", "c2c3", "c2c4", "d2d3", "d2d4", "e2e3", "e2e4", "f2f3", "f2f4", "g1f3", "g1h3", "g2g3", "g2g4", "h2h3", "h2h4"]
+    },
+    {
+      "id": "canonical-forced-capture",
+      "fen": "r6k/8/5n2/8/4K3/8/P7/8 b - - 1 1",
+      "exact": ["a8a2"]
+    },
+    {
+      "id": "multiple-capture-choice",
+      "fen": "4k3/8/3p4/8/1p1R4/8/1B6/4K3 w - - 0 1",
+      "exact": ["d4b4", "d4d6"]
+    },
+    {
+      "id": "king-captures-non-king",
+      "fen": "8/8/5k2/4n3/3K4/8/8/8 w - - 0 1",
+      "exact": ["d4e5"]
+    },
+    {
+      "id": "en-passant-is-compulsory",
+      "fen": "7k/8/8/3pP3/8/8/8/K7 w - d6 0 2",
+      "exact": ["e5d6"]
+    },
+    {
+      "id": "capturing-promotions-remain-distinct",
+      "fen": "r6k/1P6/8/8/8/8/8/7K w - - 0 1",
+      "exact": ["b7a8b", "b7a8n", "b7a8q", "b7a8r"]
+    },
+    {
+      "id": "capture-priority-suppresses-castling",
+      "fen": "k4r2/8/8/8/8/8/7p/4K2R w K - 0 1",
+      "exact": ["h1h2"],
+      "excludes": ["e1g1"]
+    },
+    {
+      "id": "castling-through-attack",
+      "fen": "k4r2/8/8/8/8/8/8/4K2R w K - 0 1",
+      "includes": ["e1g1"]
+    },
+    {
+      "id": "king-capture-is-forbidden",
+      "fen": "k7/8/8/8/8/8/8/R6K w - - 0 1",
+      "excludes": ["a1a8"]
+    }
+  ],
+  "terminalRoots": [
+    {
+      "id": "attacked-side-to-move-wins",
+      "fen": "7k/8/5n2/8/4K3/8/r7/8 w - - 0 2",
+      "winner": "white"
+    },
+    {
+      "id": "pinned-piece-still-attacks",
+      "fen": "4k3/4n3/8/5K2/8/8/8/4R3 w - - 0 1",
+      "winner": "white"
+    },
+    {
+      "id": "no-permitted-move-is-draw",
+      "fen": "PPPPPPPk/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP/KPPPPPPP w - - 0 1",
+      "winner": null,
+      "attacked": false
+    }
+  ],
+  "moveCases": [
+    {
+      "id": "own-exposure-waits-for-rescue-turn",
+      "fen": "4r2k/8/8/8/8/8/4N3/4K3 w - - 0 1",
+      "move": "e2c1",
+      "status": "active",
+      "turn": "black",
+      "attacked": "white"
+    },
+    {
+      "id": "complete-rescue-continues",
+      "fen": "4r2k/8/8/8/8/8/8/2N1K3 b - - 1 1",
+      "move": "e8d8",
+      "status": "active",
+      "turn": "white"
+    },
+    {
+      "id": "opponent-check-is-opponent-win",
+      "fen": "k7/8/8/8/8/8/8/1R5K w - - 0 1",
+      "move": "b1b8",
+      "status": "uncheck",
+      "winner": "black"
+    },
+    {
+      "id": "both-kings-attacked-next-player-wins",
+      "fen": "8/8/8/8/4k3/8/4K3/8 w - - 0 1",
+      "move": "e2e3",
+      "status": "uncheck",
+      "winner": "black"
+    },
+    {
+      "id": "incomplete-double-attack-rescue",
+      "fen": "4r2k/8/8/8/8/8/8/r3K3 b - - 0 1",
+      "move": "e8d8",
+      "status": "uncheck",
+      "winner": "white"
+    },
+    {
+      "id": "victory-precedes-100-halfmoves",
+      "fen": "k7/8/8/8/8/8/8/R6K w - - 99 1",
+      "move": "a1a7",
+      "status": "uncheck",
+      "winner": "black"
+    },
+    {
+      "id": "ordinary-insufficient-material-does-not-draw",
+      "fen": "4k3/8/8/8/8/2B5/8/4K3 w - - 0 1",
+      "move": "c3d4",
+      "status": "active",
+      "turn": "black"
+    },
+    {
+      "id": "100-halfmoves-is-draw",
+      "fen": "4k3/8/8/8/8/2B5/8/4K3 w - - 99 1",
+      "move": "c3d4",
+      "status": "draw",
+      "turn": "black"
+    },
+    {
+      "id": "en-passant-removes-real-pawn",
+      "fen": "7k/8/8/3pP3/8/8/8/K7 w - d6 0 2",
+      "move": "e5d6",
+      "status": "active",
+      "empty": "d5"
+    },
+    {
+      "id": "en-passant-opens-attack-line",
+      "fen": "7k/8/8/4KPpr/8/8/8/8 w - g6 0 2",
+      "move": "f5g6",
+      "status": "active",
+      "attacked": "white",
+      "empty": "g5"
+    }
+  ]
+}

@@ -65,7 +65,11 @@ export class ChessServer {
         // top of movegen). Engine-produced terminal statuses take
         // precedence — a move that mates wins even if it also creates
         // the third occurrence (FIDE 5.1).
-        if (this.gameState.status === 'active' || this.gameState.status === 'check') {
+        const checkHistory = this.gameState.status === 'active' ||
+          this.gameState.status === 'check' ||
+          ((this.gameState.ruleset ?? 'normal') === 'uncheck-v1' &&
+            this.gameState.status === 'draw' && this.gameState.drawReason === 'fifty-move');
+        if (checkHistory) {
           const key = positionKey(this.gameState);
           const count = (this.positionCounts.get(key) ?? 0) + 1;
           this.positionCounts.set(key, count);
@@ -80,7 +84,7 @@ export class ChessServer {
         this.emitSnapshot();
 
         // Check for game over
-        if ((this.gameState.status === 'checkmate' || this.gameState.status === 'uncheck') && this.gameState.winner) {
+        if ((this.gameState.status === 'checkmate' || this.gameState.status === 'uncheck' || this.gameState.status === 'resigned') && this.gameState.winner) {
           const winnerId = colorToPlayerId(this.gameState.winner);
           for (const listener of this.gameOverListeners) {
             listener(winnerId);
@@ -96,7 +100,7 @@ export class ChessServer {
       case 'resign': {
         const resignColor = playerIdToColor(fromPlayerId);
         const winnerColor = resignColor === 'white' ? 'black' : 'white';
-        this.gameState.status = 'checkmate'; // Treat resign like checkmate for display
+        this.gameState.status = 'resigned';
         this.gameState.winner = winnerColor;
         this.emitSnapshot();
 

@@ -131,10 +131,20 @@ export class MCTSSearch {
   selectLeaf(): Float32Array | null {
     let node = this.root;
     const path = new Set([this.root.posKey!]);
+    const pathCounts = new Map<string, number>();
     while (node.isExpanded && !node.isTerminal) {
       node = selectChild(node, node === this.root, this.invertForTurn);
       node.posKey ??= positionKey(node.state);
-      if (!node.isTerminal && (path.has(node.posKey) || (this.gameCounts.get(node.posKey) ?? 0) + 1 >= 3)) {
+      const gameOccurrences = this.gameCounts.get(node.posKey) ?? 0;
+      let isRepetition: boolean;
+      if ((node.state.ruleset ?? 'normal') === 'uncheck-v1') {
+        const simulatedOccurrences = (pathCounts.get(node.posKey) ?? 0) + 1;
+        pathCounts.set(node.posKey, simulatedOccurrences);
+        isRepetition = gameOccurrences + simulatedOccurrences >= 3;
+      } else {
+        isRepetition = path.has(node.posKey) || gameOccurrences + 1 >= 3;
+      }
+      if (!node.isTerminal && isRepetition) {
         node.isTerminal = true;
         node.isExpanded = true;
         node.terminalValue = 0;
@@ -191,10 +201,12 @@ export class MCTSSearch {
       return;
     }
     const s = node.state.status;
-    if (s === 'checkmate' || s === 'uncheck' || s === 'stalemate' || s === 'draw') {
+    if (s === 'checkmate' || s === 'uncheck' || s === 'resigned' || s === 'stalemate' || s === 'draw') {
       node.isTerminal = true;
       node.isExpanded = true;
-      node.terminalValue = (s === 'checkmate' || s === 'uncheck') ? -mateValue(node.depth) : 0;
+      node.terminalValue = s === 'resigned'
+        ? (node.state.winner === node.state.currentTurn ? mateValue(node.depth) : -mateValue(node.depth))
+        : (s === 'checkmate' || s === 'uncheck') ? -mateValue(node.depth) : 0;
     } else {
       const moves = getLegalMoves(node.state);
       if (moves.length === 0) {

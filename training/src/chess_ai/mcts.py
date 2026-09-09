@@ -214,13 +214,22 @@ class MCTSSearch:
         node = self.root
         track = self._game_counts is not None
         path_keys: set = {self._root_key} if track else set()
+        path_counts: dict[bytes, int] = {}
         while node.is_expanded and not node.is_terminal:
             node = _select_child(node, self._invert_turns)
             if track and not node.is_terminal:
                 if node.pos_key is None:
                     node.pos_key = position_key(node.state)
                     occ = self._game_counts.get(node.pos_key, 0)  # type: ignore[union-attr]
-                    if node.pos_key in path_keys or occ + 1 >= 3:
+                    if node.state.ruleset == "uncheck-v1":
+                        simulated = path_counts.get(node.pos_key, 0) + 1
+                        path_counts[node.pos_key] = simulated
+                        is_repetition = occ + simulated >= 3
+                    else:
+                        # Preserve the established normal-chess search shortcut:
+                        # one in-tree repeat is treated as a draw.
+                        is_repetition = node.pos_key in path_keys or occ + 1 >= 3
+                    if is_repetition:
                         node.is_terminal = True
                         node.is_expanded = True
                         node.terminal_value = 0.0
@@ -274,6 +283,16 @@ class MCTSSearch:
 
     def _check_terminal(self, node: MCTSNode) -> None:
         from .selfplay import _is_insufficient_material
+        if node.state.ruleset == "uncheck-v1":
+            from .engine import is_in_check
+            if is_in_check(node.state.board, node.state.currentTurn):
+                node.is_terminal = node.is_expanded = True
+                node.terminal_value = -mate_value(node.depth)
+                return
+            if not get_legal_moves(node.state):
+                node.is_terminal = node.is_expanded = True
+                node.terminal_value = 0.0
+                return
         if node.state.ruleset == "normal" and _is_insufficient_material(node.state.board):
             node.is_terminal = node.is_expanded = True
             node.terminal_value = 0.0
@@ -509,6 +528,7 @@ def _state_to_dict(state: ChessGameState) -> dict:
         "halfMoveClock": state.halfMoveClock,
         "fullMoveNumber": state.fullMoveNumber,
         "status": state.status,
+        "ruleset": state.ruleset,
     }
 
 

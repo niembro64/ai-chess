@@ -48,6 +48,7 @@ from .weight_io import export_weights
 class TrainConfig:
     # Rules contract shared by self-play, evaluation, checkpoints and engines.
     ruleset: str = "normal"
+    value_convention: str = "normal-reference-v1"
     # Self-play
     num_concurrent_games: int = 32
     mcts_simulations: int = 25
@@ -286,6 +287,8 @@ class TrainConfig:
 
 @dataclass
 class TrainStats:
+    ruleset: str = "normal"
+    value_convention: str = "normal-reference-v1"
     step: int = 0
     generation: int = 0              # Count of gradient steps taken so far
     target_gens: int = 0             # Goal for "well trained" (for progress bar / ETA)
@@ -294,6 +297,8 @@ class TrainStats:
     # See selfplay.GameResult for the meaning of each bucket.
     mate_w: int = 0                  # over-the-board white checkmate
     mate_b: int = 0                  # over-the-board black checkmate
+    uncheck_w: int = 0               # white begins its turn attacked and wins
+    uncheck_b: int = 0               # black begins its turn attacked and wins
     resign_w: int = 0                # black resigned → white wins
     resign_b: int = 0                # white resigned → black wins
     stalemate: int = 0               # no legal moves, not in check
@@ -362,12 +367,12 @@ class TrainStats:
     @property
     def white_wins(self) -> int:
         """All games won by white: OTB mate + resignation + tablebase."""
-        return self.mate_w + self.resign_w + self.tb_w
+        return self.mate_w + self.uncheck_w + self.resign_w + self.tb_w
 
     @property
     def black_wins(self) -> int:
         """All games won by black: OTB mate + resignation + tablebase."""
-        return self.mate_b + self.resign_b + self.tb_b
+        return self.mate_b + self.uncheck_b + self.resign_b + self.tb_b
 
     @property
     def draws(self) -> int:
@@ -408,7 +413,7 @@ class TrainStats:
     # aggregate for each bucket.
     origin_outcomes: dict[str, dict[str, int]] = field(default_factory=lambda: {
         origin: {
-            "mate_w": 0, "mate_b": 0,
+            "mate_w": 0, "mate_b": 0, "uncheck_w": 0, "uncheck_b": 0,
             "resign_w": 0, "resign_b": 0,
             "stalemate": 0, "draw_50": 0,
             "draw_repetition": 0, "draw_insufficient": 0,
@@ -623,6 +628,8 @@ class Trainer:
             )
 
         self.stats = TrainStats(target_gens=self.config.target_gens)
+        self.stats.ruleset = self.config.ruleset
+        self.stats.value_convention = self.config.value_convention
         self.stats.curriculum_prob = self.config.jester_curriculum_prob
         self.stats.helper_prob = self.config.jester_helper_prob
         # Seed live LR before any schedule step, so the dashboard's
@@ -998,7 +1005,7 @@ class Trainer:
     ) -> None:
         if variant_outcome is not None:
             key = f"{matchup}/{origin}"
-            bucket = self.stats.jester_outcomes.setdefault(key, {"own_mate": 0, "delivered_mate": 0, "draw": 0, "cap": 0})
+            bucket = self.stats.jester_outcomes.setdefault(key, {"uncheck_win": 0, "uncheck_loss": 0, "own_mate": 0, "delivered_mate": 0, "draw": 0, "cap": 0})
             bucket[variant_outcome] += 1
         # Dispatch on the granular outcome label. See selfplay.GameResult for
         # the full set. `origin` selects which per-origin sub-bucket to
@@ -1283,6 +1290,7 @@ class Trainer:
         jester: bool = False,
         temperature: float = 0.0,
         blunder_prob: float = 0.0,
+        telemetry: "dict[str, int] | None" = None,
     ) -> str:
         """One eval game. Returns "challenger", "champion", or "draw".
 
@@ -1308,30 +1316,52 @@ class Trainer:
         """
         import copy
 
-        from .engine import apply_move, create_initial_game_state, get_legal_moves
+        from .engine import apply_move, create_initial_game_state, get_legal_moves, is_in_check
         from .mcts import run_batched_mcts
         from .selfplay import _is_insufficient_material, _position_key
 
         if starting_state is None:
-            state = create_initial_game_state()
+            state = create_initial_game_state(self.config.ruleset)
             state.status = "active"
         else:
             state = copy.deepcopy(starting_state)
             state.status = "active"
+            state.ruleset = self.config.ruleset
         moves_played = 0
         position_history: dict[bytes, int] = {}
+
+        def finish(outcome: str, *, cap: bool = False) -> str:
+            if telemetry is not None:
+                telemetry["games"] = telemetry.get("games", 0) + 1
+                telemetry["plies"] = telemetry.get("plies", 0) + moves_played
+                if cap:
+                    telemetry["caps"] = telemetry.get("caps", 0) + 1
+            return outcome
+
         while True:
-            if state.status in ("checkmate", "stalemate", "draw"):
+            if state.ruleset == "uncheck-v1" and is_in_check(state.board, state.currentTurn):
+                state.status = "uncheck"
+                state.winner = state.currentTurn
+            if state.status in ("checkmate", "uncheck", "stalemate", "draw"):
                 break
             if moves_played >= move_cap:
-                return "draw"
+                return finish("draw", cap=True)
             key = _position_key(state)
             position_history[key] = position_history.get(key, 0) + 1
             if position_history[key] >= 3:
-                return "draw"
-            if _is_insufficient_material(state.board):
-                return "draw"
+                return finish("draw")
+            if state.ruleset == "normal" and _is_insufficient_material(state.board):
+                return finish("draw")
             ch_color = "white" if challenger_plays_white else "black"
+            rescue_target = None
+            if state.ruleset == "uncheck-v1":
+                opponent = "black" if state.currentTurn == "white" else "white"
+                if is_in_check(state.board, opponent):
+                    rescue_target = opponent
+                    if telemetry is not None:
+                        telemetry["rescue_attempts"] = telemetry.get("rescue_attempts", 0) + 1
+                        if rescue_target == ch_color:
+                            telemetry["challenger_exposures"] = telemetry.get("challenger_exposures", 0) + 1
             if jester:
                 # Head-to-head misère: the side to move searches with its
                 # OWN net as the agent net and the other net supplying the
@@ -1370,8 +1400,21 @@ class Trainer:
                 options = get_legal_moves(state)
                 if options:
                     move = self.rng.choice(options)
+            mover = state.currentTurn
             state = apply_move(state, move)
             moves_played += 1
+            if telemetry is not None and rescue_target is not None:
+                if state.status == "uncheck" and state.winner == rescue_target:
+                    telemetry["forced_check_conversions"] = telemetry.get("forced_check_conversions", 0) + 1
+                    if rescue_target == ch_color:
+                        telemetry["challenger_forced_check_conversions"] = telemetry.get("challenger_forced_check_conversions", 0) + 1
+                else:
+                    telemetry["rescue_successes"] = telemetry.get("rescue_successes", 0) + 1
+                    if mover == ch_color:
+                        telemetry["challenger_rescue_successes"] = telemetry.get("challenger_rescue_successes", 0) + 1
+            if telemetry is not None and state.status == "uncheck" and state.winner != mover:
+                name = "challenger_immediate_check_blunders" if mover == ch_color else "champion_immediate_check_blunders"
+                telemetry[name] = telemetry.get(name, 0) + 1
 
         if state.status == "checkmate":
             loser = state.currentTurn
@@ -1382,8 +1425,11 @@ class Trainer:
                 # Misère objective: the challenger "wins" the eval by
                 # getting checkmated; accidentally winning is a loss.
                 return "champion" if winner_is_challenger else "challenger"
-            return "challenger" if winner_is_challenger else "champion"
-        return "draw"
+            return finish("challenger" if winner_is_challenger else "champion")
+        if state.status == "uncheck":
+            winner_is_challenger = (state.currentTurn == "white") == challenger_plays_white
+            return finish("challenger" if winner_is_challenger else "champion")
+        return finish("draw")
 
     def _play_fumbler_game(
         self,
@@ -1517,7 +1563,7 @@ class Trainer:
         clears `eval_score_threshold`. Returns a summary dict and appends it
         to self._eval_history + eval.csv.
         """
-        if self.config.jester_mode and self.config.jester_gate == "head_to_head":
+        if self.config.jester_mode and self.config.ruleset == "normal" and self.config.jester_gate == "head_to_head":
             from .jester_eval import evaluate_competitive
             return evaluate_competitive(self, ckpt_dir)
 
@@ -1602,6 +1648,7 @@ class Trainer:
                 build_rotating_opening_positions,
             )
             positions = list(build_eval_positions())
+            heldout_tactics = ()
             if self.config.jester_mode:
                 # A misère gate needs positions where BOTH kings can
                 # actually be checkmated. Most of the curated suite is
@@ -1620,6 +1667,12 @@ class Trainer:
                     p for p in positions
                     if p.difficulty in ("opening", "middlegame")
                 ]
+                if self.config.ruleset == "uncheck-v1":
+                    # These are held out of the training curriculum and use
+                    # independent, bounded Uncheck proofs.
+                    from .uncheck import curriculum_positions
+                    heldout_tactics = curriculum_positions("eval")
+                    positions.extend(heldout_tactics)
             # Append a fresh slice of random-walk opening positions. New
             # ones every match (RNG seeded off `gen` so a given gen always
             # plays the same rotating set across resumes — eval.csv stays
@@ -1631,7 +1684,29 @@ class Trainer:
                     build_rotating_opening_positions(rot_count, rot_rng)
                 )
 
+            if heldout_tactics:
+                from .mcts import run_batched_mcts
+                from .selfplay import _position_key
+                from .uncheck import move_uci
+                solved = 0
+                for tactic in heldout_tactics:
+                    tactic_state = tactic.state
+                    result = run_batched_mcts(
+                        [tactic_state], challenger_eval, self.config.eval_mcts_sims,
+                        self.rng, temperatures=[0.0], dirichlet_epsilon=0.0,
+                        board_encoder=self._board_encoder,
+                        position_counts=[{_position_key(tactic_state): 1}],
+                        invert_turns=["both"],
+                    )[0]
+                    solved += move_uci(result.move) in tactic.winning_moves
+                self.stats.tactical_accuracy = solved / len(heldout_tactics)
+
             wins = draws = losses = 0
+            telemetry: dict[str, int] = {}
+            color_results = {
+                "white": {"w": 0, "d": 0, "l": 0},
+                "black": {"w": 0, "d": 0, "l": 0},
+            }
             # Total games is always 2 × positions (one game per color so
             # any intrinsic imbalance averages out). `eval_games` from the
             # config is now informational; the loop trusts the position
@@ -1700,6 +1775,7 @@ class Trainer:
                             self.config.eval_blunder_prob
                             if self.config.jester_mode else 0.0
                         ),
+                        telemetry=telemetry,
                     )
                 bucket = per_diff.setdefault(
                     position.difficulty, {"w": 0, "d": 0, "l": 0}
@@ -1707,14 +1783,17 @@ class Trainer:
                 if outcome == "challenger":
                     wins += 1
                     bucket["w"] += 1
+                    color_results["white" if challenger_white else "black"]["w"] += 1
                     recent.append("W")
                 elif outcome == "champion":
                     losses += 1
                     bucket["l"] += 1
+                    color_results["white" if challenger_white else "black"]["l"] += 1
                     recent.append("L")
                 else:
                     draws += 1
                     bucket["d"] += 1
+                    color_results["white" if challenger_white else "black"]["d"] += 1
                     recent.append("D")
                 # Post-game tick. Wrapped in try/except because a
                 # dashboard hiccup shouldn't abort the whole eval match.
@@ -1761,7 +1840,9 @@ class Trainer:
         s = max(0.01, min(0.99, score))
         elo_diff = -400.0 * math.log10(1.0 / s - 1.0)
 
-        new_champion = score >= self.config.eval_score_threshold
+        score_se = math.sqrt(max(0.0, score * (1.0 - score)) / max(1, total))
+        score_lower_bound = max(0.0, score - 1.96 * score_se)
+        new_champion = score >= self.config.eval_score_threshold and score_lower_bound > 0.5
         if new_champion:
             self._save_champion(ckpt_dir, gen)
             self._champion_model = None  # force reload next eval
@@ -1775,7 +1856,7 @@ class Trainer:
         # is fixed so columns stay aligned across resumes.
         diff_scores: dict[str, str | float] = {}
         diff_games: dict[str, int] = {}
-        for name in ("mate-in-1", "endgame", "middlegame", "opening"):
+        for name in ("mate-in-1", "endgame", "middlegame", "opening", "uncheck-tactic"):
             stats = per_diff.get(name)
             col = name.replace("-", "_")
             if not stats:
@@ -1797,6 +1878,7 @@ class Trainer:
             "draws": draws,
             "losses": losses,
             "score": round(score, 4),
+            "score_lower_bound": round(score_lower_bound, 4),
             "elo_diff": round(elo_diff, 1),
             "new_champion": new_champion,
             "plateau_counter": self._plateau_counter,
@@ -1804,6 +1886,14 @@ class Trainer:
             # eval regressions (e.g. a match that suddenly takes 2×
             # longer could mean MCTS is stuck exploring dead-end lines).
             "duration_s": round(time.time() - match_start, 1),
+            "caps": telemetry.get("caps", 0),
+            "average_plies": round(telemetry.get("plies", 0) / max(1, telemetry.get("games", 0)), 1),
+            "challenger_white": color_results["white"],
+            "challenger_black": color_results["black"],
+            "rescue_attempts": telemetry.get("rescue_attempts", 0),
+            "rescue_successes": telemetry.get("rescue_successes", 0),
+            "immediate_check_blunders": telemetry.get("challenger_immediate_check_blunders", 0),
+            "forced_check_conversions": telemetry.get("challenger_forced_check_conversions", 0),
             # Per-difficulty score + game-count columns persisted to
             # eval.csv so the trend across matches is visible after the
             # fact, not just live during a match. A saturated mate-in-1
@@ -1817,6 +1907,8 @@ class Trainer:
             "per_diff": per_diff,
         }
         self._eval_history.append(result)
+        exposures = telemetry.get("challenger_exposures", 0)
+        self.stats.tactical_conversion = telemetry.get("challenger_forced_check_conversions", 0) / max(1, exposures)
 
         # Append to eval.csv. Exclude per_diff (nested dict). On --resume,
         # the file may already have an older schema (missing opponent_gen
@@ -1824,7 +1916,10 @@ class Trainer:
         # extrasaction='ignore' so the CSV stays readable. Fresh runs get
         # the full current schema.
         csv_path = ckpt_dir / "eval.csv"
-        csv_row = {k: v for k, v in result.items() if k != "per_diff"}
+        csv_row = {
+            k: v for k, v in result.items()
+            if k not in ("per_diff", "challenger_white", "challenger_black")
+        }
         if csv_path.exists():
             with csv_path.open("r") as f:
                 first_line = f.readline().strip()

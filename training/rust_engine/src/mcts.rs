@@ -58,6 +58,7 @@ struct NodeState {
     fmn: i32,
     white_to_move: bool,
     status: NodeStatus,
+    uncheck: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +66,7 @@ enum NodeStatus {
     Active,
     Check,
     Checkmate,
+    Uncheck,
     Stalemate,
     Draw,
 }
@@ -73,6 +75,7 @@ impl NodeStatus {
     fn from_str(s: &str) -> Self {
         match s {
             "checkmate" => NodeStatus::Checkmate,
+            "uncheck" => NodeStatus::Uncheck,
             "stalemate" => NodeStatus::Stalemate,
             "draw" => NodeStatus::Draw,
             "check" => NodeStatus::Check,
@@ -82,12 +85,12 @@ impl NodeStatus {
     fn is_terminal(self) -> bool {
         matches!(
             self,
-            NodeStatus::Checkmate | NodeStatus::Stalemate | NodeStatus::Draw
+            NodeStatus::Checkmate | NodeStatus::Uncheck | NodeStatus::Stalemate | NodeStatus::Draw
         )
     }
     fn terminal_value(self) -> f32 {
         match self {
-            NodeStatus::Checkmate => -1.0,
+            NodeStatus::Checkmate | NodeStatus::Uncheck => -1.0,
             NodeStatus::Stalemate | NodeStatus::Draw => 0.0,
             _ => 0.0,
         }
@@ -158,7 +161,7 @@ impl MctsSearch {
             }
         }
         let mut root_state = parse_state_dict(state_dict)?;
-        if insufficient_material(&root_state.board) {
+        if !root_state.uncheck && insufficient_material(&root_state.board) {
             root_state.status = NodeStatus::Draw;
         }
         let root_key = position_key(&root_state);
@@ -258,10 +261,10 @@ impl MctsSearch {
     /// of the leaf for the NN to score.
     fn select_leaf<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut node = 0usize;
-        let mut path = HashSet::new();
-        if self.game_counts.is_some() {
-            path.insert(self.position_keys[0].clone());
-        }
+        let mut path_counts: HashMap<Vec<u8>, u32> = HashMap::new();
+        let mut path_seen: HashSet<Vec<u8>> = HashSet::new();
+        path_seen.insert(self.position_keys[0].clone());
+        let uncheck = self.states[0].uncheck;
         loop {
             let n = &self.nodes[node];
             if n.is_terminal || !n.is_expanded {
@@ -270,14 +273,19 @@ impl MctsSearch {
             node = self.select_child(node);
             if let Some(ref counts) = self.game_counts {
                 let key = &self.position_keys[node];
-                if !self.nodes[node].is_terminal
-                    && (path.contains(key) || counts.get(key).copied().unwrap_or(0) + 1 >= 3)
-                {
+                let is_repetition = if uncheck {
+                    let simulated = path_counts.entry(key.clone()).or_insert(0);
+                    *simulated += 1;
+                    counts.get(key).copied().unwrap_or(0) + *simulated >= 3
+                } else {
+                    path_seen.contains(key) || counts.get(key).copied().unwrap_or(0) + 1 >= 3
+                };
+                if !self.nodes[node].is_terminal && is_repetition {
                     self.nodes[node].is_terminal = true;
                     self.nodes[node].is_expanded = true;
                     self.nodes[node].terminal_value = 0.0;
                 }
-                path.insert(key.clone());
+                path_seen.insert(key.clone());
             }
         }
         if self.nodes[node].is_terminal {
@@ -451,11 +459,11 @@ impl MctsSearch {
             let s = &self.states[node];
             (s.board, s.castling)
         };
-        let (white_to_move, ep) = {
+        let (white_to_move, ep, uncheck) = {
             let s = &self.states[node];
-            (s.white_to_move, s.ep)
+            (s.white_to_move, s.ep, s.uncheck)
         };
-        let legal = legal_moves_impl(&mut legal_board, white_to_move, &mut legal_cr, ep);
+        let legal = legal_moves_impl(&mut legal_board, white_to_move, &mut legal_cr, ep, uncheck);
 
         if legal.is_empty() {
             // Dead end reached (missed by status detection at parent).
@@ -503,6 +511,7 @@ impl MctsSearch {
                     parent_hmc,
                     parent_fmn,
                     m,
+                    uncheck,
                 );
             let mut child_state = NodeState {
                 board: new_board,
@@ -512,8 +521,9 @@ impl MctsSearch {
                 fmn: new_fmn,
                 white_to_move: new_wtm,
                 status: NodeStatus::from_str(status),
+                uncheck,
             };
-            if insufficient_material(&child_state.board) {
+            if !uncheck && insufficient_material(&child_state.board) {
                 child_state.status = NodeStatus::Draw;
             }
             let _ = parent_board; // silence "unused" in debug if parent_board isn't used below
@@ -527,7 +537,7 @@ impl MctsSearch {
             };
             let depth = self.nodes[node].depth + 1;
             let is_term = child_state.status.is_terminal();
-            let term_val = if child_state.status == NodeStatus::Checkmate {
+            let term_val = if matches!(child_state.status, NodeStatus::Checkmate | NodeStatus::Uncheck) {
                 -mate_value(depth)
             } else {
                 0.0
@@ -655,7 +665,7 @@ fn mate_value(depth: u32) -> f32 {
 // Byte-exact with engine.position_key; clocks are deliberately excluded.
 fn position_key(s: &NodeState) -> Vec<u8> {
     let symbols = b".kqrbnp";
-    let mut key = Vec::with_capacity(71);
+    let mut key = Vec::with_capacity(72);
     for row in s.board {
         for p in row {
             let c = symbols[p.unsigned_abs() as usize];
@@ -666,11 +676,19 @@ fn position_key(s: &NodeState) -> Vec<u8> {
     for flag in [s.castling.wk, s.castling.wq, s.castling.bk, s.castling.bq] {
         key.push(if flag { b'1' } else { b'0' });
     }
-    if let Some((r, f)) = s.ep {
-        key.extend([b'a' + f, b'1' + r]);
+    let effective_ep = s.ep.filter(|&(r, f)| {
+        if !s.uncheck { return true; }
+        let mut board = s.board;
+        let mut castling = s.castling;
+        legal_moves_impl(&mut board, s.white_to_move, &mut castling, s.ep, true)
+            .iter().any(|m| m.to_r == r && m.to_f == f)
+    });
+    if let Some((r, f)) = effective_ep {
+        key.extend([b'a' + f, b'0' + r]);
     } else {
         key.extend(b"--");
     }
+    key.push(if s.uncheck { b'u' } else { b'n' });
     key
 }
 
@@ -840,6 +858,12 @@ fn parse_state_dict(state_dict: &Bound<'_, PyDict>) -> PyResult<NodeState> {
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("fullMoveNumber"))?
         .extract()?;
 
+    let ruleset = state_dict
+        .get_item("ruleset")?
+        .and_then(|obj| obj.extract::<String>().ok())
+        .unwrap_or_else(|| "normal".to_string());
+    let uncheck = ruleset == "uncheck-v1";
+
     // `status` may be "active" / "check" / "checkmate" / "stalemate" /
     // "draw" / "waiting". For "waiting" (fresh root with status not yet
     // computed), we recompute here — Python's MCTSSearch does the same.
@@ -849,11 +873,25 @@ fn parse_state_dict(state_dict: &Bound<'_, PyDict>) -> PyResult<NodeState> {
         None => "active".to_string(),
     };
 
-    let status = if status_str == "waiting" || status_str.is_empty() {
+    let status = if uncheck {
+        if is_in_check(&board, white_to_move) {
+            NodeStatus::Uncheck
+        } else if status_str == "draw" || hmc >= 100 {
+            NodeStatus::Draw
+        } else {
+            let mut b = board;
+            let mut cr = castling;
+            if legal_moves_impl(&mut b, white_to_move, &mut cr, ep, true).is_empty() {
+                NodeStatus::Stalemate
+            } else {
+                NodeStatus::Active
+            }
+        }
+    } else if status_str == "waiting" || status_str.is_empty() {
         // Recompute from scratch using engine helpers.
         let mut b = board;
         let mut cr = castling;
-        let legal = legal_moves_impl(&mut b, white_to_move, &mut cr, ep);
+        let legal = legal_moves_impl(&mut b, white_to_move, &mut cr, ep, uncheck);
         let in_check = is_in_check(&board, white_to_move);
         if legal.is_empty() {
             if in_check {
@@ -884,6 +922,7 @@ fn parse_state_dict(state_dict: &Bound<'_, PyDict>) -> PyResult<NodeState> {
         fmn,
         white_to_move,
         status,
+        uncheck,
     })
 }
 

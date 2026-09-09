@@ -111,11 +111,8 @@ export function pieceTint(model: ModelId | null, color: 'white' | 'black'): Piec
 //   'lose'  UNCHECK chess. You win when your turn begins with your king
 //           attacked; captures are compulsory and kings may enter attack.
 //
-// The names are traditional-sense: in the inverted variant "losing" the
-// chess game is how you win the match. Every other rule is standard.
-//
 // COLUMNS are the networks, by the variant their weights were TRAINED
-// on — Sage normal, Jester inverted. Off its own diagonal a model is
+// on — Sage normal, Jester's legacy loss-seeking protocol. Off its own diagonal a model is
 // playing a game it was never trained for; it copes by inverting its
 // search, which is not the same as "pick the worst-looking move".
 
@@ -141,10 +138,8 @@ export function isInverted(model: ModelId, asked: Goal): boolean {
 }
 
 /**
- * True when the game is the INVERTED variant: the checkmated king wins,
- * so both sides steer toward their own mate. Equivalently — and this is
- * why one flag drives both — exactly when the bot's search inverts,
- * since the bot pursues the variant's goal like everyone else.
+ * True when the game uses Uncheck rules. The compatibility flag still
+ * records whether the requested row opposes the model's trained ranking.
  */
 export function isUncheckVariant(model: ModelId, goalInverted: boolean): boolean {
   return (MODELS[model].trainedGoal === 'lose') !== goalInverted;

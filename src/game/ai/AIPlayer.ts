@@ -285,7 +285,7 @@ export class AIPlayer {
     const entries = rankByDistribution(distribution, legal, isWhite, searchedMoves);
     const candidates = candidateMoves(entries, this.goalInverted);
     const seenOwnSide = buildOwnSideKeys(state, color);
-    // In competitive inverted chess a legal return move can be essential
+    // In competitive Uncheck a legal return move can be essential
     // to a forced selfmate. MCTS handles actual repetition draws in-tree.
     const move = this.searchSeeksLoss && !this.goalInverted
       ? candidates[0].move

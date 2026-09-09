@@ -12,7 +12,8 @@ export type NetworkServerSnapshotMessage =
   | { type: 'playerLeft'; playerId: PlayerId };
 
 // Combined (transport envelope)
-export type NetworkMessage = NetworkPlayerActionMessage | NetworkServerSnapshotMessage;
+export type NetworkPayload = NetworkPlayerActionMessage | NetworkServerSnapshotMessage;
+export type NetworkMessage = NetworkPayload & { protocol: 2 };
 
 // Commands from client to server
 export type ChessCommand =

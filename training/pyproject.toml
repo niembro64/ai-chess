@@ -7,7 +7,7 @@ dependencies = [
     "numpy>=1.24",
     "torch>=2.2",
     "rich>=13",
-    "plotext>=5.2",
+    "plotext>=5.2,<6",
     # python-chess: used by the Syzygy tablebase integration to adjudicate
     # cap-timeout games when total pieces <= the tablebase's max piece count.
     # Optional at runtime (gracefully degrades to 0-scored caps if no

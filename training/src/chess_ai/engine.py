@@ -479,7 +479,13 @@ def _pseudo_legal_moves(
                         else:
                             moves.append(Move(from_pos, Position(cr, cf)))
                     if en_passant is not None and cr == en_passant.rank and cf == en_passant.file:
-                        moves.append(Move(from_pos, Position(cr, cf)))
+                        captured = board[rank][cf]
+                        if (
+                            captured is not None
+                            and captured.type == "pawn"
+                            and captured.color != color
+                        ):
+                            moves.append(Move(from_pos, Position(cr, cf)))
 
             elif piece.type == "knight":
                 for dr, df in _KNIGHT_OFFSETS:
@@ -1041,7 +1047,8 @@ def position_key(state: ChessGameState) -> bytes:
                  cr.blackKingside, cr.blackQueenside):
         parts[i] = ord('1' if flag else '0')
         i += 1
-    ep_is_effective = state.enPassantTarget is not None and any(
+    ep_is_effective = state.enPassantTarget is not None and (
+        state.ruleset == "normal" or any(
         is_capture_move(state, move)
         for move in _pseudo_legal_moves(
             state.board,
@@ -1051,10 +1058,11 @@ def position_key(state: ChessGameState) -> bytes:
             state.ruleset,
         )
         if move.to_pos == state.enPassantTarget
+        )
     )
     if ep_is_effective:
         parts[i] = ord('a') + state.enPassantTarget.file
-        parts[i + 1] = ord('1') + state.enPassantTarget.rank
+        parts[i + 1] = ord('0') + state.enPassantTarget.rank
     else:
         parts[i] = ord('-')
         parts[i + 1] = ord('-')

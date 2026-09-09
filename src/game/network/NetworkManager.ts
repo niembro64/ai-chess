@@ -1,6 +1,8 @@
 import Peer, { DataConnection } from 'peerjs';
 import type { PlayerId } from '@/types/chess';
-import type { ChessCommand, NetworkGameSnapshot, NetworkMessage, NetworkRole, LobbyPlayer } from './NetworkTypes';
+import type { ChessCommand, NetworkGameSnapshot, NetworkMessage, NetworkPayload, NetworkRole, LobbyPlayer } from './NetworkTypes';
+
+const NETWORK_PROTOCOL = 2 as const;
 
 // Generate a short room code (4 characters)
 function generateRoomCode(): string {
@@ -300,6 +302,10 @@ export class NetworkManager {
 
   // Handle incoming message
   private handleMessage(message: NetworkMessage, fromPlayerId: PlayerId): void {
+    if (message.protocol !== NETWORK_PROTOCOL) {
+      this.onError?.('This player is using an incompatible UnCheck Chess version.');
+      return;
+    }
     switch (message.type) {
       case 'state':
         if (this.role === 'client') {
@@ -347,18 +353,18 @@ export class NetworkManager {
   }
 
   // Send message to specific player (host only)
-  private sendTo(playerId: PlayerId, message: NetworkMessage): void {
+  private sendTo(playerId: PlayerId, message: NetworkPayload): void {
     const conn = this.connections.get(playerId);
     if (conn && conn.open) {
-      conn.send(message);
+      conn.send({ ...message, protocol: NETWORK_PROTOCOL });
     }
   }
 
   // Broadcast message to all connected players (host only)
-  private broadcast(message: NetworkMessage): void {
+  private broadcast(message: NetworkPayload): void {
     for (const [, conn] of this.connections) {
       if (conn.open) {
-        conn.send(message);
+        conn.send({ ...message, protocol: NETWORK_PROTOCOL });
       }
     }
   }
@@ -375,7 +381,7 @@ export class NetworkManager {
     if (this.role !== 'client') return;
     const hostConn = this.connections.get(1);
     if (hostConn && hostConn.open) {
-      hostConn.send({ type: 'command', data: command });
+      hostConn.send({ type: 'command', data: command, protocol: NETWORK_PROTOCOL });
     }
   }
 

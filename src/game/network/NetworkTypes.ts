@@ -2,6 +2,7 @@
 
 export type {
   NetworkMessage,
+  NetworkPayload,
   NetworkPlayerActionMessage,
   NetworkServerSnapshotMessage,
   NetworkGameSnapshot,

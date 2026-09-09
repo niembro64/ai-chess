@@ -24,6 +24,18 @@ from chess_ai.train import Trainer, pick_device
 log = logging.getLogger("chess_ai.train")
 
 
+def _model_state_sha256(state: dict[str, torch.Tensor]) -> str:
+    """Stable digest of tensor names, shapes, dtypes, and exact bytes."""
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        tensor = state[name].detach().cpu().contiguous()
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(str(tensor.dtype).encode("ascii") + b"\0")
+        digest.update(json.dumps(list(tensor.shape)).encode("ascii") + b"\0")
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
 def launch(*, mode: str) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group()
@@ -34,6 +46,7 @@ def launch(*, mode: str) -> None:
         "--init-from", type=Path, help="Copy only weights; fresh replay, optimizer and counters"
     )
     parser.add_argument("--checkpoint-dir", type=Path, default=cfg.CHECKPOINT_DIR_JESTER)
+    parser.add_argument("--ruleset", choices=("uncheck-v1",), default="uncheck-v1")
     parser.add_argument(
         "--opponent", type=Path, action="append", default=[], help="Frozen JESTER checkpoint (repeatable)"
     )
@@ -50,6 +63,7 @@ def launch(*, mode: str) -> None:
     # undo a tablebase opened earlier by another launcher in this interpreter.
     tablebase.open_tablebase(None)
     config = cfg.build_jester_config()
+    config.ruleset = args.ruleset
     if args.workers is not None:
         config.num_workers = args.workers
     if args.sims is not None:
@@ -61,7 +75,7 @@ def launch(*, mode: str) -> None:
     if config.num_workers:
         from chess_ai import mcts
 
-        if not mcts.USE_RUST_MCTS or not hasattr(mcts._rust_mcts.MctsSearch, "pending_leaf_turn"):
+        if not mcts.USE_RUST_MCTS or getattr(mcts._rust_mcts, "ENGINE_PROTOCOL", 0) < 3 or not hasattr(mcts._rust_mcts.MctsSearch, "pending_leaf_turn"):
             raise RuntimeError("Competitive workers require rebuilt Rust MCTS: maturin develop --release")
     directory = args.checkpoint_dir.resolve()
     resume = args.resume
@@ -91,12 +105,39 @@ def launch(*, mode: str) -> None:
         value_head_size=cfg.VALUE_HEAD_SIZE,
         se_reduction=cfg.SE_REDUCTION,
     )
+    provenance = {"initialization": "random", "seed": cfg.SEED}
+    if resume is None and args.init_from:
+        checkpoint = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        source_state = checkpoint["model_state_dict"]
+        model.load_state_dict(source_state)
+        copied_state = model.state_dict()
+        exact_match = set(source_state) == set(copied_state) and all(
+            torch.equal(source_state[name].detach().cpu(), copied_state[name].detach().cpu())
+            for name in source_state
+        )
+        if not exact_match:
+            raise RuntimeError("weight-only initialization did not copy every model tensor exactly")
+        provenance.update(
+            initialization="weights-only",
+            source=str(args.init_from.resolve()),
+            source_sha256=hashlib.sha256(args.init_from.read_bytes()).hexdigest(),
+            source_generation=checkpoint.get(
+                "champion_gen", checkpoint.get("stats", {}).get("generation")
+            ),
+            source_protocol=checkpoint.get("config", {}).get("jester_protocol"),
+            target_protocol=config.jester_protocol,
+            ruleset=config.ruleset,
+            value_convention=config.value_convention,
+            source_model_sha256=_model_state_sha256(source_state),
+            initial_model_sha256=_model_state_sha256(copied_state),
+            exact_model_state_match=True,
+        )
     trainer = Trainer(model, device, config, random.Random(cfg.SEED))
     trainer.stats.curriculum_prob = config.jester_curriculum_prob
     if resume is not None:
         checkpoint = torch.load(resume, map_location="cpu", weights_only=False)
         old = checkpoint.get("config", {})
-        if old.get("jester_protocol") != config.jester_protocol or old.get("ruleset", "normal") != config.ruleset or old.get("jester_gate") != "head_to_head" or old.get("syzygy_path") is not None:
+        if old.get("jester_protocol") != config.jester_protocol or old.get("ruleset", "normal") != config.ruleset or old.get("value_convention") != config.value_convention or old.get("jester_gate") != config.jester_gate or old.get("syzygy_path") is not None:
             raise ValueError(
                 "Different JESTER protocol: use --init-from with a new directory instead of --resume"
             )
@@ -108,18 +149,6 @@ def launch(*, mode: str) -> None:
             trainer.engine.config.curriculum_start_prob = trainer.stats.curriculum_prob
             trainer.engine.config.helper_start_prob = trainer.stats.helper_prob
     else:
-        provenance = {"initialization": "random", "seed": cfg.SEED}
-        if args.init_from:
-            checkpoint = torch.load(args.init_from, map_location="cpu", weights_only=False)
-            model.load_state_dict(checkpoint["model_state_dict"])
-            provenance.update(
-                initialization="weights-only",
-                source=str(args.init_from.resolve()),
-                source_sha256=hashlib.sha256(args.init_from.read_bytes()).hexdigest(),
-                source_generation=checkpoint.get(
-                    "champion_gen", checkpoint.get("stats", {}).get("generation")
-                ),
-            )
         (directory / "initialization.json").write_text(json.dumps(provenance, indent=2) + "\n")
         trainer._save_champion(directory, gen=0)
         trainer.save_checkpoint(directory)

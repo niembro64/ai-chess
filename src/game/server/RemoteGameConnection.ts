@@ -14,7 +14,7 @@ export class RemoteGameConnection implements GameConnection {
 
       // Check for game over
       const gs = state.gameState;
-      if ((gs.status === 'checkmate' || gs.status === 'uncheck') && gs.winner) {
+      if ((gs.status === 'checkmate' || gs.status === 'uncheck' || gs.status === 'resigned') && gs.winner) {
         const winnerId = gs.winner === 'white' ? 1 : 2;
         this.gameOverCallback?.(winnerId as 1 | 2);
       } else if (gs.status === 'stalemate' || gs.status === 'draw') {

@@ -1,10 +1,9 @@
-"""Start a FRESH Jester training run (random init) on this box.
+"""Start a fresh protocol-3 JESTER Uncheck run on this box.
 
-Full Sage architecture + pipeline with MISÈRE incentives — the net
-learns to LOSE. Needs the frozen Sage champion at
-config.JESTER_OPPONENT_CKPT. Checkpoints land in runs_jester/latest.
+Use --init-from to copy every legacy JESTER model tensor while starting
+fresh optimizer, replay, counters, curriculum, and evaluation state.
 
-    python scripts/train_jester_new.py
+    python scripts/train_jester_new.py --ruleset uncheck-v1 --init-from SOURCE.pt
 """
 
 from __future__ import annotations

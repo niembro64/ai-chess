@@ -45,13 +45,13 @@ from .sysmon import SystemMonitor, SystemSnapshot, StaticSystemInfo, probe_stati
 _LOSS_HISTORY_POINTS = 500
 
 CSV_FIELDS = (
-    "time", "step", "gen", "target_gens", "games",
+    "time", "ruleset", "value_convention", "step", "gen", "target_gens", "games",
     # Aggregates (kept in the CSV for back-compat with older plotting scripts
     # that read the pre-split schema). These are computed on the fly from the
     # granular buckets below.
     "white_wins", "black_wins", "draws", "caps", "tb_adjudications",
     # Granular end-state buckets — canonical source of truth.
-    "mate_w", "mate_b", "resign_w", "resign_b", "stalemate", "draw_50",
+    "mate_w", "mate_b", "uncheck_w", "uncheck_b", "resign_w", "resign_b", "stalemate", "draw_50",
     "draw_repetition", "draw_insufficient",
     "tb_w", "tb_b", "tb_d", "cap",
     # Resign truth-check tallies (held-out resignations, known outcomes).
@@ -398,7 +398,7 @@ class DashboardLogger:
         per_diff = result.get("per_diff") or {}
         if per_diff:
             parts = []
-            for name in ("mate-in-1", "endgame", "middlegame", "opening"):
+            for name in ("mate-in-1", "endgame", "middlegame", "opening", "uncheck-tactic"):
                 stats = per_diff.get(name)
                 if not stats:
                     continue
@@ -428,6 +428,8 @@ class DashboardLogger:
             eta = getattr(stats, "eta_seconds", None)
             row = {
                 "time": datetime.now().isoformat(timespec="seconds"),
+                "ruleset": getattr(stats, "ruleset", "normal"),
+                "value_convention": getattr(stats, "value_convention", "normal-reference-v1"),
                 "step": stats.step,
                 "gen": stats.generation,
                 "target_gens": getattr(stats, "target_gens", 0),
@@ -449,6 +451,8 @@ class DashboardLogger:
                 # Granular buckets.
                 "mate_w": getattr(stats, "mate_w", 0),
                 "mate_b": getattr(stats, "mate_b", 0),
+                "uncheck_w": getattr(stats, "uncheck_w", 0),
+                "uncheck_b": getattr(stats, "uncheck_b", 0),
                 "resign_w": getattr(stats, "resign_w", 0),
                 "resign_b": getattr(stats, "resign_b", 0),
                 "resign_truth_games": getattr(stats, "resign_truth_games", 0),
@@ -627,21 +631,21 @@ class DashboardLogger:
         remaining "we have no signal" residue.
         """
         inverted = getattr(stats, "jester_outcomes", {}) if stats is not None else {}
-        if inverted:
+        if getattr(stats, "ruleset", "normal") == "uncheck-v1":
             table = Table(expand=True, box=None, padding=(0, 1))
-            for title in ("opponent / start", "own mate", "delivered", "draw", "cap"):
+            for title in ("opponent / start", "Uncheck win", "Uncheck loss", "draw", "cap"):
                 table.add_column(title, justify="left" if title.startswith("opponent") else "right")
             for name, counts in sorted(inverted.items()):
-                table.add_row(name, *(str(counts.get(k, 0)) for k in ("own_mate", "delivered_mate", "draw", "cap")))
-            note = Text(f"Own mate = learner wins · delivered mate = learner loses\n"
+                table.add_row(name, *(str(counts.get(k, 0)) for k in ("uncheck_win", "uncheck_loss", "draw", "cap")))
+            note = Text(f"Win = learner begins attacked · loss = opponent begins attacked\n"
                         f"First move {getattr(stats, 'tactical_accuracy', 0):.0%} · "
                         f"full conversion {getattr(stats, 'tactical_conversion', 0):.0%} · "
                         f"helper starts {getattr(stats, 'helper_prob', 0):.0%}\n"
                         f"Batch samples: {getattr(stats, 'replay_sample_counts', {})}", style="dim")
             from rich.console import Group
-            return Panel(Group(table, note), title="competitive inverted chess", border_style="blue")
+            return Panel(Group(table, note), title="competitive Uncheck Chess", border_style="blue")
         buckets: dict[str, int] = {
-            "mate_w": 0, "mate_b": 0,
+            "mate_w": 0, "mate_b": 0, "uncheck_w": 0, "uncheck_b": 0,
             "resign_w": 0, "resign_b": 0,
             "stalemate": 0, "draw_50": 0,
             "draw_repetition": 0, "draw_insufficient": 0,
@@ -731,6 +735,10 @@ class DashboardLogger:
         table.add_row(*row("W mate", buckets["mate_w"], "bright_green"))
         table.add_row(*row("B mate", buckets["mate_b"], "bright_red"))
 
+        table.add_row(*section("Uncheck wins"))
+        table.add_row(*row("White", buckets["uncheck_w"], "bright_green"))
+        table.add_row(*row("Black", buckets["uncheck_b"], "bright_red"))
+
         table.add_row(*section("resigned"))
         table.add_row(*row("W wins", buckets["resign_w"], "green"))
         table.add_row(*row("B wins", buckets["resign_b"], "red"))
@@ -764,7 +772,7 @@ class DashboardLogger:
         table.add_row(*row("cap", buckets["cap"], "magenta"))
 
         decisive = (
-            buckets["mate_w"] + buckets["mate_b"]
+            buckets["mate_w"] + buckets["mate_b"] + buckets["uncheck_w"] + buckets["uncheck_b"]
             + buckets["resign_w"] + buckets["resign_b"]
             + buckets["tb_w"] + buckets["tb_b"]
         )
@@ -952,7 +960,7 @@ class DashboardLogger:
         """
         per_diff = progress.get("per_diff", {}) or {}
         out: list[Text] = []
-        for name in ("mate-in-1", "trivial", "clear", "balanced"):
+        for name in ("mate-in-1", "trivial", "clear", "balanced", "uncheck-tactic"):
             stats = per_diff.get(name)
             if not stats:
                 continue

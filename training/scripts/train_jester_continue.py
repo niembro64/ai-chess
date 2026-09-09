@@ -1,10 +1,8 @@
-"""Start a RESUMED Jester training run on this box.
+"""Resume a protocol-3 JESTER Uncheck run on this box.
 
-Full Sage architecture + pipeline with MISÈRE incentives — the net
-learns to LOSE. Needs the frozen Sage champion at
-config.JESTER_OPPONENT_CKPT. Checkpoints land in runs_jester/latest.
+Resume is accepted only when ruleset, value convention, and protocol match.
 
-    python scripts/train_jester_continue.py
+    python scripts/train_jester_continue.py --ruleset uncheck-v1 --resume RUN/latest.pt
 """
 
 from __future__ import annotations

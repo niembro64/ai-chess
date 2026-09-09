@@ -412,7 +412,7 @@ def build_toy_config() -> TrainConfig:
 
 def build_jester_config() -> TrainConfig:
     cfg = build_config()
-    cfg.num_workers = min(6, max(1, (os.cpu_count() or 2) - 1))
+    cfg.num_workers = min(3, max(1, (os.cpu_count() or 2) - 1))
     cfg.games_per_worker = 32
     # With three CPU workers on gpus, the inherited 12 ms batching wait
     # idles the GPU between small historical/current-network requests.
@@ -430,19 +430,21 @@ def build_jester_config() -> TrainConfig:
     cfg.target_gens = 40_000
     cfg.value_draw_weight = 1.0
     cfg.value_ply_decay = 1.0
+    cfg.aux_material_weight = 0.0
     cfg.resign_threshold = -2.0
     cfg.endgame_start_prob = 0.0
     cfg.random_start_prob = 0.1
     cfg.syzygy_path = None
     cfg.jester_mode = True
     cfg.ruleset = "uncheck-v1"
+    cfg.value_convention = "uncheck-reference-v1"
     cfg.jester_protocol = 3
     cfg.jester_selfplay_prob = 0.75
     cfg.jester_opponent_checkpoint = ""
-    # Protocol 3 starts with standard/random Uncheck positions. The legacy
-    # selfmate curriculum and cooperative helper encode the removed rules.
-    cfg.jester_curriculum_prob = 0.0
-    cfg.jester_curriculum_floor = 0.0
+    # Verified Uncheck proofs provide dense early terminal signal. Legacy
+    # selfmate and cooperative-helper positions are never mixed into v1.
+    cfg.jester_curriculum_prob = 0.25
+    cfg.jester_curriculum_floor = 0.25
     cfg.jester_helper_prob = 0.0
     cfg.jester_bridge_prob = 0.0
     cfg.jester_max_examples_per_game = 32
@@ -455,7 +457,7 @@ def build_jester_config() -> TrainConfig:
     cfg.jester_gate = "head_to_head"
     cfg.eval_every_gens = 2_000
     cfg.eval_mcts_sims = 128
-    cfg.eval_move_cap = 100
+    cfg.eval_move_cap = 200
     cfg.eval_temperature = 0.0
     cfg.eval_blunder_prob = 0.0
     cfg.eval_score_threshold = 0.55

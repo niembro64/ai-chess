@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue';
 import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
-import { getLegalMovesForSquare } from '@/game/chess/ChessEngine';
+import { getLegalMovesForSquare, isInCheck } from '@/game/chess/ChessEngine';
 import PieceIcon from './PieceIcon.vue';
 import { pieceTint } from '@/game/ai/models';
 
@@ -77,8 +77,13 @@ function isLastMoveSquare(rank: number, file: number): boolean {
 }
 
 function isKingInCheck(rank: number, file: number): boolean {
-  if (props.gameState.status !== 'check' && props.gameState.status !== 'checkmate' && props.gameState.status !== 'uncheck') return false;
   const piece = props.gameState.board[rank][file];
+  if ((props.gameState.ruleset ?? 'normal') === 'uncheck-v1' && piece?.type === 'king') {
+    if (props.gameState.status === 'uncheck') return piece.color === props.gameState.currentTurn;
+    const rescueKing = piece.color !== props.gameState.currentTurn && isInCheck(props.gameState.board, piece.color);
+    if (rescueKing) return true;
+  }
+  if (props.gameState.status !== 'check' && props.gameState.status !== 'checkmate' && props.gameState.status !== 'uncheck') return false;
   return piece?.type === 'king' && piece.color === props.gameState.currentTurn;
 }
 

@@ -4,7 +4,7 @@ import type { PlayerId, Move, ChessGameState, PieceColor, Ruleset } from '@/type
 import { playerIdToColor } from '@/types/chess';
 import type { NetworkGameSnapshot, LobbyPlayer, NetworkRole } from '@/types/network';
 import type { GameConnection } from '@/types/game';
-import { applyMove, createInitialGameState, posToAlgebraic } from '@/game/chess/ChessEngine';
+import { applyMove, createInitialGameState, getLegalMoves, isCaptureMove, isInCheck, posToAlgebraic } from '@/game/chess/ChessEngine';
 import { networkManager } from '@/game/network/NetworkManager';
 import { ChessServer } from '@/game/server/ChessServer';
 import { LocalGameConnection } from '@/game/server/LocalGameConnection';
@@ -217,9 +217,20 @@ const botColor = computed<PieceColor | null>(() =>
 // Computed
 const localColor = computed<PieceColor>(() => playerIdToColor(localPlayerId.value));
 const isMyTurn = computed(() => gameState.value.currentTurn === localColor.value);
+const captureRequired = computed(() => {
+  if ((gameState.value.ruleset ?? 'normal') !== 'uncheck-v1') return false;
+  const moves = getLegalMoves(gameState.value);
+  return moves.length > 0 && moves.every(move => isCaptureMove(gameState.value, move));
+});
+const rescueRequired = computed(() => {
+  if ((gameState.value.ruleset ?? 'normal') !== 'uncheck-v1') return false;
+  const opponent = gameState.value.currentTurn === 'white' ? 'black' : 'white';
+  return isInCheck(gameState.value.board, opponent);
+});
 const isGameOver = computed(() =>
   gameState.value.status === 'checkmate' ||
   gameState.value.status === 'uncheck' ||
+  gameState.value.status === 'resigned' ||
   gameState.value.status === 'stalemate' ||
   gameState.value.status === 'draw'
 );
@@ -230,6 +241,9 @@ const statusText = computed(() => {
     case 'waiting':
       return 'Waiting to start...';
     case 'active':
+      if (captureRequired.value && rescueRequired.value) return 'Capture required — remove every attack on the opposing king';
+      if (captureRequired.value) return 'Capture required';
+      if (rescueRequired.value) return 'Rescue turn — remove every attack on the opposing king';
       if (playingVsBot.value && !isMyTurn.value) {
         return aiThinking.value ? 'AI is thinking' : "AI's turn";
       }
@@ -246,6 +260,8 @@ const statusText = computed(() => {
       return gs.winner === localColor.value
         ? 'Uncheck - Your king is attacked. You win!'
         : `Uncheck - ${opponentName.value}'s king is attacked. ${opponentName.value} wins`;
+    case 'resigned':
+      return gs.winner === localColor.value ? 'Opponent resigned - You win!' : 'You resigned';
     case 'stalemate':
       return 'Stalemate - Draw';
     case 'draw':
@@ -281,7 +297,7 @@ const opponentName = computed(() => {
 });
 const localName = computed(() => 'You');
 // Which VARIANT this game is being played under. Inverted means the
-// checkmated king wins, so both sides steer toward their own mate; the
+// Uncheck selects the turn-boundary attacked-king objective; the
 // lobby row picks it, and it binds the human as much as the bot.
 const uncheckVariant = computed(() =>
   playingVsBot.value && botModelId.value !== null

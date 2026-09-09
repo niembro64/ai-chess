@@ -176,6 +176,7 @@ fn pseudo_legal_moves(
     white_to_move: bool,
     castling: &CastlingRights,
     en_passant: Option<(u8, u8)>,
+    uncheck: bool,
 ) -> Vec<Move> {
     let mut moves = Vec::with_capacity(64);
 
@@ -219,7 +220,7 @@ fn pseudo_legal_moves(
                         let cf = file as i32 + df;
                         if cr < 0 || cr >= 8 || cf < 0 || cf >= 8 { continue; }
                         let target = board[cr as usize][cf as usize];
-                        if target != 0 && (target > 0) != white_to_move {
+                        if target != 0 && (target > 0) != white_to_move && !(uncheck && target.abs() == KING) {
                             if cr == promo_rank {
                                 for &promo in &[QUEEN, ROOK, BISHOP, KNIGHT] {
                                     moves.push(Move { from_r, from_f, to_r: cr as u8, to_f: cf as u8, promotion: promo });
@@ -230,7 +231,10 @@ fn pseudo_legal_moves(
                         }
                         if let Some((er, ef)) = en_passant {
                             if cr as u8 == er && cf as u8 == ef {
-                                moves.push(Move { from_r, from_f, to_r: cr as u8, to_f: cf as u8, promotion: 0 });
+                                let captured = board[rank][cf as usize];
+                                if captured.abs() == PAWN && (captured > 0) != white_to_move {
+                                    moves.push(Move { from_r, from_f, to_r: cr as u8, to_f: cf as u8, promotion: 0 });
+                                }
                             }
                         }
                     }
@@ -242,7 +246,7 @@ fn pseudo_legal_moves(
                         let tf = file as i32 + df;
                         if tr < 0 || tr >= 8 || tf < 0 || tf >= 8 { continue; }
                         let target = board[tr as usize][tf as usize];
-                        if target == 0 || (target > 0) != white_to_move {
+                        if target == 0 || ((target > 0) != white_to_move && !(uncheck && target.abs() == KING)) {
                             moves.push(Move { from_r, from_f, to_r: tr as u8, to_f: tf as u8, promotion: 0 });
                         }
                     }
@@ -263,7 +267,7 @@ fn pseudo_legal_moves(
                             if target == 0 {
                                 moves.push(Move { from_r, from_f, to_r: tr as u8, to_f: tf as u8, promotion: 0 });
                             } else {
-                                if (target > 0) != white_to_move {
+                                if (target > 0) != white_to_move && !(uncheck && target.abs() == KING) {
                                     moves.push(Move { from_r, from_f, to_r: tr as u8, to_f: tf as u8, promotion: 0 });
                                 }
                                 break;
@@ -282,7 +286,7 @@ fn pseudo_legal_moves(
                             let tf = file as i32 + df;
                             if tr < 0 || tr >= 8 || tf < 0 || tf >= 8 { continue; }
                             let target = board[tr as usize][tf as usize];
-                            if target == 0 || (target > 0) != white_to_move {
+                            if target == 0 || ((target > 0) != white_to_move && !(uncheck && target.abs() == KING)) {
                                 moves.push(Move { from_r, from_f, to_r: tr as u8, to_f: tf as u8, promotion: 0 });
                             }
                         }
@@ -293,18 +297,18 @@ fn pseudo_legal_moves(
                         if castling.wk
                             && board[7][5] == 0 && board[7][6] == 0
                             && board[7][7] == ROOK
-                            && !is_pos_attacked_by(board, 7, 4, false)
+                            && (uncheck || (!is_pos_attacked_by(board, 7, 4, false)
                             && !is_pos_attacked_by(board, 7, 5, false)
-                            && !is_pos_attacked_by(board, 7, 6, false)
+                            && !is_pos_attacked_by(board, 7, 6, false)))
                         {
                             moves.push(Move { from_r: 7, from_f: 4, to_r: 7, to_f: 6, promotion: 0 });
                         }
                         if castling.wq
                             && board[7][3] == 0 && board[7][2] == 0 && board[7][1] == 0
                             && board[7][0] == ROOK
-                            && !is_pos_attacked_by(board, 7, 4, false)
+                            && (uncheck || (!is_pos_attacked_by(board, 7, 4, false)
                             && !is_pos_attacked_by(board, 7, 3, false)
-                            && !is_pos_attacked_by(board, 7, 2, false)
+                            && !is_pos_attacked_by(board, 7, 2, false)))
                         {
                             moves.push(Move { from_r: 7, from_f: 4, to_r: 7, to_f: 2, promotion: 0 });
                         }
@@ -313,18 +317,18 @@ fn pseudo_legal_moves(
                         if castling.bk
                             && board[0][5] == 0 && board[0][6] == 0
                             && board[0][7] == -ROOK
-                            && !is_pos_attacked_by(board, 0, 4, true)
+                            && (uncheck || (!is_pos_attacked_by(board, 0, 4, true)
                             && !is_pos_attacked_by(board, 0, 5, true)
-                            && !is_pos_attacked_by(board, 0, 6, true)
+                            && !is_pos_attacked_by(board, 0, 6, true)))
                         {
                             moves.push(Move { from_r: 0, from_f: 4, to_r: 0, to_f: 6, promotion: 0 });
                         }
                         if castling.bq
                             && board[0][3] == 0 && board[0][2] == 0 && board[0][1] == 0
                             && board[0][0] == -ROOK
-                            && !is_pos_attacked_by(board, 0, 4, true)
+                            && (uncheck || (!is_pos_attacked_by(board, 0, 4, true)
                             && !is_pos_attacked_by(board, 0, 3, true)
-                            && !is_pos_attacked_by(board, 0, 2, true)
+                            && !is_pos_attacked_by(board, 0, 2, true)))
                         {
                             moves.push(Move { from_r: 0, from_f: 4, to_r: 0, to_f: 2, promotion: 0 });
                         }
@@ -408,8 +412,17 @@ pub(crate) fn legal_moves_impl(
     white_to_move: bool,
     castling: &mut CastlingRights,
     en_passant: Option<(u8, u8)>,
+    uncheck: bool,
 ) -> Vec<Move> {
-    let pseudo = pseudo_legal_moves(board, white_to_move, castling, en_passant);
+    if uncheck && is_in_check(board, white_to_move) { return Vec::new(); }
+    let pseudo = pseudo_legal_moves(board, white_to_move, castling, en_passant, uncheck);
+    if uncheck {
+        let captures: Vec<Move> = pseudo.iter().copied().filter(|m| {
+            board[m.to_r as usize][m.to_f as usize] != 0 ||
+                (board[m.from_r as usize][m.from_f as usize].abs() == PAWN && m.from_f != m.to_f)
+        }).collect();
+        return if captures.is_empty() { pseudo } else { captures };
+    }
 
     let saved_castling = *castling;
     let (king_r0, king_f0) = find_king(board, white_to_move);
@@ -422,7 +435,12 @@ pub(crate) fn legal_moves_impl(
 
         let is_pawn = sq_from != 0 && sq_from.abs() == PAWN;
         let is_king_move = sq_from != 0 && sq_from.abs() == KING;
-        let is_en_passant = is_pawn && m.from_f != m.to_f && sq_to == 0;
+        let ep_piece = board[m.from_r as usize][m.to_f as usize];
+        let is_en_passant = is_pawn
+            && m.from_f != m.to_f
+            && sq_to == 0
+            && ep_piece.abs() == PAWN
+            && (ep_piece > 0) != white_to_move;
         let is_castle = is_king_move && (m.to_f as i32 - m.from_f as i32).abs() == 2;
 
         let sq_ep = if is_en_passant {
@@ -550,19 +568,21 @@ pub(crate) fn pack_en_passant(py_ep: &Bound<'_, PyAny>) -> PyResult<Option<(u8, 
 /// Return a list of (from_rank, from_file, to_rank, to_file, promotion_str_or_None)
 /// tuples. Ordering matches the Python engine byte-for-byte.
 #[pyfunction]
+#[pyo3(signature = (board_list, current_turn, castling, en_passant, ruleset=None))]
 fn get_legal_moves(
     py: Python<'_>,
     board_list: Bound<'_, PyList>,
     current_turn: &str,
     castling: Bound<'_, PyDict>,
     en_passant: Bound<'_, PyAny>,
+    ruleset: Option<&str>,
 ) -> PyResult<Py<PyList>> {
     let mut board = pack_board(&board_list)?;
     let mut cr = pack_castling(&castling)?;
     let ep = pack_en_passant(&en_passant)?;
     let white_to_move = current_turn == "white";
 
-    let moves = legal_moves_impl(&mut board, white_to_move, &mut cr, ep);
+    let moves = legal_moves_impl(&mut board, white_to_move, &mut cr, ep, ruleset == Some("uncheck-v1"));
 
     let out = PyList::empty_bound(py);
     for m in &moves {
@@ -607,6 +627,7 @@ pub(crate) fn apply_move_full_core(
     hmc: i32,
     fmn: i32,
     m: &Move,
+    uncheck: bool,
 ) -> (
     Board,
     CastlingRights,
@@ -642,9 +663,14 @@ pub(crate) fn apply_move_full_core(
     // scratch copy and combine with in-check detection.
     let mut test_board = board;
     let mut test_cr = castling;
-    let next_legal = legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep);
     let in_check = is_in_check(&board, new_white_to_move);
-    let status: &'static str = if next_legal.is_empty() {
+    let next_legal = legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep, uncheck);
+    let status: &'static str = if uncheck {
+        if in_check { "uncheck" }
+        else if new_hmc >= 100 { "draw" }
+        else if next_legal.is_empty() { "stalemate" }
+        else { "active" }
+    } else if next_legal.is_empty() {
         if in_check { "checkmate" } else { "stalemate" }
     } else if in_check {
         "check"
@@ -670,7 +696,7 @@ pub(crate) fn apply_move_full_core(
 #[pyo3(signature = (
     board_list, current_turn, castling, en_passant,
     half_move_clock, full_move_number,
-    from_r, from_f, to_r, to_f, promotion=None,
+    from_r, from_f, to_r, to_f, promotion=None, ruleset=None,
 ))]
 fn apply_move_full(
     py: Python<'_>,
@@ -685,6 +711,7 @@ fn apply_move_full(
     to_r: i32,
     to_f: i32,
     promotion: Option<String>,
+    ruleset: Option<&str>,
 ) -> PyResult<Py<PyDict>> {
     let board = pack_board(&board_list)?;
     let cr = pack_castling(&castling)?;
@@ -710,7 +737,7 @@ fn apply_move_full(
     }
 
     let (board, cr, new_ep, new_hmc, new_fmn, new_white_to_move, status) =
-        apply_move_full_core(board, white_to_move, cr, ep, half_move_clock, full_move_number, &m);
+        apply_move_full_core(board, white_to_move, cr, ep, half_move_clock, full_move_number, &m, ruleset == Some("uncheck-v1"));
 
     // Pack new state. Board goes out as a flat list of 64 signed ints
     // — the Python wrapper maps each int back to its cached Piece via a
@@ -752,6 +779,13 @@ fn apply_move_full(
     result.set_item("halfMoveClock", new_hmc)?;
     result.set_item("fullMoveNumber", new_fmn)?;
     result.set_item("status", status)?;
+    if status == "uncheck" {
+        result.set_item("winner", if new_white_to_move { "white" } else { "black" })?;
+    } else if status == "checkmate" {
+        result.set_item("winner", if new_white_to_move { "black" } else { "white" })?;
+    } else {
+        result.set_item("winner", py.None())?;
+    }
 
     Ok(result.unbind())
 }
@@ -787,6 +821,7 @@ fn is_square_attacked_by_py(
 /// and the TS fixture) but a dedicated test covers the combined path.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (board_list, current_turn, castling, en_passant, half_move_clock, full_move_number, ruleset=None))]
 fn generate_children(
     py: Python<'_>,
     board_list: Bound<'_, PyList>,
@@ -795,13 +830,15 @@ fn generate_children(
     en_passant: Bound<'_, PyAny>,
     half_move_clock: i32,
     full_move_number: i32,
+    ruleset: Option<&str>,
 ) -> PyResult<Py<PyList>> {
     let mut board = pack_board(&board_list)?;
     let mut cr = pack_castling(&castling)?;
     let ep = pack_en_passant(&en_passant)?;
     let white_to_move = current_turn == "white";
 
-    let legal_moves = legal_moves_impl(&mut board, white_to_move, &mut cr, ep);
+    let uncheck = ruleset == Some("uncheck-v1");
+    let legal_moves = legal_moves_impl(&mut board, white_to_move, &mut cr, ep, uncheck);
 
     let new_white_to_move = !white_to_move;
     let new_fmn = if !white_to_move {
@@ -840,9 +877,14 @@ fn generate_children(
         let mut test_board = child_board;
         let mut test_cr = child_cr;
         let next_legal =
-            legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep);
+            legal_moves_impl(&mut test_board, new_white_to_move, &mut test_cr, new_ep, uncheck);
         let in_check = is_in_check(&child_board, new_white_to_move);
-        let status: &str = if next_legal.is_empty() {
+        let status: &str = if uncheck {
+            if in_check { "uncheck" }
+            else if new_hmc >= 100 { "draw" }
+            else if next_legal.is_empty() { "stalemate" }
+            else { "active" }
+        } else if next_legal.is_empty() {
             if in_check { "checkmate" } else { "stalemate" }
         } else if in_check {
             "check"
@@ -900,6 +942,13 @@ fn generate_children(
         child.set_item("halfMoveClock", new_hmc)?;
         child.set_item("fullMoveNumber", new_fmn)?;
         child.set_item("status", status)?;
+        if status == "uncheck" {
+            child.set_item("winner", if new_white_to_move { "white" } else { "black" })?;
+        } else if status == "checkmate" {
+            child.set_item("winner", if new_white_to_move { "black" } else { "white" })?;
+        } else {
+            child.set_item("winner", py.None())?;
+        }
 
         out.append(child)?;
     }
@@ -1052,6 +1101,7 @@ fn move_to_index_fast(
 
 #[pymodule]
 fn chess_ai_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("ENGINE_PROTOCOL", 3)?;
     m.add_function(wrap_pyfunction!(get_legal_moves, m)?)?;
     m.add_function(wrap_pyfunction!(is_in_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(is_square_attacked_by_py, m)?)?;

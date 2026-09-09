@@ -29,7 +29,7 @@ export type CastlingRights = {
   blackQueenside: boolean;
 };
 
-export type GameStatus = 'waiting' | 'active' | 'check' | 'checkmate' | 'uncheck' | 'stalemate' | 'draw';
+export type GameStatus = 'waiting' | 'active' | 'check' | 'checkmate' | 'uncheck' | 'resigned' | 'stalemate' | 'draw';
 
 // Why a given status === 'draw' happened. Kept separate from GameStatus so
 // the status union (which the Python engine mirrors and the parity fixtures

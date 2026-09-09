@@ -264,13 +264,13 @@ class ReplayBuffer:
 # --- Starting position helpers (mirrors Trainer.ts) ---
 
 
-def _normal_start() -> ChessGameState:
-    s = create_initial_game_state()
+def _normal_start(ruleset: str = "normal") -> ChessGameState:
+    s = create_initial_game_state(ruleset)
     s.status = "active"
     return s
 
 
-def _random_start(rng: random.Random) -> ChessGameState:
+def _random_start(rng: random.Random, ruleset: str = "normal") -> ChessGameState:
     # 40% opening, 30% midgame, 30% late game — matches Trainer.ts.
     roll = rng.random()
     if roll < 0.4:
@@ -280,14 +280,14 @@ def _random_start(rng: random.Random) -> ChessGameState:
     else:
         num_random = rng.randint(30, 50)
 
-    state = _normal_start()
+    state = _normal_start(ruleset)
     for _ in range(num_random):
         legal = get_legal_moves(state)
         if not legal:
             break
         state = apply_move(state, rng.choice(legal))
-        if state.status in ("checkmate", "stalemate", "draw"):
-            return _normal_start()
+        if state.status in ("checkmate", "uncheck", "stalemate", "draw"):
+            return _normal_start(ruleset)
     return state
 
 
@@ -380,6 +380,7 @@ def _make_game_slot(
     rng: random.Random,
     random_start_prob: float = 0.3,
     endgame_start_prob: float = 0.0,
+    ruleset: str = "normal",
 ) -> GameSlot:
     """Create a fresh game slot — single roll over three buckets.
 
@@ -408,10 +409,10 @@ def _make_game_slot(
         move_cap = rng.randint(80, 200)
         return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="endgame")
     if roll < endgame_start_prob + random_start_prob:
-        state = _random_start(rng)
+        state = _random_start(rng, ruleset)
         move_cap = rng.randint(5, 30)
         return GameSlot(state=state, move_cap=move_cap, is_standard_start=False, origin="random")
-    state = _normal_start()
+    state = _normal_start(ruleset)
     # Reverted to (200, 400) after the "longer caps" experiment backfired:
     # lengthening to (400, 600) dropped the `cap` bucket but flooded the
     # `50-move` bucket (from 12% → 54%) and collapsed the value head. With
@@ -671,14 +672,19 @@ class SelfPlayEngine:
         roll = self.rng.random() if cfg.invert_agent_selection else 1.0
         helper = False
         if cfg.invert_agent_selection and roll < cfg.curriculum_start_prob:
-            from .inverted import curriculum_start
+            if cfg.ruleset == "uncheck-v1":
+                from .uncheck import curriculum_start
+            else:
+                # Archived protocol-2 experiments and their tests retain the
+                # legacy self-mate curriculum under the normal engine.
+                from .inverted import curriculum_start
             state = curriculum_start(self.rng)
             slot = GameSlot(state=state, move_cap=40, origin="curriculum")
         elif cfg.invert_agent_selection and self.bridge_pool and roll < cfg.curriculum_start_prob + cfg.bridge_start_prob:
             state = self.rng.choice(tuple(self.bridge_pool.values())).copy()
             slot = GameSlot(state=state, move_cap=80, origin="bridge")
         else:
-            slot = _make_game_slot(self.rng, cfg.random_start_prob, cfg.endgame_start_prob)
+            slot = _make_game_slot(self.rng, cfg.random_start_prob, cfg.endgame_start_prob, cfg.ruleset)
             if cfg.invert_agent_selection:
                 slot.move_cap = cfg.standard_move_cap
                 helper = roll >= 1.0 - cfg.helper_start_prob
@@ -858,7 +864,13 @@ class SelfPlayEngine:
             # status (checkmate / stalemate / 50-move draw) — those are
             # already game-ending and dispatching on early_termination
             # would just shadow them.
-            if slot.state.status not in ("checkmate", "uncheck", "stalemate", "draw"):
+            check_history = slot.state.status not in ("checkmate", "uncheck", "stalemate", "draw")
+            # Uncheck's priority is victory, repetition, then the 100-halfmove
+            # draw. The stateless engine can only identify the clock draw, so
+            # allow an actual third occurrence to replace that draw reason.
+            if slot.state.ruleset == "uncheck-v1" and slot.state.status == "draw":
+                check_history = True
+            if check_history:
                 key = _position_key(slot.state)
                 slot.position_history[key] = slot.position_history.get(key, 0) + 1
                 if slot.position_history[key] >= 3:
@@ -1089,8 +1101,10 @@ class SelfPlayEngine:
             outcome=outcome,
             matchup=slot.matchup,
             variant_outcome=(
-                ("own_mate" if slot.state.currentTurn == slot.tracked_color else "delivered_mate")
-                if self.config.invert_agent_selection and status in ("checkmate", "uncheck")
+                ("uncheck_win" if slot.state.currentTurn == slot.tracked_color else "uncheck_loss")
+                if self.config.invert_agent_selection and status == "uncheck"
+                else ("own_mate" if slot.state.currentTurn == slot.tracked_color else "delivered_mate")
+                if self.config.invert_agent_selection and status == "checkmate"
                 else ("cap" if outcome == "cap" else "draw") if self.config.invert_agent_selection else None
             ),
             outcome_label=label,
