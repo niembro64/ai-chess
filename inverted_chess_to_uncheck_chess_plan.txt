@@ -1,6 +1,11 @@
 INVERTED CHESS TO UNCHECK CHESS: RULES AND IMPLEMENTATION PLAN
 Prepared: 2026-09-09
 
+IMPLEMENTATION STATUS (updated 2026-09-09): the rules, frontend, training,
+validation, source pushes, and GPU cutover described below are complete. The
+original planning-round scope and phase-zero receipt are retained as historical
+evidence. See section 13 for the executed cutover and current run.
+
 PURPOSE AND CURRENT SCOPE
 
 Replace the old inverted objective (get your own king checkmated) with
@@ -741,15 +746,16 @@ requirements, not capabilities of the currently running code.
 
 11. COMPLETION CHECKLIST FOR THE FUTURE MIGRATION
 
-  [ ] Exact rules implemented identically in all four engine/search paths.
-  [ ] Normal chess and the four model/asked-goal selections preserved.
-  [ ] SAGE bytes unchanged; phase-zero JESTER bytes unchanged during migration.
-  [ ] Capture-required moves, king exposure, and true winners work in both UIs.
-  [ ] Legacy saves, network peers, and model metadata cannot mix rulesets.
-  [ ] Cross-language fixtures, sign tests, frontend checks, and device play pass.
-  [ ] Old GPU run and final checkpoint preserved; new run uses all current
+  [x] Exact rules implemented identically in all four engine/search paths.
+  [x] Normal chess and the four model/asked-goal selections preserved.
+  [x] SAGE bytes unchanged; phase-zero JESTER bytes unchanged during migration.
+  [x] Capture-required moves, king exposure, and true winners work in both UIs.
+  [x] Legacy saves, network peers, and model metadata cannot mix rulesets.
+  [ ] Cross-language fixtures, sign tests, and frontend checks pass. A physical
+        device install/play pass remains part of the later store build.
+  [x] Old GPU run and final checkpoint preserved; new run uses all current
         JESTER weights with fresh training state and the new rule protocol.
-  [ ] New optimizer steps and changed finite weights verified, with correct
+  [x] New optimizer steps and changed finite weights verified, with correct
         Uncheck game results and no ordinary-chess adjudication leakage.
   [ ] Future website/mobile publication independently verified when performed.
 
@@ -824,3 +830,87 @@ These local backups are intentionally outside the tracked release assets.
 The model import and document were prepared in separate Git worktrees and
 merged into local main. Other existing local edits are retained. No remote
 Git push was requested or performed in this round.
+
+
+13. IMPLEMENTATION AND GPU CUTOVER RECEIPT
+
+Executed on 2026-09-09 after explicit authorization.
+
+Pushed source:
+  Tested training implementation used by the GPU run:
+    895da50603290505110bdcf9aa07a72642604162
+  Mobile repository main:
+    d25c7eeb003d7d344376287dfddba11a3c2a0055
+  The mobile iOS and Android identifiers remain
+    com.ericniemeyer.worstchessmove
+  so version 1.1 updates the existing store product. Product name, slug,
+  scheme, UI copy, support/privacy pages, and store text use UnCheck Chess.
+
+Final local validation:
+  - Web Uncheck fixture runner: 22 passed.
+  - Web production build passed.
+  - Training Python suite after the evaluation correction: 192 passed.
+  - Rust release engine rebuilt at protocol 3; cargo test passed.
+  - Mobile TypeScript passed; Vitest: 13 files and 320 tests passed.
+  - Expo Doctor: 20/20 checks passed.
+  - Mobile release validator passed both unchanged SAGE/JESTER hashes and all
+    text/image structural checks.
+
+Preserved final legacy GPU run:
+  Legacy run kept in place:
+    /home/gpus/ai-chess/training/runs_jester/hybrid
+  Final saved generation: 6839
+  Final source checkpoint SHA-256:
+    db6f5b739d335a07708eda0b570d535836bd8b7621e48aff40992d9aefac00dd
+  Archive with checkpoint, stats, evals, diagnostics, requirements, and hashes:
+    /home/gpus/ai-chess/training/runs_jester/legacy-archives/inverted-hybrid-gen6839-20260909T190041-0400
+
+Isolated GPU source and environment:
+  Checkout:
+    /home/gpus/ai-chess-uncheck-c25c43e
+  Checked-out training commit:
+    895da50603290505110bdcf9aa07a72642604162
+  Environment:
+    /home/gpus/ai-chess-uncheck-c25c43e/training/.venv
+  Verified stack: PyTorch 2.11.0+cu130, CUDA 13.0 available, Rust protocol 3.
+  Remote suite after the final evaluator change: 176 passed, 16 skipped.
+
+Final isolated smoke proof:
+  /home/gpus/ai-chess-uncheck-c25c43e/training/runs_jester/uncheck-smoke-final-20260909T193524-0400
+  Exact source tensor equality: true.
+  Source protocol 2 -> target protocol 3; ruleset uncheck-v1; value convention
+  uncheck-reference-v1. Fresh generation/replay/optimizer state was used.
+  At graceful stop: generation 20, 221 actual Uncheck games, 139 White wins,
+  82 Black wins, replay size 2489, zero caps, zero tablebase adjudications,
+  helper probability zero, and 57 finite loss rows. All 210 model tensors
+  changed and all remained finite.
+
+Production run:
+  tmux session: uncheck
+  run directory:
+    /home/gpus/ai-chess/training/runs_jester/uncheck-v1-20260909T233839Z
+  stable pointer:
+    /home/gpus/ai-chess/training/runs_jester/uncheck-current
+  run receipt:
+    /home/gpus/ai-chess/training/runs_jester/uncheck-v1-20260909T233839Z/run-receipt.txt
+  Initial verification observed generation 14, 198 actual Uncheck games,
+  replay size 2063, finite losses, zero caps/tablebase use, and all 210 tensors
+  changed while finite. The production process, three self-play workers, GPU
+  inference worker, and tmux session remained live after verification.
+
+Attach from the GPU host:
+  tmux attach -t uncheck
+
+Resume this exact run after a graceful stop:
+  cd /home/gpus/ai-chess-uncheck-c25c43e/training
+  OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CHESS_AI_NO_COMPILE=1 \
+  .venv/bin/python scripts/train_jester_continue.py \
+    --ruleset uncheck-v1 \
+    --resume /home/gpus/ai-chess/training/runs_jester/uncheck-v1-20260909T233839Z/latest.pt \
+    --checkpoint-dir /home/gpus/ai-chess/training/runs_jester/uncheck-v1-20260909T233839Z \
+    --workers 3 --sims 256
+
+The phase-zero frontend SAGE and JESTER weights remain frozen for this rules
+release. Production training does not auto-export future checkpoints into the
+web or mobile apps. No website deployment, TestFlight upload, App Store update,
+or Google Play publication was performed as part of this source/training task.
