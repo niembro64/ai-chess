@@ -205,6 +205,58 @@ def model_digest(model):
     return h.digest()
 
 
+def append_csv_row(path: Path, row: dict) -> None:
+    """Append a row while extending an existing CSV schema when necessary."""
+    columns: list[str] = []
+    existing: list[dict] = []
+    if path.exists():
+        with path.open(newline="") as file:
+            reader = csv.DictReader(file)
+            columns = list(reader.fieldnames or ())
+            existing = list(reader)
+    added = [key for key in row if key not in columns]
+    if added:
+        columns.extend(added)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with temporary.open("w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(existing)
+        temporary.replace(path)
+    elif not columns:
+        columns = list(row)
+    new_file = not path.exists()
+    with path.open("a", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=columns, extrasaction="ignore")
+        if new_file:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def append_match_records(path: Path, gen: int, suite: str, results) -> None:
+    """Retain per-position outcomes for fixed and rotating Uncheck suites."""
+    with path.open("a") as file:
+        for match, outcome in results:
+            file.write(json.dumps(dict(
+                gen=gen,
+                suite=suite,
+                pair=match.pair,
+                candidate_color=match.color,
+                outcome=outcome,
+                actual_winner=match.state.winner,
+                plies=match.plies,
+                start_type=match.difficulty,
+                start=match.start,
+                moves=match.moves,
+                final_status=match.state.status,
+                rescue_attempts=match.rescue_attempts,
+                rescue_successes=match.rescue_successes,
+                immediate_check_blunders=match.immediate_check_blunders,
+                candidate_exposure_attempts=match.candidate_exposure_attempts,
+                candidate_exposure_conversions=match.candidate_exposure_conversions,
+            )) + "\n")
+
+
 @dataclass(frozen=True)
 class UncheckEvalStart:
     name: str
@@ -212,22 +264,41 @@ class UncheckEvalStart:
     difficulty: str
 
 
-def build_uncheck_eval_positions(count: int = 8, seed: int = 0x554E4348) -> list[UncheckEvalStart]:
-    """Build fixed, reachable Uncheck openings with no normal-chess oracle.
+def build_uncheck_eval_positions(
+    count: int = 32,
+    seed: int = 0x554E4348,
+    *,
+    include_standard: bool = True,
+    name_prefix: str = "heldout-opening",
+    excluded_keys: set[bytes] | None = None,
+) -> list[UncheckEvalStart]:
+    """Build reachable, informative Uncheck openings with no chess oracle.
 
-    Each opening is produced only by Uncheck-permitted moves and remains active
-    at the evaluation root. The fixed seed makes generation-to-generation
-    comparisons use the same positions.
+    Each opening is produced only by Uncheck-permitted moves, remains active at
+    the evaluation root, has at least two legal choices and at least one move
+    that keeps the game active. The first quarter also contains an immediate
+    opponent-win trap plus a continuing alternative. This rejects the forced
+    one-move losses that capped the original 18-game suite at 14 wins.
+
+    The default seed is the fixed promotion suite. Callers can supply a
+    generation-derived seed, omit the standard start and exclude the fixed
+    keys to construct a separate rotating holdout suite.
     """
+    if count < 0:
+        raise ValueError("count must be non-negative")
     initial = create_initial_game_state("uncheck-v1")
     initial.status = "active"
-    starts = [UncheckEvalStart("standard-start", initial, "standard")]
-    seen = {position_key(initial)}
-    targets = (4, 6, 8, 10, 12, 14, 16, 18)
-    for index in range(max(0, count)):
+    starts = [UncheckEvalStart("standard-start", initial, "standard")] if include_standard else []
+    seen = set(excluded_keys or ())
+    seen.update(position_key(position.state) for position in starts)
+    # Alternating parity balances the side to move across the suite.
+    targets = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+    trap_count = min(8, count // 4)
+    for index in range(count):
         target_plies = targets[index % len(targets)] + 2 * (index // len(targets))
         accepted = None
-        for attempt in range(128):
+        difficulty = "anti-check-trap" if index < trap_count else "heldout-opening"
+        for attempt in range(4096):
             rng = random.Random(seed + index * 10_007 + attempt)
             state = create_initial_game_state("uncheck-v1")
             for _ in range(target_plies):
@@ -239,13 +310,28 @@ def build_uncheck_eval_positions(count: int = 8, seed: int = 0x554E4348) -> list
                     break
                 state = rng.choice(children)
             key = position_key(state)
-            if state.status == "active" and key not in seen and state.fullMoveNumber > 1:
+            legal = get_legal_moves(state)
+            children = [apply_move(state, move) for move in legal]
+            active_children = [child for child in children if child.status == "active"]
+            losing_checks = [
+                child for child in children
+                if child.status == "uncheck" and child.winner != state.currentTurn
+            ]
+            informative = len(legal) >= 2 and bool(active_children)
+            if difficulty == "anti-check-trap":
+                informative = informative and bool(losing_checks)
+            if (
+                state.status == "active"
+                and key not in seen
+                and state.fullMoveNumber > 1
+                and informative
+            ):
                 seen.add(key)
                 accepted = state
                 break
         if accepted is None:
             raise RuntimeError(f"could not construct held-out Uncheck opening {index}")
-        starts.append(UncheckEvalStart(f"heldout-opening-{index + 1:02d}", accepted, "heldout-opening"))
+        starts.append(UncheckEvalStart(f"{name_prefix}-{index + 1:02d}", accepted, difficulty))
     return starts
 
 
@@ -273,19 +359,35 @@ def evaluate_uncheck(trainer, directory: Path):
     was_training = trainer.model.training
     trainer.model.eval()
     evaluator = trainer._make_model_evaluator(trainer.model)
-    opening_count = max(8, cfg.jester_eval_standard_positions * 2)
-    positions = build_uncheck_eval_positions(opening_count)
+    fixed_count = max(0, cfg.jester_uncheck_eval_positions)
+    positions = build_uncheck_eval_positions(fixed_count)
+    fixed_keys = {position_key(position.state) for position in positions}
+    rotating_positions = build_uncheck_eval_positions(
+        max(0, cfg.jester_uncheck_rotating_positions),
+        seed=0x524F5441 ^ gen,
+        include_standard=False,
+        name_prefix="rotating-opening",
+        excluded_keys=fixed_keys,
+    )
+    opponent_evaluators = [
+        (name, trainer._make_model_evaluator(model))
+        for name, model in opponents
+    ]
     matches = []
-    for opponent_name, model in opponents:
-        opponent_eval = trainer._make_model_evaluator(model)
-        for index, position in enumerate(positions):
-            for color in ("white", "black"):
-                matches.append(Match(
-                    position.state.copy(), color, opponent_eval,
-                    f"{opponent_name}/{index}", position.difficulty,
-                ))
+    # Keep the gate to one paired match per position so adding historical
+    # opponents improves diversity without multiplying a multi-hour eval.
+    # Round-robin assignment also makes every checkpoint play both seats from
+    # exactly the same start.
+    for index, position in enumerate(positions):
+        opponent_name, opponent_eval = opponent_evaluators[index % len(opponent_evaluators)]
+        for color in ("white", "black"):
+            matches.append(Match(
+                position.state.copy(), color, opponent_eval,
+                f"{opponent_name}/{index}", position.difficulty,
+            ))
 
     total = len(matches)
+    phase = "fixed promotion suite"
     phase_started = started
 
     def progress(completed):
@@ -310,7 +412,7 @@ def evaluate_uncheck(trainer, directory: Path):
                 bucket[{"win": "w", "loss": "l", "draw": "d", "cap": "cap"}[outcome]] += 1
             trainer._on_eval_progress(
                 len(completed), total, counts["win"], counts["draw"], counts["loss"], per_diff,
-                caps=counts["cap"], phase="competitive Uncheck", current=None,
+                caps=counts["cap"], phase=phase, current=None,
                 recent=[{"win": "W", "loss": "L", "draw": "D", "cap": "C"}[result]
                         for _, result in completed[-14:]],
                 elapsed_s=time.monotonic() - phase_started,
@@ -319,6 +421,26 @@ def evaluate_uncheck(trainer, directory: Path):
     try:
         results = play_matches(
             matches, evaluator, cfg.eval_mcts_sims, cfg.eval_move_cap,
+            cfg.jester_eval_batch_size, progress,
+        )
+
+        # Fresh reachable positions are measured separately against the
+        # champion. They expose overfitting but never alter promotion.
+        champion_evaluator = trainer._make_model_evaluator(champion)
+        rotating_matches = [
+            Match(
+                position.state.copy(), color, champion_evaluator,
+                f"rotating/champion-{opponent_gen}/{index}",
+                "rotating-holdout",
+            )
+            for index, position in enumerate(rotating_positions)
+            for color in ("white", "black")
+        ]
+        total = len(rotating_matches)
+        phase = "rotating holdout"
+        phase_started = time.monotonic()
+        rotating_results = play_matches(
+            rotating_matches, evaluator, cfg.eval_mcts_sims, cfg.eval_move_cap,
             cfg.jester_eval_batch_size, progress,
         )
 
@@ -355,8 +477,11 @@ def evaluate_uncheck(trainer, directory: Path):
         trainer.model.train(was_training)
 
     score, lower, upper = score_interval(results)
+    rotating_score, rotating_lower, rotating_upper = score_interval(rotating_results)
     counts = {key: sum(result == key for _, result in results)
               for key in ("win", "loss", "draw", "cap")}
+    rotating_counts = {key: sum(result == key for _, result in rotating_results)
+                       for key in ("win", "loss", "draw", "cap")}
     promote = score >= cfg.eval_score_threshold and lower > 0.5
     if promote:
         trainer._save_champion(directory, gen)
@@ -396,6 +521,14 @@ def evaluate_uncheck(trainer, directory: Path):
         score_lower_bound=round(lower, 4),
         score_lower_95=round(lower, 4),
         score_upper_95=round(upper, 4),
+        rotating_games=len(rotating_results),
+        rotating_wins=rotating_counts["win"],
+        rotating_draws=rotating_counts["draw"],
+        rotating_losses=rotating_counts["loss"],
+        rotating_caps=rotating_counts["cap"],
+        rotating_score=round(rotating_score, 4),
+        rotating_score_lower_95=round(rotating_lower, 4),
+        rotating_score_upper_95=round(rotating_upper, 4),
         elo_diff=round(400 * math.log10(max(0.001, score) / max(0.001, 1 - score)), 1),
         new_champion=promote,
         plateau_counter=trainer._plateau_counter,
@@ -405,6 +538,14 @@ def evaluate_uncheck(trainer, directory: Path):
         black_wins=black_wins,
         challenger_white=color_results["white"],
         challenger_black=color_results["black"],
+        candidate_white_wins=color_results["white"]["w"],
+        candidate_white_draws=color_results["white"]["d"],
+        candidate_white_losses=color_results["white"]["l"],
+        candidate_white_caps=color_results["white"]["cap"],
+        candidate_black_wins=color_results["black"]["w"],
+        candidate_black_draws=color_results["black"]["d"],
+        candidate_black_losses=color_results["black"]["l"],
+        candidate_black_caps=color_results["black"]["cap"],
         rescue_attempts=sum(match.rescue_attempts for match, _ in results),
         rescue_successes=sum(match.rescue_successes for match, _ in results),
         candidate_rescue_attempts=sum(match.candidate_rescue_attempts for match, _ in results),
@@ -431,38 +572,10 @@ def evaluate_uncheck(trainer, directory: Path):
     trainer._eval_history.append(result)
     csv_row = {key: value for key, value in result.items()
                if key not in ("per_diff", "challenger_white", "challenger_black")}
-    path = directory / "eval.csv"
-    if path.exists():
-        with path.open() as file:
-            columns = next(csv.reader(file))
-    else:
-        columns = list(csv_row)
-    new_file = not path.exists()
-    with path.open("a", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=columns, extrasaction="ignore")
-        if new_file:
-            writer.writeheader()
-        writer.writerow(csv_row)
-
-    with (directory / "eval_games.jsonl").open("a") as file:
-        for match, outcome in results:
-            file.write(json.dumps(dict(
-                gen=gen,
-                pair=match.pair,
-                candidate_color=match.color,
-                outcome=outcome,
-                actual_winner=match.state.winner,
-                plies=match.plies,
-                start_type=match.difficulty,
-                start=match.start,
-                moves=match.moves,
-                final_status=match.state.status,
-                rescue_attempts=match.rescue_attempts,
-                rescue_successes=match.rescue_successes,
-                immediate_check_blunders=match.immediate_check_blunders,
-                candidate_exposure_attempts=match.candidate_exposure_attempts,
-                candidate_exposure_conversions=match.candidate_exposure_conversions,
-            )) + "\n")
+    append_csv_row(directory / "eval.csv", csv_row)
+    games_path = directory / "eval_games.jsonl"
+    append_match_records(games_path, gen, "fixed-promotion", results)
+    append_match_records(games_path, gen, "rotating-holdout", rotating_results)
     with (directory / "diagnostics.jsonl").open("a") as file:
         for (match, outcome), hit in zip(conversions, tactic_hits, strict=True):
             file.write(json.dumps(dict(

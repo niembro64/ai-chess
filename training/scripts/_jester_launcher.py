@@ -20,8 +20,54 @@ from chess_ai import tablebase
 from chess_ai.dashboard import DashboardLogger
 from chess_ai.model import ChessNet
 from chess_ai.train import Trainer, pick_device
+from chess_ai.uncheck import validate_curriculum
 
 log = logging.getLogger("chess_ai.train")
+
+
+def _archive_generation(path: Path) -> int:
+    try:
+        return int(path.stem.removeprefix("gen-"))
+    except ValueError:
+        return -1
+
+
+def select_spaced_archives(
+    archive_dir: Path,
+    count: int,
+    *,
+    exclude_latest: int = 2,
+) -> tuple[Path, ...]:
+    """Choose stable, well-spaced historical opponents for a resumed run."""
+    if count <= 0:
+        return ()
+    archives = sorted(archive_dir.glob("gen-*.pt"), key=_archive_generation)
+    if exclude_latest > 0 and len(archives) > exclude_latest:
+        archives = archives[:-exclude_latest]
+    if len(archives) <= count:
+        return tuple(archives)
+    if count == 1:
+        return (archives[len(archives) // 2],)
+    indexes = [round(index * (len(archives) - 1) / (count - 1)) for index in range(count)]
+    return tuple(archives[index] for index in dict.fromkeys(indexes))
+
+
+def refresh_archive_opponents(directory: Path, pool: Path, count: int) -> tuple[Path, ...]:
+    """Refresh the launch-managed historical pool without growing forever."""
+    selected = select_spaced_archives(directory / "archive", count)
+    targets = {
+        pool / f"archive-gen-{_archive_generation(source):08d}.pt": source
+        for source in selected
+    }
+    for existing in pool.glob("archive-gen-*.pt"):
+        if existing not in targets:
+            existing.unlink()
+    for target, source in targets.items():
+        if not target.exists() or target.stat().st_size != source.stat().st_size:
+            temporary = target.with_suffix(".pt.tmp")
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+    return tuple(sorted(targets))
 
 
 def _model_state_sha256(state: dict[str, torch.Tensor]) -> str:
@@ -50,8 +96,13 @@ def launch(*, mode: str) -> None:
     parser.add_argument(
         "--opponent", type=Path, action="append", default=[], help="Frozen JESTER checkpoint (repeatable)"
     )
+    parser.add_argument(
+        "--archive-opponents", type=int, default=3,
+        help="Well-spaced archived opponents to add when resuming (default: 3)",
+    )
     parser.add_argument("--workers", type=int)
-    parser.add_argument("--sims", type=int)
+    parser.add_argument("--sims", type=int, help="Self-play simulations per move")
+    parser.add_argument("--eval-sims", type=int, help="Override validation simulations per move")
     parser.add_argument("--steps", type=int, help="Optional finite smoke run (main-loop iterations)")
     parser.add_argument("--no-dashboard", action="store_true")
     args = parser.parse_args()
@@ -62,13 +113,15 @@ def launch(*, mode: str) -> None:
     # Explicitly clear process-global tables too. Setting config alone cannot
     # undo a tablebase opened earlier by another launcher in this interpreter.
     tablebase.open_tablebase(None)
+    validate_curriculum()
     config = cfg.build_jester_config()
     config.ruleset = args.ruleset
     if args.workers is not None:
         config.num_workers = args.workers
     if args.sims is not None:
         config.mcts_simulations = args.sims
-        config.eval_mcts_sims = args.sims
+    if args.eval_sims is not None:
+        config.eval_mcts_sims = args.eval_sims
     device = pick_device(cfg.DEVICE)
     if device.type != "cuda" and args.workers is None:
         config.num_workers = 0
@@ -97,6 +150,13 @@ def launch(*, mode: str) -> None:
         target = pool / f"{digest[:16]}.pt"
         if not target.exists():
             shutil.copy2(path, target)
+    if resume is not None:
+        selected = refresh_archive_opponents(directory, pool, args.archive_opponents)
+        if selected:
+            log.info(
+                "Selected archived opponents: %s",
+                ", ".join(path.name for path in selected),
+            )
     config.jester_opponent_checkpoints = tuple(str(p) for p in sorted(pool.glob("*.pt")))
     model = ChessNet(
         num_res_blocks=cfg.NUM_RES_BLOCKS,
@@ -153,13 +213,14 @@ def launch(*, mode: str) -> None:
         trainer._save_champion(directory, gen=0)
         trainer.save_checkpoint(directory)
     log.info(
-        "JESTER protocol %d (%s): %s, %d workers x %d games, %d sims; %d frozen opponents; no legacy selfmate curriculum, no Syzygy",
+        "JESTER protocol %d (%s): %s, %d workers x %d games, %d self-play sims, %d eval sims; %d frozen opponents; no legacy selfmate curriculum, no Syzygy",
         config.jester_protocol,
         config.ruleset,
         device,
         config.num_workers,
         config.games_per_worker,
         config.mcts_simulations,
+        config.eval_mcts_sims,
         len(config.jester_opponent_checkpoints),
     )
     log.info("Checkpoints and evidence: %s", directory)

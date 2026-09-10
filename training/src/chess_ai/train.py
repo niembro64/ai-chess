@@ -227,6 +227,11 @@ class TrainConfig:
     jester_max_examples_per_game: int = 32
     jester_balanced_replay: bool = True
     jester_eval_standard_positions: int = 4
+    # Protocol-3 Uncheck promotion uses a larger, deterministic set of
+    # reachable positions. A separate rotating set measures generalization
+    # without changing the promotion decision.
+    jester_uncheck_eval_positions: int = 32
+    jester_uncheck_rotating_positions: int = 8
     jester_full_eval_every: int = 10_000
     jester_spar_temperature: float = 0.0
     jester_spar_random_prob: float = 0.0

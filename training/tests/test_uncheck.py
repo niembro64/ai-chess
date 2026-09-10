@@ -1,5 +1,6 @@
 """Rules-contract tests for Uncheck Chess v1."""
 
+import json
 import random
 
 import numpy as np
@@ -16,11 +17,11 @@ from chess_ai.engine import (
     get_legal_moves,
     position_key,
 )
-from chess_ai.jester_eval import Match, build_uncheck_eval_positions, terminal_result
+from chess_ai.jester_eval import Match, append_csv_row, build_uncheck_eval_positions, terminal_result
 from chess_ai.model import ChessNet
 from chess_ai.selfplay import GameSlot, GameSlotExample, SelfPlayConfig, SelfPlayEngine
 from chess_ai.train import TrainConfig, Trainer
-from chess_ai.uncheck import curriculum_positions, validate_curriculum
+from chess_ai.uncheck import anti_check_training_positions, curriculum_positions, validate_curriculum
 
 
 def _move(fr: str, to: str) -> Move:
@@ -82,10 +83,54 @@ def test_verified_curriculum_is_separate_and_sound():
 def test_heldout_openings_are_reachable_active_uncheck_positions():
     positions = build_uncheck_eval_positions()
     assert positions[0].difficulty == "standard"
-    assert len(positions) >= 9
+    assert len(positions) == 33
     assert len({position_key(position.state) for position in positions}) == len(positions)
     assert all(position.state.ruleset == "uncheck-v1" and position.state.status == "active"
                for position in positions)
+    assert sum(position.state.currentTurn == "white" for position in positions) == 17
+    assert sum(position.state.currentTurn == "black" for position in positions) == 16
+    for position in positions[1:]:
+        children = [apply_move(position.state, move) for move in get_legal_moves(position.state)]
+        assert len(children) >= 2
+        assert any(child.status == "active" for child in children)
+        if position.difficulty == "anti-check-trap":
+            assert any(child.status == "uncheck" for child in children)
+
+
+def test_rotating_holdout_is_disjoint_from_fixed_suite():
+    fixed = build_uncheck_eval_positions()
+    fixed_keys = {position_key(position.state) for position in fixed}
+    rotating = build_uncheck_eval_positions(
+        8,
+        seed=0x524F5441 ^ 12_000,
+        include_standard=False,
+        name_prefix="rotating-opening",
+        excluded_keys=fixed_keys,
+    )
+    assert len(rotating) == 8
+    assert fixed_keys.isdisjoint(position_key(position.state) for position in rotating)
+    assert all(position.name.startswith("rotating-opening-") for position in rotating)
+
+
+def test_anti_check_training_positions_offer_a_real_choice():
+    starts = anti_check_training_positions()
+    assert len(starts) == 12
+    assert {state.currentTurn for state in starts} == {"white", "black"}
+    for state in starts:
+        children = [apply_move(state, move) for move in get_legal_moves(state)]
+        assert any(child.status == "active" for child in children)
+        assert any(child.status == "uncheck" and child.winner != state.currentTurn
+                   for child in children)
+
+
+def test_eval_csv_schema_expands_without_losing_history(tmp_path):
+    path = tmp_path / "eval.csv"
+    append_csv_row(path, {"gen": 2_000, "wins": 13})
+    append_csv_row(path, {"gen": 4_000, "wins": 14, "rotating_score": 0.625})
+    rows = path.read_text().splitlines()
+    assert rows[0] == "gen,wins,rotating_score"
+    assert rows[1] == "2000,13,"
+    assert rows[2] == "4000,14,0.625"
 
 
 def test_uncheck_actual_winner_uses_opposite_reference_labels():
@@ -129,6 +174,8 @@ def test_uncheck_gate_keeps_caps_separate_and_inconclusive(tmp_path):
         eval_mcts_sims=2,
         eval_move_cap=0,
         jester_eval_standard_positions=0,
+        jester_uncheck_eval_positions=0,
+        jester_uncheck_rotating_positions=2,
         jester_eval_batch_size=8,
     )
     trainer = Trainer(model, torch.device("cpu"), config, random.Random(9))
@@ -136,11 +183,18 @@ def test_uncheck_gate_keeps_caps_separate_and_inconclusive(tmp_path):
     result = trainer._run_eval_match(tmp_path)
     assert result["gate"] == "competitive-uncheck-v1"
     assert result["caps"] == result["games"]
+    assert result["games"] == 2
     assert result["draws"] == 0
+    assert result["rotating_games"] == 4
+    assert result["rotating_caps"] == result["rotating_games"]
     assert result["score_lower_bound"] < 0.5
     assert not result["new_champion"]
     assert (tmp_path / "eval.csv").exists()
     assert (tmp_path / "eval_games.jsonl").exists()
+    suites = [json.loads(line)["suite"]
+              for line in (tmp_path / "eval_games.jsonl").read_text().splitlines()]
+    assert suites.count("fixed-promotion") == 2
+    assert suites.count("rotating-holdout") == 4
 
 
 def test_python_and_protocol3_rust_agree_on_uncheck_fixture():

@@ -19,18 +19,23 @@ second time.
 
 The initial protocol-3 profile uses three workers with 32 games each, 256
 self-play simulations, batch size 256, a 200-ply truncation cap, and learning
-rate `3e-4`. Twenty-five percent of starts use verified Uncheck proofs and the
-rest use standard or Uncheck-reachable competitive openings. Competitive play
-uses the current network 75% of the time and a frozen historical JESTER 25% of
-the time. Legacy selfmate positions, helper opponents, bridge pools, material
+rate `3e-4`. Twenty-five percent of starts use the Uncheck curriculum, split
+between verified forcing proofs and training-only positions that require the
+model to avoid giving an immediate losing check. The rest use standard or
+Uncheck-reachable competitive openings. Competitive play uses the current
+network 75% of the time and a pool of frozen historical JESTERs 25% of the
+time. Legacy selfmate positions, helper opponents, bridge pools, material
 auxiliaries, resignation, and Syzygy labels are disabled.
 
-Validation runs at a fixed 128-simulation budget against the champion and
-frozen JESTER history from paired colors. Standard starts and deterministic
-Uncheck-reachable held-out openings form the promotion gate. Independent
-held-out proofs report first-move accuracy and full conversion separately.
-Actual W/D/L, caps, length, color split, rescue success, exposure conversion,
-and immediate opponent-win errors are retained in `eval.csv` and
+Validation runs at a fixed 128-simulation budget against a round-robin pool of
+the champion and three well-spaced archived JESTERs. The standard start and 32
+deterministic, informative Uncheck-reachable openings form 33 paired-color
+promotion samples without multiplying evaluation time by the opponent count.
+Eight generation-seeded positions report rotating holdout performance against
+the champion without entering that gate. Independent held-out proofs
+report first-move accuracy and full conversion separately. Actual W/D/L,
+caps, length, paired lower bound, color split, suite, rescue success, exposure
+conversion, and immediate opponent-win errors are retained in `eval.csv` and
 `eval_games.jsonl`. Caps receive half a point in the display score and zero in
 the conservative lower bound, so a cap-heavy result cannot promote a model.
 

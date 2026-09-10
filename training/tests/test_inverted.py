@@ -289,11 +289,14 @@ def test_competitive_multiprocess_produces_fresh_examples(tmp_path):
     mp.start()
     try:
         deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and len(trainer.buffer) < 4:
+        while time.monotonic() < deadline and (
+            len(trainer.buffer) < 4 or not trainer.buffer.ready
+        ):
             mp.check_health()
             mp.drain_examples(trainer.buffer)
             time.sleep(0.05)
         assert len(trainer.buffer) >= 4
+        assert trainer.buffer.ready
         before = next(model.parameters()).detach().clone()
         losses = trainer.train_step()
         assert all(np.isfinite(v) for v in losses.values())

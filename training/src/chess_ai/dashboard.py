@@ -389,8 +389,17 @@ class DashboardLogger:
             f"eval gen {result['gen']:,}{dur}: "
             f"{result['wins']}-{result['draws']}-{result['losses']} "
             f"caps={result.get('caps', 0)} "
-            f"score={result['score']:.3f} Δelo={result['elo_diff']:+.0f}  {tag}"
+            f"score={result['score']:.3f} "
+            f"lower95={float(result.get('score_lower_95', result.get('score_lower_bound', 0))):.3f} "
+            f"Δelo={result['elo_diff']:+.0f}  {tag}"
         )
+        if result.get("rotating_games", 0):
+            self.log(
+                "rotating holdout: "
+                f"{result['rotating_wins']}-{result['rotating_draws']}-{result['rotating_losses']} "
+                f"caps={result.get('rotating_caps', 0)} "
+                f"score={float(result['rotating_score']):.3f}"
+            )
         # Per-difficulty summary (optional — only if trainer passed it).
         # Highlights where the challenger out/underperformed, e.g.
         # "mate-1 0.72  trivial 0.50  openings 0.40". Quick look-see for
@@ -398,7 +407,10 @@ class DashboardLogger:
         per_diff = result.get("per_diff") or {}
         if per_diff:
             parts = []
-            for name in ("mate-in-1", "endgame", "middlegame", "opening", "uncheck-tactic"):
+            for name in (
+                "anti-check-trap", "heldout-opening", "rotating-holdout",
+                "mate-in-1", "endgame", "middlegame", "opening", "uncheck-tactic",
+            ):
                 stats = per_diff.get(name)
                 if not stats:
                     continue
@@ -960,7 +972,10 @@ class DashboardLogger:
         """
         per_diff = progress.get("per_diff", {}) or {}
         out: list[Text] = []
-        for name in ("mate-in-1", "trivial", "clear", "balanced", "uncheck-tactic"):
+        for name in (
+            "anti-check-trap", "heldout-opening", "rotating-holdout",
+            "mate-in-1", "trivial", "clear", "balanced", "uncheck-tactic",
+        ):
             stats = per_diff.get(name)
             if not stats:
                 continue
@@ -1023,6 +1038,36 @@ class DashboardLogger:
         champ_gen = latest.get("champion_gen", 0) or 0
         streak = int(latest.get("plateau_counter", 0) or 0)
         body.add_row("champion", Text(f"gen {champ_gen:,}", style="bright_white"))
+
+        if latest.get("gate") == "competitive-uncheck-v1":
+            lower = float(latest.get("score_lower_95", latest.get("score_lower_bound", 0)) or 0)
+            body.add_row(
+                "gate 95%",
+                Text(f"{lower:.3f}  must exceed 0.500", style="bright_green" if lower > 0.5 else "yellow"),
+            )
+            rotating_games = int(latest.get("rotating_games", 0) or 0)
+            if rotating_games:
+                body.add_row(
+                    "rotating",
+                    Text(
+                        f"{latest.get('rotating_wins', 0)}-{latest.get('rotating_draws', 0)}-"
+                        f"{latest.get('rotating_losses', 0)}  "
+                        f"score {float(latest.get('rotating_score', 0)):.3f}",
+                        style="cyan",
+                    ),
+                )
+            body.add_row(
+                "by seat",
+                Text(
+                    f"W {latest.get('candidate_white_wins', 0)}-"
+                    f"{latest.get('candidate_white_draws', 0)}-"
+                    f"{latest.get('candidate_white_losses', 0)}   "
+                    f"B {latest.get('candidate_black_wins', 0)}-"
+                    f"{latest.get('candidate_black_draws', 0)}-"
+                    f"{latest.get('candidate_black_losses', 0)}",
+                    style="dim",
+                ),
+            )
 
         if self._plateau_max > 0:
             full = "▓" * streak
@@ -1138,7 +1183,11 @@ class DashboardLogger:
         # running/score/now/recent/per-diff block, so keep the table
         # shorter. When idle, show a full 10 rows of history. The panel
         # is sized (22-row middle split) to fit either case.
-        rows_to_show = 5 if self._eval_progress is not None else 10
+        is_uncheck = latest.get("gate") == "competitive-uncheck-v1"
+        if is_uncheck:
+            rows_to_show = 4 if self._eval_progress is not None else 7
+        else:
+            rows_to_show = 5 if self._eval_progress is not None else 10
         for h in reversed(list(hist)[-rows_to_show:]):
             gen_str = f"{h.get('gen', 0):>6,}"
             if h.get("note") == "bootstrap":

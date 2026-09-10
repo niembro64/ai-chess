@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .engine import (
     CastlingRights,
@@ -15,6 +16,7 @@ from .engine import (
     Piece,
     Position,
     apply_move,
+    create_initial_game_state,
     get_legal_moves,
     position_key,
 )
@@ -193,8 +195,64 @@ def curriculum_positions(split: str = "train") -> tuple[UncheckPosition, ...]:
     return _TRAIN if split == "train" else _EVAL
 
 
+@lru_cache(maxsize=None)
+def anti_check_training_positions(
+    count: int = 12,
+    seed: int = 0x414E5449,
+) -> tuple[ChessGameState, ...]:
+    """Generate training-only analogues of the legacy model's check bias.
+
+    Each reachable position offers both an immediate losing move that attacks
+    the opposing king and at least one move that keeps the game active. The
+    positions come from deterministic Uncheck-legal random walks, use a seed
+    unrelated to either evaluation suite, and are never used for validation.
+    """
+    if count < 0:
+        raise ValueError("count must be non-negative")
+    starts: list[ChessGameState] = []
+    seen = {position_key(position.state) for position in _TRAIN + _EVAL}
+    for index in range(count):
+        accepted = None
+        # Alternate odd/even walk lengths so both colors occur as the mover.
+        base_plies = 7 + 2 * (index % 10) + (index % 2)
+        for attempt in range(4096):
+            rng = random.Random(seed + index * 100_003 + attempt)
+            state = create_initial_game_state("uncheck-v1")
+            target_plies = base_plies + 2 * (attempt % 7)
+            for _ in range(target_plies):
+                active_children = [
+                    child for move in get_legal_moves(state)
+                    if (child := apply_move(state, move)).status == "active"
+                ]
+                if not active_children:
+                    break
+                state = rng.choice(active_children)
+            key = position_key(state)
+            if state.status != "active" or key in seen:
+                continue
+            children = [apply_move(state, move) for move in get_legal_moves(state)]
+            loses_immediately = any(
+                child.status == "uncheck" and child.winner != state.currentTurn
+                for child in children
+            )
+            stays_active = any(child.status == "active" for child in children)
+            if loses_immediately and stays_active:
+                accepted = state
+                seen.add(key)
+                break
+        if accepted is None:
+            raise RuntimeError(f"could not construct anti-check training position {index}")
+        starts.append(accepted)
+    return tuple(starts)
+
+
 def curriculum_start(rng: random.Random) -> ChessGameState:
-    return rng.choice(_TRAIN).state
+    # Keep half of curriculum games on bounded forcing proofs and use the
+    # other half to unlearn the inherited ordinary-chess preference for
+    # checking the opposing king, which is an immediate loss in Uncheck.
+    if rng.random() < 0.5:
+        return rng.choice(_TRAIN).state
+    return rng.choice(anti_check_training_positions()).copy()
 
 
 def validate_curriculum() -> None:
@@ -230,3 +288,19 @@ def validate_curriculum() -> None:
         actual = forced_uncheck_moves(position.state, position.max_plies)
         if actual != position.winning_moves:
             raise ValueError(f"invalid Uncheck proof {position.name}: {actual} != {position.winning_moves}")
+    generated = anti_check_training_positions()
+    generated_keys = {position_key(state) for state in generated}
+    if len(generated_keys) != len(generated):
+        raise ValueError("duplicate anti-check training positions")
+    proof_keys = {position_key(position.state) for position in _TRAIN + _EVAL}
+    if generated_keys & proof_keys:
+        raise ValueError("anti-check training position overlaps a proof position")
+    for state in generated:
+        children = [apply_move(state, move) for move in get_legal_moves(state)]
+        if not any(child.status == "active" for child in children):
+            raise ValueError("anti-check training position has no continuing move")
+        if not any(
+            child.status == "uncheck" and child.winner != state.currentTurn
+            for child in children
+        ):
+            raise ValueError("anti-check training position has no immediate losing check")

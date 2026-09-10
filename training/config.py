@@ -449,6 +449,11 @@ def build_jester_config() -> TrainConfig:
     cfg.jester_bridge_prob = 0.0
     cfg.jester_max_examples_per_game = 32
     cfg.jester_eval_batch_size = 32
+    # Thirty-two fixed held-out openings plus the standard start are paired
+    # by color for promotion. Eight fresh, disjoint openings are reported as
+    # a generalization diagnostic and never enter the promotion score.
+    cfg.jester_uncheck_eval_positions = 32
+    cfg.jester_uncheck_rotating_positions = 8
     cfg.jester_move_cap = 200
     cfg.tb_policy_weight = 0.25
     cfg.jester_spar_temperature = 0.0
