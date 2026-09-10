@@ -914,3 +914,57 @@ The phase-zero frontend SAGE and JESTER weights remain frozen for this rules
 release. Production training does not auto-export future checkpoints into the
 web or mobile apps. No website deployment, TestFlight upload, App Store update,
 or Google Play publication was performed as part of this source/training task.
+
+
+14. LIVE JESTER SNAPSHOT AND GAMEPLAY CLARITY UPDATE
+
+Executed on 2026-09-10.
+
+The active production trainer was left running in tmux session `uncheck`. To
+avoid racing its atomic checkpoint replacement, the current `latest.pt` inode
+was pinned into this immutable export before either frontend was changed:
+  /home/gpus/ai-chess/training/runs_jester/uncheck-v1-20260909T233839Z/exports/20260910T045449Z/jester-source.pt
+
+Snapshot provenance:
+  training generation: 3600
+  training step: 342429
+  ruleset: uncheck-v1
+  Jester protocol: 3
+  value convention: uncheck-reference-v1
+  checkpoint SHA-256:
+    3c1db221ee795e3fd1f804cb1204d268b1c3b4cb185f05e3f57241f0d5393e20
+
+Frontend exports from that one snapshot:
+  web public/models/jester.json SHA-256:
+    e6b05e3c58331d11a9b3edabc7245588bb1168443fbbde489bac9ef5728f9de2
+  iOS assets/models/jester.onnx SHA-256:
+    c2a3b7f62e6f14381b3002568f1a869bd69ab61cf37ab76d9a22f4fac7313163
+  ONNX policy maximum absolute difference: 0.0000021457672119140625
+  ONNX WDL maximum absolute difference: 0.0000001341104507446289
+
+SAGE was not re-exported. Its committed web and mobile hashes remained:
+  web: 197341b98dad4653dc704e04d893a517346b13cf9172a20d6a383410fccce138
+  iOS: f7aaae74d8dd8f30fdc1a643e2030ca74f174c5301d18dffc831c6f40a964116
+
+Both frontends now show every compulsory-capture source in gold with an
+exclamation badge and every available capture target in red before selection.
+Normal and Uncheck games identify their ruleset and winning goal persistently,
+and human-turn copy states the immediate strategic goal. At game end, the
+result and actions replace the normal model-information panel instead of
+covering the board; history navigation stays usable. The winning king receives
+a gold halo and sparkle celebration in both rulesets.
+
+Validation:
+  - Web Uncheck fixtures: 22 passed.
+  - PyTorch/TF.js round-trip: 3 passed.
+  - Web production build passed.
+  - Mobile TypeScript passed.
+  - Mobile Vitest: 13 files, 320 tests passed.
+  - Expo Doctor: 20/20 checks passed.
+  - Mobile release validation passed with four 1320x2868 RGB screenshots.
+  - A native iPhone 16 Pro Max Release build verified the compulsory-capture
+    cues and the nonblocking game-result layout with history and winner halo.
+
+This section supersedes the phase-zero frontend freeze stated at the end of
+section 13. The training job continues to advance beyond the exported snapshot;
+future app weight updates remain explicit, versioned exports.

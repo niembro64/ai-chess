@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue';
 import type { PlayerId, PieceColor, Position, Move, ChessGameState, PieceType } from '@/types/chess';
 import { playerIdToColor } from '@/types/chess';
-import { getLegalMovesForSquare, isInCheck } from '@/game/chess/ChessEngine';
+import { getLegalMoves, getLegalMovesForSquare, isCaptureMove, isInCheck } from '@/game/chess/ChessEngine';
 import PieceIcon from './PieceIcon.vue';
 import { pieceTint } from '@/game/ai/models';
 
@@ -45,6 +45,14 @@ const isGameOver = computed(() =>
   props.gameState.status === 'stalemate' ||
   props.gameState.status === 'draw'
 );
+const forcedCaptureMoves = computed<Move[]>(() => {
+  if (props.frozen || isGameOver.value || !isMyTurn.value) return [];
+  if ((props.gameState.ruleset ?? 'normal') !== 'uncheck-v1') return [];
+  const moves = getLegalMoves(props.gameState);
+  return moves.length > 0 && moves.every(move => isCaptureMove(props.gameState, move))
+    ? moves
+    : [];
+});
 
 // Get ranks and files in display order (flipped for black)
 const displayRanks = computed(() => {
@@ -69,6 +77,26 @@ function isLegalTarget(rank: number, file: number): boolean {
   return legalTargets.value.some(t => t.rank === rank && t.file === file);
 }
 
+function isForcedSource(rank: number, file: number): boolean {
+  return forcedCaptureMoves.value.some(move => move.from.rank === rank && move.from.file === file);
+}
+
+function isForcedDestination(rank: number, file: number): boolean {
+  return forcedCaptureMoves.value.some(move => move.to.rank === rank && move.to.file === file);
+}
+
+function isForcedVictim(rank: number, file: number): boolean {
+  return forcedCaptureMoves.value.some(move => {
+    if (move.to.rank === rank && move.to.file === file && props.gameState.board[rank][file]) return true;
+    const mover = props.gameState.board[move.from.rank][move.from.file];
+    return mover?.type === 'pawn' &&
+      move.from.file !== move.to.file &&
+      !props.gameState.board[move.to.rank][move.to.file] &&
+      move.from.rank === rank &&
+      move.to.file === file;
+  });
+}
+
 function isLastMoveSquare(rank: number, file: number): boolean {
   const lm = props.gameState.lastMove;
   if (!lm) return false;
@@ -85,6 +113,13 @@ function isKingInCheck(rank: number, file: number): boolean {
   }
   if (props.gameState.status !== 'check' && props.gameState.status !== 'checkmate' && props.gameState.status !== 'uncheck') return false;
   return piece?.type === 'king' && piece.color === props.gameState.currentTurn;
+}
+
+function isWinningKing(rank: number, file: number): boolean {
+  const piece = props.gameState.board[rank][file];
+  return piece?.type === 'king' &&
+    piece.color === props.gameState.winner &&
+    (props.gameState.status === 'checkmate' || props.gameState.status === 'uncheck');
 }
 
 function handleSquareClick(rank: number, file: number): void {
@@ -273,10 +308,23 @@ watch(
                   'legal-target': isLegalTarget(rank, file),
                   'last-move': isLastMoveSquare(rank, file),
                   'king-check': isKingInCheck(rank, file),
+                  'forced-source': isForcedSource(rank, file),
+                  'forced-target': isForcedDestination(rank, file) || isForcedVictim(rank, file),
                 },
               ]"
+              :aria-label="isForcedVictim(rank, file)
+                ? `Compulsory capture target on ${fileLabel(file)}${rankLabel(rank)}`
+                : isForcedSource(rank, file)
+                  ? `Piece on ${fileLabel(file)}${rankLabel(rank)} must capture`
+                  : undefined"
               @click="handleSquareClick(rank, file)"
             >
+              <span v-if="isWinningKing(rank, file)" class="winner-celebration" aria-hidden="true">
+                <span class="winner-halo"></span>
+                <span class="winner-sparkle top">✦</span>
+                <span class="winner-sparkle right">✦</span>
+                <span class="winner-sparkle left">✦</span>
+              </span>
               <span
                 v-if="gameState.board[rank][file]"
                 class="piece"
@@ -284,6 +332,7 @@ watch(
               >
                 <PieceIcon :type="gameState.board[rank][file]!.type" />
               </span>
+              <span v-if="isForcedSource(rank, file)" class="forced-badge" aria-hidden="true">!</span>
               <span v-if="isLegalTarget(rank, file) && !gameState.board[rank][file]" class="move-dot"></span>
               <span v-if="isLegalTarget(rank, file) && gameState.board[rank][file]" class="capture-ring"></span>
             </div>
@@ -426,6 +475,87 @@ watch(
 
 .square.king-check {
   animation: king-check-pulse 1.2s ease-in-out infinite;
+}
+
+.square.forced-source {
+  box-shadow:
+    inset 0 0 0 4px rgba(255, 220, 112, 1),
+    inset 0 0 24px rgba(255, 196, 72, 0.62),
+    0 0 14px rgba(255, 196, 72, 0.55);
+  z-index: 2;
+}
+
+.square.forced-target {
+  box-shadow:
+    inset 0 0 0 5px rgba(255, 91, 72, 0.96),
+    inset 0 0 26px rgba(255, 72, 55, 0.62),
+    0 0 18px rgba(255, 72, 55, 0.58);
+  z-index: 2;
+}
+
+.forced-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #2a210f;
+  background: #ffe071;
+  border: 1px solid #49350a;
+  font: 900 12px/1 Inter, sans-serif;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.winner-celebration {
+  position: absolute;
+  inset: -4%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.winner-halo {
+  position: absolute;
+  inset: 5%;
+  border: 4px solid #ffe071;
+  border-radius: 50%;
+  background: rgba(255, 210, 82, 0.2);
+  box-shadow: 0 0 20px #ffd253, inset 0 0 18px rgba(255, 226, 120, 0.6);
+  animation: winner-pulse 1.4s ease-in-out infinite;
+}
+
+.winner-sparkle {
+  position: absolute;
+  color: #fff6bd;
+  font-size: calc(var(--sq) * 0.25);
+  line-height: 1;
+  text-shadow: 0 0 8px #ffd253;
+  animation: winner-sparkle 1.1s ease-in-out infinite alternate;
+}
+.winner-sparkle.top { top: -3%; left: 42%; }
+.winner-sparkle.right { right: -2%; top: 40%; animation-delay: -0.35s; }
+.winner-sparkle.left { left: -2%; bottom: 1%; animation-delay: -0.7s; }
+
+@keyframes winner-pulse {
+  0%, 100% { transform: scale(0.88); opacity: 0.68; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+
+@keyframes winner-sparkle {
+  from { transform: scale(0.75) rotate(-8deg); opacity: 0.62; }
+  to { transform: scale(1.18) rotate(8deg); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .winner-halo,
+  .winner-sparkle,
+  .square.king-check {
+    animation: none;
+  }
 }
 
 @keyframes king-check-pulse {

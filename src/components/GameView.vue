@@ -234,6 +234,7 @@ const isGameOver = computed(() =>
   gameState.value.status === 'stalemate' ||
   gameState.value.status === 'draw'
 );
+const showInfoPanel = computed(() => showToyPanel.value || isGameOver.value);
 
 const statusText = computed(() => {
   const gs = gameState.value;
@@ -241,13 +242,16 @@ const statusText = computed(() => {
     case 'waiting':
       return 'Waiting to start...';
     case 'active':
-      if (captureRequired.value && rescueRequired.value) return 'Capture required — remove every attack on the opposing king';
-      if (captureRequired.value) return 'Capture required';
+      if (captureRequired.value && rescueRequired.value) return 'Capture required — use a gold piece to take a red target and remove every attack';
+      if (captureRequired.value) return 'Capture required — use a gold piece to take a red target';
       if (rescueRequired.value) return 'Rescue turn — remove every attack on the opposing king';
       if (playingVsBot.value && !isMyTurn.value) {
         return aiThinking.value ? 'AI is thinking' : "AI's turn";
       }
-      return isMyTurn.value ? 'Your turn' : "Opponent's turn";
+      if (!isMyTurn.value) return "Opponent's turn";
+      return (gs.ruleset ?? 'normal') === 'uncheck-v1'
+        ? 'Your turn — force an attack on your king'
+        : 'Your turn — checkmate their king';
     case 'check':
       return isMyTurn.value ? 'You are in check!' : 'Opponent is in check';
     case 'checkmate': {
@@ -305,6 +309,38 @@ const uncheckVariant = computed(() =>
     : false,
 );
 const activeRuleset = computed<Ruleset>(() => uncheckVariant.value ? 'uncheck-v1' : 'normal');
+const rulesetTitle = computed(() =>
+  (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1' ? 'UNCHECK CHESS' : 'NORMAL CHESS',
+);
+const goalInstruction = computed(() =>
+  (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1'
+    ? 'WIN BY STARTING YOUR TURN UNDER ATTACK'
+    : 'WIN BY CHECKMATING THEIR KING',
+);
+const endResult = computed(() => {
+  const state = gameState.value;
+  const iWon = state.winner === localColor.value;
+  const winnerName = iWon ? 'You' : opponentName.value;
+  if (state.winner === null) {
+    return {
+      kicker: 'GAME COMPLETE',
+      title: 'DRAW',
+      body: statusText.value,
+    };
+  }
+  if (state.status === 'uncheck') {
+    return {
+      kicker: iWon ? 'YOU FOUND THE UNCHECK' : `${opponentName.value.toUpperCase()} FOUND THE UNCHECK`,
+      title: `${winnerName} win${iWon ? '' : 's'}!`,
+      body: `${winnerName === 'You' ? 'Your' : `${winnerName}'s`} king began the turn under attack.`,
+    };
+  }
+  return {
+    kicker: state.status === 'checkmate' ? 'CHECKMATE' : 'GAME COMPLETE',
+    title: `${winnerName} win${iWon ? '' : 's'}!`,
+    body: statusText.value,
+  };
+});
 const isOpponentTurn = computed(() => gameState.value.currentTurn === opponentColor.value);
 const isLocalTurn = computed(() => gameState.value.currentTurn === localColor.value);
 
@@ -622,6 +658,23 @@ function returnToLobby(): void {
   releaseWakeLock();
 }
 
+function restartBotGame(): void {
+  if (!playingVsBot.value || !aiPlayer) return;
+  stopProgress();
+  aiThinking.value = false;
+  toyThought.value = null;
+  drawOffer.value = null;
+  viewPly.value = null;
+  activeConnection?.disconnect();
+  activeConnection = null;
+  if (currentServer) {
+    currentServer.stop();
+    currentServer = null;
+  }
+  gameState.value = createInitialGameState(activeRuleset.value);
+  startGameWithPlayers([1, 2]);
+}
+
 onUnmounted(() => {
   if (aiPlayer) {
     aiPlayer.dispose();
@@ -652,7 +705,7 @@ onUnmounted(() => {
     <div
       v-if="gameStarted"
       class="game-area"
-      :class="{ 'has-panel': showToyPanel, 'toy-mode': botModelId !== null }"
+      :class="{ 'has-panel': showInfoPanel, 'toy-mode': botModelId !== null }"
     >
       <div class="game-stack">
       <div class="game-layout">
@@ -686,6 +739,10 @@ onUnmounted(() => {
 
         <!-- Center: chess board -->
         <div class="board-area">
+          <div class="goal-banner" :class="{ uncheck: rulesetTitle === 'UNCHECK CHESS' }">
+            <strong>{{ rulesetTitle }}</strong>
+            <span>{{ goalInstruction }}</span>
+          </div>
           <!-- Status bar -->
           <div class="status-bar">
             <span class="status-text" :class="{
@@ -776,9 +833,6 @@ onUnmounted(() => {
               </button>
               <button class="control-btn resign-btn" @click="handleResign">Resign</button>
             </template>
-            <template v-else>
-              <button class="control-btn lobby-btn" @click="returnToLobby">Return to Lobby</button>
-            </template>
           </div>
         </div>
 
@@ -808,11 +862,23 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <section v-if="isGameOver" class="end-game-panel toy-mind-row" aria-live="polite">
+        <div class="end-copy">
+          <span class="end-kicker">{{ endResult.kicker }}</span>
+          <h2>{{ endResult.title }}</h2>
+          <p>{{ endResult.body }}</p>
+        </div>
+        <div class="end-actions">
+          <button v-if="playingVsBot" class="end-primary" @click="restartBotGame">Play Again</button>
+          <button class="end-secondary" @click="returnToLobby">Change Setup</button>
+        </div>
+      </section>
+
       <!-- The bot's mind: what the net saw, thought, and chose — same
            panel for Sage and Toy (Sage's GAME STATE is the 6-plane
            view of its position; policy/value shapes are shared). -->
       <ToyMindPanel
-        v-if="showToyPanel"
+        v-else-if="showToyPanel"
         :thought="toyThought!"
         :flipped="localColor === 'black'"
         :bot-name="botModelId ? MODELS[botModelId].name : 'Bot'"
@@ -870,6 +936,62 @@ onUnmounted(() => {
      instead (game-area.has-panel enables overflow-y). */
   flex-shrink: 0;
   max-width: calc(100vw - 16px);
+}
+
+.end-game-panel {
+  width: min(520px, calc(100vw - 24px));
+  min-height: 150px;
+  padding: 20px 22px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  border: 1px solid rgba(247, 192, 88, 0.68);
+  border-radius: 16px;
+  background: linear-gradient(150deg, rgba(50, 43, 28, 0.94), rgba(25, 23, 38, 0.97));
+  box-shadow: 0 0 30px rgba(247, 192, 88, 0.18), 0 16px 38px rgba(0, 0, 0, 0.42);
+}
+
+.end-copy { min-width: 0; }
+.end-kicker {
+  color: #f7c058;
+  font: 800 10px/1.2 'JetBrains Mono', monospace;
+  letter-spacing: 1.7px;
+}
+.end-copy h2 {
+  margin: 5px 0 3px;
+  color: #fff7df;
+  font: 800 clamp(24px, 4vw, 36px)/1 Inter, sans-serif;
+}
+.end-copy p {
+  margin: 0;
+  color: #aeb8c8;
+  font: 500 13px/1.45 Inter, sans-serif;
+}
+.end-actions {
+  width: 132px;
+  flex-shrink: 0;
+  display: grid;
+  gap: 7px;
+}
+.end-actions button {
+  min-height: 40px;
+  border-radius: 9px;
+  font: 800 11px/1 Inter, sans-serif;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.end-primary {
+  color: #201b0f;
+  background: #f7c058;
+  border: 1px solid #ffe29b;
+}
+.end-secondary {
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 /* Visual-bot mode sheds furniture the mode doesn't need, at EVERY
@@ -965,6 +1087,14 @@ onUnmounted(() => {
        the full width regardless of its contents' intrinsic size. */
     align-self: stretch;
   }
+  .end-game-panel {
+    min-height: 112px;
+    padding: 12px 14px;
+    flex-direction: row;
+  }
+  .end-copy h2 { font-size: 24px; }
+  .end-copy p { font-size: 11px; }
+  .end-actions { width: 112px; }
   /* The panel owns the leftover height, so the board cluster stops
      growing and sits content-sized against the bottom edge. */
   .game-area.has-panel .game-layout {
@@ -1133,6 +1263,45 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 12px;
+}
+
+.goal-banner {
+  min-width: min(440px, 92dvw);
+  padding: 7px 14px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 12px;
+  border: 1px solid rgba(94, 234, 212, 0.3);
+  border-radius: 10px;
+  background: rgba(14, 32, 35, 0.68);
+  color: #d8fffa;
+}
+.goal-banner.uncheck {
+  border-color: rgba(247, 192, 88, 0.42);
+  background: rgba(42, 34, 21, 0.76);
+  color: #fff0bd;
+}
+.goal-banner strong {
+  font: 900 12px/1 Inter, sans-serif;
+  letter-spacing: 1.2px;
+  white-space: nowrap;
+}
+.goal-banner span {
+  color: #94a3b8;
+  font: 700 10px/1.25 'JetBrains Mono', monospace;
+  letter-spacing: 0.35px;
+}
+
+@media (max-width: 900px) {
+  .goal-banner {
+    order: 0;
+    padding: 5px 9px;
+    gap: 8px;
+  }
+  .goal-banner strong { font-size: 10px; }
+  .goal-banner span { font-size: 8px; }
 }
 
 @media (max-width: 900px) {
