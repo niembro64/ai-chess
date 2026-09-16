@@ -41,10 +41,11 @@ const pickedModel = ref<ModelId>('sage');
 const playColor = ref<'white' | 'black'>('white');
 const effort = ref<Effort>('medium');
 const variantSubtitle = computed(() => pickedModel.value === 'jester'
-  ? 'Captures are compulsory. Start your turn with YOUR king attacked to win.'
-  : 'Protect YOUR king from attack. Checkmate THEIR king first to win the game.');
-const newGameSummary = computed(() =>
-  `${pickedModel.value === 'jester' ? 'UNCHECK CHESS' : 'CLASSIC CHESS'}: You play as ${playColor.value.toUpperCase()} against ${EFFORT_LEVELS[effort.value].label.toUpperCase()} EFFORT ${MODELS[pickedModel.value].name.toUpperCase()} BOT.`);
+  ? 'Captures are compulsory. Start your turn with YOUR king attacked to WIN.'
+  : 'Protect YOUR king from attack. Checkmate THEIR king first to WIN the game.');
+const gameTitle = computed(() => pickedModel.value === 'jester' ? 'UnCheck Chess' : 'Classic Chess');
+const gameParameters = computed(() =>
+  `You play as ${playColor.value} against ${MODELS[pickedModel.value].name}. ${EFFORT_LEVELS[effort.value].label} effort.`);
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -180,14 +181,14 @@ const canJoin = computed(() => {
             </div>
           </div>
 
-          <div class="setup-summary" :aria-label="`New game preview. ${newGameSummary} ${variantSubtitle}`">
+          <div class="setup-summary" :aria-label="`${gameTitle}. ${variantSubtitle} ${gameParameters}`">
             <div class="summary-image">
               <BotIcon :name="(pickedModel === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
             </div>
             <div class="summary-copy">
-              <span class="summary-label">NEW GAME PREVIEW</span>
-              <p class="summary-match">{{ newGameSummary }}</p>
+              <strong class="summary-title">{{ gameTitle }}</strong>
               <p class="summary-rule">{{ variantSubtitle }}</p>
+              <p class="summary-parameters">{{ gameParameters }}</p>
             </div>
           </div>
 
@@ -481,28 +482,28 @@ const canJoin = computed(() => {
   padding: 15px 16px;
 }
 
-.summary-label {
-  color: #64748b;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 1px;
-}
-
-.summary-match,
-.summary-rule {
+.summary-title,
+.summary-rule,
+.summary-parameters {
   margin: 0;
 }
 
-.summary-match {
+.summary-title {
   color: #f1f5f9;
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 12px;
-  line-height: 1.45;
-  font-weight: 700;
+  font-size: 16px;
+  line-height: 1.3;
+  font-weight: 800;
 }
 
 .summary-rule {
+  color: #e2e8f0;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.summary-parameters {
   color: #94a3b8;
   font-family: 'Inter', system-ui, sans-serif;
   font-size: 11px;
