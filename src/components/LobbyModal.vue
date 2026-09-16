@@ -3,7 +3,6 @@ import { ref, computed } from 'vue';
 import type { PlayerId } from '@/types/chess';
 import type { LobbyPlayer } from '@/types/network';
 import {
-  EFFORT_LEVELS,
   GRID_MODELS,
   MODELS,
   pieceTint,
@@ -40,12 +39,13 @@ const emit = defineEmits<{
 const pickedModel = ref<ModelId>('sage');
 const playColor = ref<'white' | 'black'>('white');
 const effort = ref<Effort>('medium');
+const difficultyLabels: Record<Effort, string> = { low: 'High', medium: 'Higher', high: 'Highest' };
 const variantSubtitle = computed(() => pickedModel.value === 'jester'
   ? 'Captures are compulsory. Start your turn with YOUR king attacked to WIN.'
   : 'Protect YOUR king from attack. Checkmate THEIR king first to WIN the game.');
 const gameTitle = computed(() => pickedModel.value === 'jester' ? 'UnCheck Chess' : 'Classic Chess');
 const gameParameters = computed(() =>
-  `You play as ${playColor.value} against ${MODELS[pickedModel.value].name}. ${EFFORT_LEVELS[effort.value].label} effort.`);
+  `You play as ${playColor.value} against ${MODELS[pickedModel.value].name}. ${difficultyLabels[effort.value]} difficulty.`);
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -151,20 +151,20 @@ const canJoin = computed(() => {
             </div>
 
             <div class="option-row effort-row">
-              <span class="option-rowhead">EFFORT</span>
+              <span class="option-rowhead">DIFFICULTY</span>
               <div class="effort-seg">
                 <button
-                  v-for="(lvl, key) in EFFORT_LEVELS"
+                  v-for="(label, key) in difficultyLabels"
                   :key="key"
                   :class="{ active: effort === key }"
-                  :aria-label="`${lvl.label} model effort`"
+                  :aria-label="`${label} difficulty`"
                   :aria-pressed="effort === key"
                   @click="effort = key as Effort"
                 >
                   <span class="effort-boxes" aria-hidden="true">
                     <span v-for="index in (key === 'low' ? 1 : key === 'medium' ? 2 : 3)" :key="index" class="effort-box"></span>
                   </span>
-                  <span>{{ lvl.label.toUpperCase() }}</span>
+                  <span>{{ label.toUpperCase() }}</span>
                 </button>
               </div>
             </div>
@@ -461,12 +461,8 @@ const canJoin = computed(() => {
 
 .setup-summary {
   display: flex;
-  min-height: 228px;
+  height: 294px;
   margin-top: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.045);
-  overflow: hidden;
 }
 
 .summary-image {
@@ -475,7 +471,6 @@ const canJoin = computed(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .summary-image svg {
@@ -486,20 +481,15 @@ const canJoin = computed(() => {
 .summary-copy {
   min-width: 0;
   flex: 1;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: repeat(3, minmax(0, 1fr));
 }
 
 .summary-section {
-  flex: 1;
   min-height: 0;
   display: flex;
   align-items: center;
   padding: 9px 16px;
-}
-
-.summary-section + .summary-section {
-  border-top: 1px solid rgba(255, 255, 255, 0.09);
 }
 
 .summary-title,
