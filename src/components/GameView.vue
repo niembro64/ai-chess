@@ -304,6 +304,12 @@ const opponentName = computed(() => {
 });
 const botPortrait = computed<BotIconName | null>(() => {
   if (botModelId.value === 'sage' || botModelId.value === 'jester') {
+    return botFace(botModelId.value, false) as BotIconName;
+  }
+  return null;
+});
+const statusBotPortrait = computed<BotIconName | null>(() => {
+  if (botModelId.value === 'sage' || botModelId.value === 'jester') {
     return botFace(botModelId.value, aiThinking.value) as BotIconName;
   }
   return null;
@@ -319,7 +325,7 @@ const uncheckVariant = computed(() =>
 );
 const activeRuleset = computed<Ruleset>(() => uncheckVariant.value ? 'uncheck-v1' : 'normal');
 const rulesetTitle = computed(() =>
-  (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1' ? 'UNCHECK CHESS' : 'CHESS',
+  (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1' ? 'UNCHECK CHESS' : 'CLASSIC CHESS',
 );
 const goalInstruction = computed(() =>
   (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1'
@@ -754,6 +760,7 @@ onUnmounted(() => {
           </div>
           <!-- Status bar -->
           <div class="status-bar">
+            <BotIcon v-if="playingVsBot && statusBotPortrait" class="status-bot-face" :name="statusBotPortrait" />
             <span class="status-text" :class="{
               'my-turn': isMyTurn && !isGameOver,
               'game-over': isGameOver,
@@ -1333,6 +1340,12 @@ onUnmounted(() => {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.status-bot-face {
+  width: 34px;
+  height: 34px;
+  flex: none;
 }
 
 @media (max-width: 900px) {

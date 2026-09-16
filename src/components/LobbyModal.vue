@@ -40,6 +40,9 @@ const emit = defineEmits<{
 const pickedModel = ref<ModelId>('sage');
 const playColor = ref<'white' | 'black'>('white');
 const effort = ref<Effort>('medium');
+const variantSubtitle = computed(() => pickedModel.value === 'jester'
+  ? 'Captures are compulsory. Start your turn with YOUR king attacked to win.'
+  : 'Protect YOUR king from attack. Checkmate THEIR king first to win the game.');
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -120,7 +123,7 @@ const canJoin = computed(() => {
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
         <h1 class="title">CHESS</h1>
-        <p class="subtitle">Choose classic Chess with Sage or UnCheck Chess with Jester.</p>
+        <p class="subtitle">{{ variantSubtitle }}</p>
 
         <div class="main-actions">
           <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>
@@ -147,17 +150,22 @@ const canJoin = computed(() => {
           <div class="setup">
             <div class="setup-title">Choose Your Game</div>
             <div class="model-table">
+              <span class="mt-corner" aria-hidden="true"></span>
+              <span class="mt-colhead m-sage" :class="{ on: pickedModel === 'sage' }">CLASSIC CHESS</span>
+              <span class="mt-colhead m-jester" :class="{ on: pickedModel === 'jester' }">UNCHECK CHESS</span>
+              <span class="mt-ground" aria-hidden="true"></span>
+              <span class="mt-rowhead" :class="[pickedModel === 'jester' ? 'm-jester' : 'm-sage', 'on']"><span>AGAINST</span></span>
               <button
                 v-for="m in GRID_MODELS"
                 :key="m"
                 class="mt-cell"
                 :class="[`m-${m}`, { active: pickedModel === m }]"
+                :aria-label="`${m === 'jester' ? 'UnCheck Chess' : 'Classic Chess'} against ${MODELS[m].name}`"
                 :aria-pressed="pickedModel === m"
                 @click="pickedModel = m"
               >
                 <BotIcon class="mt-face" :name="(m === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
-                <span class="mt-name">{{ m === 'jester' ? 'UnCheck Chess' : 'Chess' }}</span>
-                <span class="mt-game-bot">with {{ MODELS[m].name }}</span>
+                <span class="mt-name">{{ MODELS[m].name.toUpperCase() }}</span>
               </button>
             </div>
 
@@ -191,7 +199,7 @@ const canJoin = computed(() => {
             </div>
 
             <button class="lobby-btn start-btn" @click="startBot">
-              Play {{ pickedModel === 'jester' ? 'UnCheck Chess' : 'Chess' }} with {{ MODELS[pickedModel].name }}
+              Play {{ pickedModel === 'jester' ? 'UnCheck Chess' : 'Classic Chess' }} against {{ MODELS[pickedModel].name }}
             </button>
           </div>
         </div>
@@ -430,35 +438,31 @@ const canJoin = computed(() => {
   margin-top: 2px;
 }
 
-/* Model table. COLUMNS are the networks (by what they were trained to
-   do); ROWS are what we ask of them, labelled with 90deg text down the
-   left gutter. Everything outside the cells is transparent — no frame,
-   no separators, no header chrome — so only the SELECTED cell is drawn,
-   as a rounded island inside its own slot. That way all four of its
-   corners round the same way wherever it sits in the group. */
+/* The columns name the game; the single row names its trained opponent. */
 .model-table {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: 28px repeat(2, minmax(0, 1fr));
+  gap: 4px;
 }
 
-/* A single soft ground behind the CELLS only, so the four options read
-   as one control while the headers and gutter stay transparent. Sits
-   under the cells, which are later in the grid's paint order. */
+/* A shared ground sits behind the two cells; headers stay transparent. */
 .mt-ground {
   grid-column: 2 / span 2;
-  grid-row: 2 / span 2;
+  grid-row: 2;
   margin: -4px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.045);
 }
 
+.mt-colhead.m-sage { grid-column: 2; grid-row: 1; }
+.mt-colhead.m-jester { grid-column: 3; grid-row: 1; }
+
 .mt-colhead {
-  padding: 7px 4px;
+  padding: 7px 1px;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.2px;
   /* Unselected labels sit deliberately dim so the selected one reads as
      the answer to "which cell am I on". */
   color: #5b6678;
@@ -466,10 +470,13 @@ const canJoin = computed(() => {
 }
 
 .mt-corner {
-  /* Intentionally empty — the grid's top-left corner draws nothing. */
+  grid-column: 1;
+  grid-row: 1;
 }
 
 .mt-rowhead {
+  grid-column: 1;
+  grid-row: 2;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -480,7 +487,7 @@ const canJoin = computed(() => {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.6px;
   color: #5b6678;
@@ -504,19 +511,14 @@ const canJoin = computed(() => {
   transition: background 0.15s;
 }
 
-.mt-cell:first-of-type,
-.mt-rowhead + .mt-cell {
-  border-left: none;
-}
+.mt-cell.m-sage { grid-column: 2; grid-row: 2; }
+.mt-cell.m-jester { grid-column: 3; grid-row: 2; }
 
 .mt-cell:hover {
   background: rgba(255, 255, 255, 0.06);
 }
 
-/* The neighbouring cells' hairline borders are painted after this one
-   in DOM order, which clipped the selected ring on every cell except
-   the first. Lift the active cell into its own stacking level so the
-   full ring shows on all four. */
+/* Lift the selected cell so its ring stays visible against the shared ground. */
 .mt-cell.active {
   position: relative;
   z-index: 1;
@@ -539,8 +541,7 @@ const canJoin = computed(() => {
   --accent-bg: rgba(192, 132, 252, 0.16);
 }
 
-/* The axis labels light up for the selected cell, so the
-   "trained to X, asked to Y" reading is visible at a glance. */
+/* The selected variant and opponent labels light up together. */
 .mt-colhead.on,
 .mt-rowhead.on span {
   color: var(--accent-bright);
@@ -563,11 +564,6 @@ const canJoin = computed(() => {
 
 .mt-cell.active .mt-name {
   color: var(--accent);
-}
-
-.mt-game-bot {
-  font-size: 11px;
-  color: #94a3b8;
 }
 
 /* Toy is a different kind of thing (tiny teaching net), so it sits
