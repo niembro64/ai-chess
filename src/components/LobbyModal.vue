@@ -43,6 +43,8 @@ const effort = ref<Effort>('medium');
 const variantSubtitle = computed(() => pickedModel.value === 'jester'
   ? 'Captures are compulsory. Start your turn with YOUR king attacked to win.'
   : 'Protect YOUR king from attack. Checkmate THEIR king first to win the game.');
+const newGameSummary = computed(() =>
+  `${pickedModel.value === 'jester' ? 'UNCHECK CHESS' : 'CLASSIC CHESS'}: You play as ${playColor.value.toUpperCase()} against ${EFFORT_LEVELS[effort.value].label.toUpperCase()} EFFORT ${MODELS[pickedModel.value].name.toUpperCase()} BOT.`);
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -122,28 +124,7 @@ const canJoin = computed(() => {
     <div class="lobby-modal">
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
-        <h1 class="title">CHESS</h1>
-        <p class="subtitle">{{ variantSubtitle }}</p>
-
-        <div class="main-actions">
-          <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>
-
-          <div class="join-row">
-            <input
-              v-model="joinCode"
-              class="code-input"
-              type="text"
-              maxlength="4"
-              placeholder="CODE"
-              @keyup.enter="handleJoinSubmit"
-            />
-            <button
-              class="lobby-btn join-btn"
-              :disabled="!canJoin"
-              @click="handleJoinSubmit"
-            >Join</button>
-          </div>
-
+        <div class="setup-screen">
           <!-- ============ VS AI setup ============
                Weights are fetched lazily on start — only the model you
                actually play gets downloaded. -->
@@ -197,14 +178,43 @@ const canJoin = computed(() => {
                 @click="effort = key as Effort"
               >{{ lvl.label }}</button>
             </div>
-
-            <button class="lobby-btn start-btn" @click="startBot">
-              Play {{ pickedModel === 'jester' ? 'UnCheck Chess' : 'Classic Chess' }} against {{ MODELS[pickedModel].name }}
-            </button>
           </div>
-        </div>
 
-        <div v-if="error" class="error-message">{{ error }}</div>
+          <div class="setup-summary" :aria-label="`New game preview. ${newGameSummary} ${variantSubtitle}`">
+            <div class="summary-image">
+              <BotIcon :name="(pickedModel === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
+            </div>
+            <div class="summary-copy">
+              <span class="summary-label">NEW GAME PREVIEW</span>
+              <p class="summary-match">{{ newGameSummary }}</p>
+              <p class="summary-rule">{{ variantSubtitle }}</p>
+            </div>
+          </div>
+
+          <div class="setup-footer">
+            <details class="online-actions">
+              <summary class="online-label">PLAY ONLINE</summary>
+              <button class="lobby-btn host-btn" @click="handleHost">Host Game</button>
+              <div class="join-row">
+                <input
+                  v-model="joinCode"
+                  class="code-input"
+                  type="text"
+                  maxlength="4"
+                  placeholder="CODE"
+                  @keyup.enter="handleJoinSubmit"
+                />
+                <button
+                  class="lobby-btn join-btn"
+                  :disabled="!canJoin"
+                  @click="handleJoinSubmit"
+                >Join</button>
+              </div>
+            </details>
+            <button class="lobby-btn start-btn" @click="startBot">NEW GAME</button>
+          </div>
+          <div v-if="error" class="error-message">{{ error }}</div>
+        </div>
       </template>
 
       <!-- Connecting screen -->
@@ -419,6 +429,15 @@ const canJoin = computed(() => {
 
 /* --- VS AI setup ------------------------------------------------------ */
 
+.setup-screen {
+  width: min(360px, 100%);
+  min-height: min(650px, calc(92dvh - 68px));
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+
 .setup {
   width: 100%;
   display: flex;
@@ -427,6 +446,103 @@ const canJoin = computed(() => {
   padding-top: 4px;
   text-align: left;
 }
+
+.setup-summary {
+  display: flex;
+  min-height: 164px;
+  margin-top: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+  overflow: hidden;
+}
+
+.summary-image {
+  width: 92px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.summary-image svg {
+  width: 78px;
+  height: 78px;
+}
+
+.summary-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 15px 16px;
+}
+
+.summary-label {
+  color: #64748b;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.summary-match,
+.summary-rule {
+  margin: 0;
+}
+
+.summary-match {
+  color: #f1f5f9;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 700;
+}
+
+.summary-rule {
+  color: #94a3b8;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.setup-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 24px;
+}
+
+.online-actions {
+  text-align: center;
+}
+
+.online-actions[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.online-label {
+  color: #64748b;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-align: center;
+  cursor: pointer;
+  list-style: none;
+}
+
+.online-label::-webkit-details-marker { display: none; }
+
+.online-label::after { content: '  ▾'; }
+
+.online-actions[open] .online-label::after { content: '  ▴'; }
 
 .setup-title {
   font-family: 'Inter', system-ui, sans-serif;
