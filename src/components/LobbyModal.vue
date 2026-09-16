@@ -130,7 +130,6 @@ const canJoin = computed(() => {
                Weights are fetched lazily on start — only the model you
                actually play gets downloaded. -->
           <div class="setup">
-            <div class="setup-title">Choose Your Game</div>
             <div class="model-table">
               <span class="mt-corner" aria-hidden="true"></span>
               <span class="mt-colhead m-sage" :class="{ on: pickedModel === 'sage' }">CLASSIC CHESS</span>
@@ -151,33 +150,45 @@ const canJoin = computed(() => {
               </button>
             </div>
 
-            <div class="setup-title">You Play As</div>
-            <div class="color-row">
-              <button
-                v-for="c in (['white', 'black'] as const)"
-                :key="c"
-                class="color-cell"
-                :class="{ active: playColor === c }"
-                :aria-label="`Play as ${c}`"
-                @click="playColor = c"
-              >
-                <span
-                  class="king"
-                  :style="tintStyle(playColor === c ? null : pickedModel, c)"
+            <div class="option-row effort-row">
+              <span class="option-rowhead">EFFORT</span>
+              <div class="effort-seg">
+                <button
+                  v-for="(lvl, key) in EFFORT_LEVELS"
+                  :key="key"
+                  :class="{ active: effort === key }"
+                  :aria-label="`${lvl.label} model effort`"
+                  :aria-pressed="effort === key"
+                  @click="effort = key as Effort"
                 >
-                  <PieceIcon type="king" />
-                </span>
-              </button>
+                  <span class="effort-boxes" aria-hidden="true">
+                    <span v-for="index in (key === 'low' ? 1 : key === 'medium' ? 2 : 3)" :key="index" class="effort-box"></span>
+                  </span>
+                  <span>{{ lvl.label.toUpperCase() }}</span>
+                </button>
+              </div>
             </div>
 
-            <div class="setup-title">AI Model Effort</div>
-            <div class="effort-seg">
-              <button
-                v-for="(lvl, key) in EFFORT_LEVELS"
-                :key="key"
-                :class="{ active: effort === key }"
-                @click="effort = key as Effort"
-              >{{ lvl.label }}</button>
+            <div class="option-row color-row">
+              <span class="option-rowhead">YOU ARE</span>
+              <div class="color-options">
+                <button
+                  v-for="c in (['white', 'black'] as const)"
+                  :key="c"
+                  class="color-cell"
+                  :class="{ active: playColor === c }"
+                  :aria-label="`Play as ${c}`"
+                  :aria-pressed="playColor === c"
+                  @click="playColor = c"
+                >
+                  <span
+                    class="king"
+                    :style="tintStyle(playColor === c ? null : pickedModel, c)"
+                  >
+                    <PieceIcon type="king" />
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -186,9 +197,9 @@ const canJoin = computed(() => {
               <BotIcon :name="(pickedModel === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
             </div>
             <div class="summary-copy">
-              <strong class="summary-title">{{ gameTitle }}</strong>
-              <p class="summary-rule">{{ variantSubtitle }}</p>
-              <p class="summary-parameters">{{ gameParameters }}</p>
+              <div class="summary-section"><strong class="summary-title">{{ gameTitle.toUpperCase() }}</strong></div>
+              <div class="summary-section"><p class="summary-rule">{{ variantSubtitle }}</p></div>
+              <div class="summary-section"><p class="summary-parameters">{{ gameParameters }}</p></div>
             </div>
           </div>
 
@@ -450,7 +461,7 @@ const canJoin = computed(() => {
 
 .setup-summary {
   display: flex;
-  min-height: 164px;
+  min-height: 228px;
   margin-top: 24px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 14px;
@@ -477,9 +488,18 @@ const canJoin = computed(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 8px;
-  padding: 15px 16px;
+}
+
+.summary-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  padding: 9px 16px;
+}
+
+.summary-section + .summary-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
 }
 
 .summary-title,
@@ -491,9 +511,10 @@ const canJoin = computed(() => {
 .summary-title {
   color: #f1f5f9;
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 16px;
+  font-size: 19px;
   line-height: 1.3;
   font-weight: 800;
+  letter-spacing: 0.6px;
 }
 
 .summary-rule {
@@ -544,16 +565,6 @@ const canJoin = computed(() => {
 .online-label::after { content: '  ▾'; }
 
 .online-actions[open] .online-label::after { content: '  ▴'; }
-
-.setup-title {
-  font-family: 'Inter', system-ui, sans-serif;
-  font-size: 10px;
-  font-weight: 700;
-  color: #94a3b8;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  margin-top: 2px;
-}
 
 /* The columns name the game; the single row names its trained opponent. */
 .model-table {
@@ -723,6 +734,29 @@ const canJoin = computed(() => {
 /* You-play picker: each option previews the REAL piece colors the game
    will start with — your standard set beside the bot's tinted one. */
 .color-row {
+  margin-top: 4px;
+}
+
+.option-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 4px;
+}
+
+.option-rowhead {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  align-self: center;
+  justify-self: center;
+  color: #e2d29e;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+
+.color-options {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 4px;
@@ -760,7 +794,7 @@ const canJoin = computed(() => {
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
 }
 
-/* Effort segmented control. */
+/* One, two, or three plain boxes communicate the chosen effort. */
 .effort-seg {
   display: flex;
   gap: 4px;
@@ -771,7 +805,13 @@ const canJoin = computed(() => {
 
 .effort-seg button {
   flex: 1;
-  padding: 8px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 56px;
+  padding: 7px 4px;
   font-family: 'Inter', system-ui, sans-serif;
   font-size: 11.5px;
   font-weight: 600;
@@ -790,6 +830,14 @@ const canJoin = computed(() => {
   color: #5ae3d8;
   border-color: #5ae3d8;
   background: rgba(94, 234, 212, 0.12);
+}
+
+.effort-boxes { display: flex; gap: 4px; }
+.effort-box {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
 }
 
 .setup-explain {
