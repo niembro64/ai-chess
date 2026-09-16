@@ -122,7 +122,7 @@ const canJoin = computed(() => {
 
 <template>
   <div v-if="visible" class="lobby-overlay">
-    <div class="lobby-modal">
+    <div class="lobby-modal" :class="{ 'setup-modal': !isInLobby && !isConnecting }">
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
         <div class="setup-screen">
@@ -193,14 +193,12 @@ const canJoin = computed(() => {
           </div>
 
           <div class="setup-summary" :aria-label="`${gameTitle}. ${variantSubtitle} ${gameParameters}`">
-            <div class="summary-image">
+            <div class="summary-cell summary-image">
               <BotIcon :name="(pickedModel === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
             </div>
-            <div class="summary-copy">
-              <div class="summary-section"><strong class="summary-title">{{ gameTitle.toUpperCase() }}</strong></div>
-              <div class="summary-section"><p class="summary-rule">{{ variantSubtitle }}</p></div>
-              <div class="summary-section"><p class="summary-parameters">{{ gameParameters }}</p></div>
-            </div>
+            <div class="summary-cell summary-title-cell"><strong class="summary-title">{{ gameTitle.toUpperCase() }}</strong></div>
+            <div class="summary-cell summary-rule-cell"><p class="summary-rule">{{ variantSubtitle }}</p></div>
+            <div class="summary-cell summary-parameters-cell"><p class="summary-parameters">{{ gameParameters }}</p></div>
           </div>
 
           <div class="setup-footer">
@@ -333,6 +331,11 @@ const canJoin = computed(() => {
     0 24px 60px rgba(0, 0, 0, 0.5);
 }
 
+.lobby-modal.setup-modal {
+  box-sizing: border-box;
+  width: min(640px, 90dvw);
+}
+
 @media (max-width: 480px) {
   .lobby-modal {
     padding: 22px 16px;
@@ -460,37 +463,33 @@ const canJoin = computed(() => {
 }
 
 .setup-summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   height: 294px;
   margin-top: 24px;
 }
 
-.summary-image {
-  width: 92px;
-  flex: none;
+.summary-cell {
+  min-width: 0;
+  min-height: 0;
   display: flex;
   align-items: center;
+  padding: 10px 12px;
+}
+
+.summary-image {
   justify-content: center;
 }
 
 .summary-image svg {
-  width: 78px;
-  height: 78px;
+  width: 104px;
+  height: 104px;
 }
 
-.summary-copy {
-  min-width: 0;
-  flex: 1;
-  display: grid;
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-}
-
-.summary-section {
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  padding: 9px 16px;
-}
+.summary-title-cell { grid-column: 2; grid-row: 1; }
+.summary-rule-cell { grid-column: 1; grid-row: 2; }
+.summary-parameters-cell { grid-column: 2; grid-row: 2; }
 
 .summary-title,
 .summary-rule,
@@ -501,8 +500,8 @@ const canJoin = computed(() => {
 .summary-title {
   color: #f1f5f9;
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 19px;
-  line-height: 1.3;
+  font-size: 23px;
+  line-height: 1.2;
   font-weight: 800;
   letter-spacing: 0.6px;
 }
@@ -510,7 +509,7 @@ const canJoin = computed(() => {
 .summary-rule {
   color: #e2e8f0;
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
