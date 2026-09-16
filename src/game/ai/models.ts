@@ -11,9 +11,9 @@ export const MODELS: Record<ModelId, {
   name: string;
   file: string;
   sims: number;
-  // What the net was TRAINED to want. The lobby's GOAL INVERTED mode
-  // pursues the opposite at play time (misère search flip) — see
-  // AIPlayerOptions.
+  // The model's value convention; Jester's checkpoint uses the UnCheck
+  // turn-boundary objective. Older goal-inversion internals remain for
+  // compatibility, but the lobby offers trained pairings only.
   trainedGoal: 'win' | 'lose';
 }> = {
   sage: {
@@ -50,11 +50,8 @@ export const MODELS: Record<ModelId, {
 //   MEDIUM  100 simulations
 //   HIGH    the model's full budget (400 for Sage and Jester)
 //
-// At LOW the move is the EXTREME of the policy head (highest
-// probability, or lowest when the bot is asked for the opposite of its
-// trained goal). At MEDIUM and HIGH the search decides, and for an
-// inverted goal the search is itself inverted, so its top choice is
-// the best *planned* loss rather than merely the worst-rated move.
+// At LOW the model chooses its highest-ranked legal move. At MEDIUM
+// and HIGH its search uses the game and value convention it trained on.
 
 export type Effort = 'low' | 'medium' | 'high';
 
@@ -102,23 +99,20 @@ export function pieceTint(model: ModelId | null, color: 'white' | 'black'): Piec
   return STANDARD_TINTS[color];
 }
 
-// --- The two rulesets, and the setup grid ------------------------------
+// --- The two rulesets ---------------------------------------------------
 //
-// The app plays chess two ways, and the grid's ROW picks which one the
-// game runs under — for BOTH players, not just the bot:
+// The app plays chess two ways, each paired with its trained bot:
 //
 //   'win'   NORMAL chess.   You win by checkmating your opponent.
 //   'lose'  UNCHECK chess. You win when your turn begins with your king
 //           attacked; captures are compulsory and kings may enter attack.
 //
-// COLUMNS are the networks, by the variant their weights were TRAINED
-// on — Sage normal, Jester's legacy loss-seeking protocol. Off its own diagonal a model is
-// playing a game it was never trained for; it copes by inverting its
-// search, which is not the same as "pick the worst-looking move".
+// Sage plays Chess and Jester plays UnCheck Chess in the lobby.
 
 export type Goal = 'win' | 'lose';
 
 export const GRID_MODELS: readonly ModelId[] = ['sage', 'jester'];
+// Retained for older callers that persist the former cross-pairing flag.
 export const GRID_ASKED: readonly Goal[] = ['win', 'lose'];
 
 /** Display name of a variant. 'win' is ordinary chess. */
@@ -148,12 +142,10 @@ export function isUncheckVariant(model: ModelId, goalInverted: boolean): boolean
 /** @deprecated Use isUncheckVariant. */
 export const isInvertedVariant = isUncheckVariant;
 
-// Face mood: each bot is content doing what it was trained for and
-// strained when asked for the opposite.
-export function botFace(model: ModelId, asked: Goal): string {
-  const natural = !isInverted(model, asked);
-  if (model === 'jester') return natural ? 'jester-gleeful' : 'jester-straining';
-  return natural ? 'sage-calm' : 'sage-flustered';
+// The sweaty variant appears only during active search.
+export function botFace(model: ModelId, thinking = false): string {
+  if (model === 'jester') return thinking ? 'jester-straining' : 'jester-gleeful';
+  return thinking ? 'sage-flustered' : 'sage-calm';
 }
 
 export async function fetchModelJson(id: ModelId): Promise<unknown> {

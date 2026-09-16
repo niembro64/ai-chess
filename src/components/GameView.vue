@@ -13,6 +13,7 @@ import { AIPlayer } from '@/game/ai/AIPlayer';
 import { ToyPlayer, type ToyThought } from '@/game/ai/ToyPlayer';
 import {
   MODELS,
+  botFace,
   effortSims,
   fetchModelJson,
   isUncheckVariant,
@@ -21,6 +22,8 @@ import {
 } from '@/game/ai/models';
 import type { SerializedWeights } from '@/game/ai/ChessNet';
 import LobbyModal from './LobbyModal.vue';
+import BotIcon from './BotIcon.vue';
+import type { BotIconName } from './botIcons';
 import ChessBoard from './ChessBoard.vue';
 import { defineAsyncComponent } from 'vue';
 
@@ -299,6 +302,12 @@ const opponentName = computed(() => {
   if (networkRole.value) return 'Opponent';
   return 'Player 2';
 });
+const botPortrait = computed<BotIconName | null>(() => {
+  if (botModelId.value === 'sage' || botModelId.value === 'jester') {
+    return botFace(botModelId.value, aiThinking.value) as BotIconName;
+  }
+  return null;
+});
 const localName = computed(() => 'You');
 // Which VARIANT this game is being played under. Inverted means the
 // Uncheck selects the turn-boundary attacked-king objective; the
@@ -310,7 +319,7 @@ const uncheckVariant = computed(() =>
 );
 const activeRuleset = computed<Ruleset>(() => uncheckVariant.value ? 'uncheck-v1' : 'normal');
 const rulesetTitle = computed(() =>
-  (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1' ? 'UNCHECK CHESS' : 'NORMAL CHESS',
+  (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1' ? 'UNCHECK CHESS' : 'CHESS',
 );
 const goalInstruction = computed(() =>
   (gameState.value.ruleset ?? activeRuleset.value) === 'uncheck-v1'
@@ -778,14 +787,13 @@ onUnmounted(() => {
           <!-- Opponent chip: shown above the board, since the board is
                flipped to put the local player on the bottom edge. -->
           <div class="player-chip" :class="{ 'is-active': isOpponentTurn && !isGameOver }">
+            <BotIcon v-if="playingVsBot && botPortrait" class="chip-bot-face" :name="botPortrait" />
             <span class="chip-swatch" :class="opponentColor"></span>
             <span class="chip-name">{{ opponentName }}</span>
             <span class="chip-color">{{ opponentColor === 'white' ? 'White' : 'Black' }}</span>
-            <!-- Wave-dot "thinking" indicator on the opponent chip when
-                 it's their turn — separate semantic from the local chip's
-                 turn-dot (which means "your move, go ahead"). -->
+            <!-- Thinking indicator appears only during an active bot search. -->
             <span
-              v-if="isOpponentTurn && !isGameOver"
+              v-if="aiThinking && !isGameOver"
               class="thinking-dots"
               role="status"
               aria-label="opponent is thinking"
@@ -1456,6 +1464,12 @@ onUnmounted(() => {
   border-radius: 50%;
   flex-shrink: 0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.chip-bot-face {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
 }
 
 .chip-swatch.white {

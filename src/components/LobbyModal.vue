@@ -4,15 +4,10 @@ import type { PlayerId } from '@/types/chess';
 import type { LobbyPlayer } from '@/types/network';
 import {
   EFFORT_LEVELS,
-  GRID_ASKED,
   GRID_MODELS,
   MODELS,
-  botFace,
-  goalLabel,
-  isInverted,
   pieceTint,
   type Effort,
-  type Goal,
   type ModelId,
 } from '@/game/ai/models';
 import BotIcon from './BotIcon.vue';
@@ -41,24 +36,10 @@ const emit = defineEmits<{
   }): void;
 }>();
 
-// --- AI setup ---------------------------------------------------------
-//
-// The model grid crosses MODEL × VARIANT. Columns are the networks by
-// the variant their weights were trained on (Sage normal, Jester
-// Uncheck); rows are the ruleset this game will be played under, by
-// BOTH sides — normal chess (checkmate your opponent) or inverted
-// Uncheck Chess (begin your turn with your king attacked; captures required).
-// Off its diagonal a model plays a variant it was never trained for,
-// which it handles by inverting its search, not by picking bad moves.
-// Toy sits below as its own option.
-
-// Grid selection: which network, and what we ask of it.
+// Each ruleset has one opponent trained for it.
 const pickedModel = ref<ModelId>('sage');
-const askedGoal = ref<Goal>('win');
 const playColor = ref<'white' | 'black'>('white');
 const effort = ref<Effort>('medium');
-
-const goalInverted = computed(() => isInverted(pickedModel.value, askedGoal.value));
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -69,7 +50,7 @@ function tintStyle(model: ModelId | null, color: 'white' | 'black'): Record<stri
 
 function startBot(): void {
   emit('playBot', pickedModel.value, {
-    goalInverted: goalInverted.value,
+    goalInverted: false,
     effort: effort.value,
     playColor: playColor.value,
   });
@@ -138,8 +119,8 @@ const canJoin = computed(() => {
     <div class="lobby-modal">
       <!-- Initial screen -->
       <template v-if="!isInLobby && !isConnecting">
-        <h1 class="title">UNCHECK CHESS</h1>
-        <p class="subtitle">Get your king attacked. If it is still attacked when your turn begins, you win.</p>
+        <h1 class="title">CHESS</h1>
+        <p class="subtitle">Choose classic Chess with Sage or UnCheck Chess with Jester.</p>
 
         <div class="main-actions">
           <button class="lobby-btn host-btn" @click="handleHost">Play Online</button>
@@ -164,47 +145,21 @@ const canJoin = computed(() => {
                Weights are fetched lazily on start — only the model you
                actually play gets downloaded. -->
           <div class="setup">
-            <div class="setup-title">AI Model</div>
+            <div class="setup-title">Choose Your Game</div>
             <div class="model-table">
-              <div class="mt-corner"></div>
-              <div class="mt-ground" aria-hidden="true"></div>
-              <div
+              <button
                 v-for="m in GRID_MODELS"
-                :key="`h-${m}`"
-                class="mt-colhead"
-                :class="[`m-${m}`, { on: pickedModel === m }]"
+                :key="m"
+                class="mt-cell"
+                :class="[`m-${m}`, { active: pickedModel === m }]"
+                :aria-pressed="pickedModel === m"
+                @click="pickedModel = m"
               >
-                TRAINED ON {{ goalLabel(MODELS[m].trainedGoal) }}
-              </div>
-              <template v-for="asked in GRID_ASKED" :key="`r-${asked}`">
-                <div
-                  class="mt-rowhead"
-                  :class="[`m-${pickedModel}`, { on: askedGoal === asked }]"
-                ><span>PLAY {{ goalLabel(asked) }}</span></div>
-                <button
-                  v-for="m in GRID_MODELS"
-                  :key="`${m}-${asked}`"
-                  class="mt-cell"
-                  :class="[
-                    `m-${m}`,
-                    { active: pickedModel === m && askedGoal === asked },
-                  ]"
-                  @click="pickedModel = m; askedGoal = asked"
-                >
-                  <BotIcon class="mt-face" :name="botFace(m, asked) as BotIconName" />
-                  <span class="mt-name">{{ MODELS[m].name }}</span>
-                </button>
-              </template>
+                <BotIcon class="mt-face" :name="(m === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
+                <span class="mt-name">{{ m === 'jester' ? 'UnCheck Chess' : 'Chess' }}</span>
+                <span class="mt-game-bot">with {{ MODELS[m].name }}</span>
+              </button>
             </div>
-            <button
-              class="mt-toy"
-              :class="{ active: pickedModel === 'toy' }"
-              @click="pickedModel = 'toy'; askedGoal = 'win'"
-            >
-              <BotIcon class="mt-toy-face" name="toy" />
-              <span class="mt-name">{{ MODELS.toy.name }}</span>
-              <span class="mt-toy-sub">tiny net · watch it think</span>
-            </button>
 
             <div class="setup-title">You Play As</div>
             <div class="color-row">
@@ -236,7 +191,7 @@ const canJoin = computed(() => {
             </div>
 
             <button class="lobby-btn start-btn" @click="startBot">
-              Play {{ MODELS[pickedModel].name }}
+              Play {{ pickedModel === 'jester' ? 'UnCheck Chess' : 'Chess' }} with {{ MODELS[pickedModel].name }}
             </button>
           </div>
         </div>
@@ -397,7 +352,7 @@ const canJoin = computed(() => {
   flex-direction: column;
   gap: 10px;
   align-items: stretch;
-  width: 220px;
+  width: min(300px, 100%);
   margin: 0 auto 8px;
 }
 
@@ -483,9 +438,8 @@ const canJoin = computed(() => {
    corners round the same way wherever it sits in the group. */
 .model-table {
   display: grid;
-  grid-template-columns: 24px 1fr 1fr;
-  grid-template-rows: auto 1fr 1fr;
-  gap: 4px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 /* A single soft ground behind the CELLS only, so the four options read
@@ -539,11 +493,12 @@ const canJoin = computed(() => {
   align-items: center;
   gap: 2px;
   padding: 9px 4px 8px;
-  border: none;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
   /* Hairlines between cells keep the group reading as one control. */
   border-left: 1px solid rgba(255, 255, 255, 0.09);
   border-top: 1px solid rgba(255, 255, 255, 0.09);
-  background: transparent;
+  background: rgba(255, 255, 255, 0.045);
   color: #e2e8f0;
   cursor: pointer;
   transition: background 0.15s;
@@ -608,6 +563,11 @@ const canJoin = computed(() => {
 
 .mt-cell.active .mt-name {
   color: var(--accent);
+}
+
+.mt-game-bot {
+  font-size: 11px;
+  color: #94a3b8;
 }
 
 /* Toy is a different kind of thing (tiny teaching net), so it sits

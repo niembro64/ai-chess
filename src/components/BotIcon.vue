@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// One cartoon bot portrait. See botIcons.ts for the artwork and why
-// each bot has two moods (model × goal).
+// One cartoon bot portrait. Regular faces identify bots; sweaty faces
+// appear only while that bot is actively searching.
 import { BOT_ICONS, type BotIconName } from './botIcons';
 
 defineProps<{ name: BotIconName }>();

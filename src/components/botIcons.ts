@@ -1,13 +1,11 @@
-// Cartoon bot portraits for the lobby's model grid.
+// Cartoon bot portraits for the lobby and the opponent chip.
 //
 // Inline SVG bodies (no <svg> wrapper — BotIcon.vue supplies it with a
 // 0 0 64 64 viewBox), same pattern as pieceIcons.ts. Each bot has TWO
-// moods, because the grid crosses model × goal:
+// moods: the regular face for play and a sweaty face while thinking:
 //
-//   sage    — calm when asked to win (its nature), flustered when
-//             asked to lose
-//   jester  — gleeful when asked to lose (its nature), straining when
-//             asked to win
+//   sage    — calm normally, flustered during search
+//   jester  — gleeful normally, straining during search
 //
 // Palettes match the piece tints in models.ts: Sage green, Jester
 // purple, Toy teal.
