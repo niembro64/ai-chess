@@ -41,11 +41,9 @@ const playColor = ref<'white' | 'black'>('white');
 const effort = ref<Effort>('medium');
 const difficultyLabels: Record<Effort, string> = { low: 'High', medium: 'Higher', high: 'Highest' };
 const variantSubtitle = computed(() => pickedModel.value === 'jester'
-  ? 'Captures are compulsory. Start your turn with YOUR king attacked to WIN.'
-  : 'Protect YOUR king from attack. Checkmate THEIR king first to WIN the game.');
+  ? 'Captures are compulsory. YOUR king may enter attack. If it is still attacked when YOUR next turn begins, you WIN.'
+  : 'Keep YOUR king safe. Checkmate THEIR king to WIN.');
 const gameTitle = computed(() => pickedModel.value === 'jester' ? 'UnCheck Chess' : 'Classic Chess');
-const gameParameters = computed(() =>
-  `You play as ${playColor.value} against ${MODELS[pickedModel.value].name}. ${difficultyLabels[effort.value]} difficulty.`);
 
 // The previews show the exact piece colors the game will start with:
 // your standard set, and the bot's tinted set in the opposite color.
@@ -192,13 +190,12 @@ const canJoin = computed(() => {
             </div>
           </div>
 
-          <div class="setup-summary" :aria-label="`${gameTitle}. ${variantSubtitle} ${gameParameters}`">
+          <div class="setup-summary" :aria-label="`${gameTitle}. ${variantSubtitle}`">
             <div class="summary-cell summary-image">
               <BotIcon :name="(pickedModel === 'jester' ? 'jester-gleeful' : 'sage-calm') as BotIconName" />
             </div>
             <div class="summary-cell summary-title-cell"><strong class="summary-title">{{ gameTitle.toUpperCase() }}</strong></div>
             <div class="summary-cell summary-rule-cell"><p class="summary-rule">{{ variantSubtitle }}</p></div>
-            <div class="summary-cell summary-parameters-cell"><p class="summary-parameters">{{ gameParameters }}</p></div>
           </div>
 
           <div class="setup-footer">
@@ -488,12 +485,10 @@ const canJoin = computed(() => {
 }
 
 .summary-title-cell { grid-column: 2; grid-row: 1; }
-.summary-rule-cell { grid-column: 1; grid-row: 2; }
-.summary-parameters-cell { grid-column: 2; grid-row: 2; }
+.summary-rule-cell { grid-column: 1 / span 2; grid-row: 2; }
 
 .summary-title,
-.summary-rule,
-.summary-parameters {
+.summary-rule {
   margin: 0;
 }
 
@@ -509,14 +504,7 @@ const canJoin = computed(() => {
 .summary-rule {
   color: #e2e8f0;
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.summary-parameters {
-  color: #94a3b8;
-  font-family: 'Inter', system-ui, sans-serif;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
